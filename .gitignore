@@ -1,0 +1,14 @@
+node_modules/
+.next/
+out/
+build/
+.env
+.env.local
+.env.production
+.env.production.local
+.bbt-storage/
+.server-backups/
+.server-runtime/
+.DS_Store
+*.log
+.vscode/settings.json

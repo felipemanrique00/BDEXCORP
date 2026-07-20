@@ -1,0 +1,42 @@
+import {
+  techAccessCompany,
+  techCancelReservation,
+  techCancelTicket,
+  techCheckChurning,
+  techCompanies,
+  techConsultOS,
+  techConsultReservation,
+  techCreateQuote,
+  techCreateReservation,
+  techFareAir,
+  techHealth,
+  techIssueReservation,
+  techSearchCities,
+  techSimpleGet,
+} from '@/lib/integrations/tech/tech-adapter'
+import { queryTechEmissions } from '@/lib/integrations/tech/tech-emissions'
+
+export const integrationRegistry = {
+  primaryTravelProvider: 'tech-ttravel',
+  tech: {
+    health: techHealth,
+    companies: techCompanies,
+    accessCompany: techAccessCompany,
+    cities: techSearchCities,
+    quote: techCreateQuote,
+    fareAir: techFareAir,
+    reserve: techCreateReservation,
+    consultOS: techConsultOS,
+    consultReservation: techConsultReservation,
+    issue: techIssueReservation,
+    cancel: techCancelReservation,
+    cancelTicket: techCancelTicket,
+    policies: (companyId?: string | number | null) => techSimpleGet('/PoliticasRestricoes', 'policies', companyId),
+    costCenters: (companyId?: string | number | null) => techSimpleGet('/RetornaCentroCustoEmpresa', 'cost-centers', companyId),
+    motives: (companyId?: string | number | null) => techSimpleGet('/RetornaMotivosJustificativas', 'motives', companyId),
+    additionalFields: (companyId?: string | number | null) => techSimpleGet('/RetornaCamposAdicionais', 'additional-fields', companyId),
+    reusableTickets: (companyId?: string | number | null) => techSimpleGet('/BilhetesReutilizacao', 'reusable-tickets', companyId),
+    churning: techCheckChurning,
+    emissions: queryTechEmissions,
+  },
+}

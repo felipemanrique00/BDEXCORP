@@ -1,0 +1,990 @@
+'use client'
+import { todayISODate } from '@/lib/date'
+
+import Link from 'next/link'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import {
+  AlertTriangle,
+  Bot,
+  Building2,
+  CalendarCheck,
+  Car,
+  CheckCircle2,
+  ClipboardList,
+  ExternalLink,
+  Hotel,
+  Package,
+  Plane,
+  RefreshCw,
+  Send,
+  Settings,
+} from 'lucide-react'
+import { toast } from 'sonner'
+
+import { useStore } from '@/lib/store'
+import { getCurrentUser } from '@/lib/auth'
+import {
+  addAtendimento,
+  getAllAtendimentos,
+  getAtendimentoById,
+  getAtendimentoBySerialOS,
+  updateAtendimento,
+} from '@/lib/atendimentos-storage'
+import { encontrarFuncionarioPorCodigo } from '@/lib/funcionario-identidade'
+import {
+  addSupplierReservation,
+  capabilityLabel,
+  getSupplierLogs,
+  getSupplierReservations,
+  getSuppliersByService,
+  prepararAcaoFornecedor,
+  selectSuppliersForService,
+  serviceLabel,
+  type SupplierActionLog,
+  type SupplierCapability,
+  type SupplierIntegration,
+  type SupplierReservation,
+  type SupplierReservationStatus,
+  type SupplierService,
+} from '@/lib/supplier-integrations'
+import type { Atendimento, Funcionario, Prioridade, TipoServico } from '@/types'
+
+type FormState = {
+  serial_os: string
+  service: SupplierService
+  action: SupplierCapability
+  empresa_id: string
+  funcionario_codigo: string
+  funcionario_id: string
+  viajante_nome: string
+  solicitante_nome: string
+  origem: string
+  destino: string
+  item_nome: string
+  data_inicio: string
+  data_fim: string
+  centro_custo: string
+  valor_estimado: string
+  prioridade: Prioridade
+  observacoes: string
+}
+
+const SERVICES: Array<{ value: SupplierService; label: string; icon: any; hint: string }> = [
+  { value: 'aereo', label: 'Aéreo', icon: Plane, hint: 'Tech: LATAM, GOLGWS, AZUL, Amadeus, Sabre' },
+  { value: 'hotelaria', label: 'Hotelaria', icon: Hotel, hint: 'Tech: rede hoteleira habilitada na conta' },
+  { value: 'locacao', label: 'Locação', icon: Car, hint: 'Tech: locadoras habilitadas na conta' },
+  { value: 'pacotes', label: 'Pacotes', icon: Package, hint: 'Pedidos/OS e operadoras pela Tech' },
+  { value: 'lazer', label: 'Lazer', icon: Package, hint: 'Fluxo assistido e fornecedores habilitados' },
+  { value: 'transfer', label: 'Transfer', icon: Car, hint: 'Pedidos/OS e fornecedores habilitados' },
+  { value: 'seguro', label: 'Seguro', icon: CheckCircle2, hint: 'Pedidos/OS e fornecedores habilitados' },
+]
+
+const ACTIONS: SupplierCapability[] = ['cotacao', 'reserva', 'emissao', 'status', 'voucher', 'cancelamento', 'remarcacao']
+
+const INITIAL_FORM: FormState = {
+  serial_os: '',
+  service: 'hotelaria',
+  action: 'cotacao',
+  empresa_id: '',
+  funcionario_codigo: '',
+  funcionario_id: '',
+  viajante_nome: '',
+  solicitante_nome: '',
+  origem: '',
+  destino: '',
+  item_nome: '',
+  data_inicio: '',
+  data_fim: '',
+  centro_custo: '',
+  valor_estimado: '',
+  prioridade: 'media',
+  observacoes: '',
+}
+
+export default function ReservasPage() {
+  const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const { empresas, funcionarios } = useStore()
+  const [form, setForm] = useState<FormState>(INITIAL_FORM)
+  const [selectedSupplierIds, setSelectedSupplierIds] = useState<string[]>([])
+  const [reload, setReload] = useState(0)
+  const [busy, setBusy] = useState(false)
+  const [demandaVinculadaId, setDemandaVinculadaId] = useState('')
+  const initialDemandAppliedRef = useRef(false)
+
+  const empresa = useMemo(
+    () => empresas.find((item) => item.id === form.empresa_id),
+    [empresas, form.empresa_id],
+  )
+
+  const funcionariosEmpresa = useMemo(
+    () => funcionarios.filter((item) => !form.empresa_id || item.company_id === form.empresa_id),
+    [funcionarios, form.empresa_id],
+  )
+
+  const suppliers = useMemo(
+    () => {
+      void reload
+      return getSuppliersByService(form.service)
+    },
+    [form.service, reload],
+  )
+
+  const reservas = useMemo(
+    () => {
+      void reload
+      return getSupplierReservations(120)
+    },
+    [reload],
+  )
+
+  const logs = useMemo(
+    () => {
+      void reload
+      return getSupplierLogs(80)
+    },
+    [reload],
+  )
+
+  const demandasRecentes = useMemo(() => {
+    void reload
+    return getAllAtendimentos()
+      .filter((item) => !['finalizado', 'cancelado'].includes(item.status))
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))
+      .slice(0, 50)
+  }, [reload])
+
+  const demandaVinculada = useMemo(() => {
+    void reload
+    return demandaVinculadaId ? getAtendimentoById(demandaVinculadaId) || null : null
+  }, [demandaVinculadaId, reload])
+
+  useEffect(() => {
+    const recomendados = selectSuppliersForService(form.service, 4).map((supplier) => supplier.id)
+    setSelectedSupplierIds(recomendados)
+  }, [form.service])
+
+  useEffect(() => {
+    if (initialDemandAppliedRef.current || typeof window === 'undefined') return
+    initialDemandAppliedRef.current = true
+
+    const params = new URLSearchParams(window.location.search)
+    const atendimentoId = params.get('atendimento')?.trim() || ''
+    const serial = params.get('os')?.trim() || ''
+    if (!atendimentoId && !serial) return
+
+    const demanda = atendimentoId
+      ? getAtendimentoById(atendimentoId)
+      : getAtendimentoBySerialOS(serial)
+    if (!demanda) {
+      toast.error('Não encontrei a demanda informada no acesso direto.')
+      return
+    }
+
+    setForm((current) => formFromAtendimento(current, demanda, funcionarios, serial))
+    setDemandaVinculadaId(demanda.id)
+    toast.success(`Demanda ${demanda.serial_os || serial} pronta para cotação/reserva.`)
+  }, [funcionarios])
+
+  function refresh() {
+    setReload((value) => value + 1)
+  }
+
+  function selecionarFuncionario(id: string) {
+    const funcionario = funcionarios.find((item) => item.id === id)
+    setForm((current) => ({
+      ...current,
+      funcionario_id: id,
+      funcionario_codigo: funcionario?.codigo_identificacao || '',
+      viajante_nome: funcionario?.nome || current.viajante_nome,
+      centro_custo: funcionario?.centro_custo || current.centro_custo,
+    }))
+  }
+
+  function selecionarFuncionarioPorCodigo(codigo: string) {
+    const funcionario = encontrarFuncionarioPorCodigo(funcionarios, codigo, form.empresa_id || undefined)
+    setForm((current) => ({
+      ...current,
+      funcionario_codigo: codigo,
+      funcionario_id: funcionario?.id || '',
+      viajante_nome: funcionario?.nome || current.viajante_nome,
+      centro_custo: funcionario?.centro_custo || current.centro_custo,
+    }))
+  }
+
+  function aplicarDemandaPorSerial(serialInformado?: string) {
+    const serial = String(serialInformado ?? form.serial_os).trim()
+    if (!serial) {
+      toast.error('Informe o Serial/OS da demanda.')
+      return
+    }
+
+    const demanda = getAtendimentoBySerialOS(serial)
+    if (!demanda) {
+      toast.error('Não encontrei demanda com esse Serial/OS.')
+      return
+    }
+
+    setForm((current) => formFromAtendimento(current, demanda, funcionarios, serial))
+    setDemandaVinculadaId(demanda.id)
+    toast.success(`Demanda ${demanda.serial_os || serial} vinculada para cotação/reserva.`)
+  }
+
+  function selecionarDemandaRecente(atendimentoId: string) {
+    if (!atendimentoId) return
+    const demanda = getAtendimentoById(atendimentoId)
+    if (!demanda) {
+      toast.error('A demanda selecionada não está mais disponível.')
+      refresh()
+      return
+    }
+    if (!demanda.serial_os) {
+      toast.error('A demanda selecionada ainda não possui Serial/OS.')
+      return
+    }
+    aplicarDemandaPorSerial(demanda.serial_os)
+  }
+
+  function toggleSupplier(id: string) {
+    setSelectedSupplierIds((current) => (
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    ))
+  }
+
+  function portalUrl(supplier: SupplierIntegration): string | null {
+    return supplier.portal_url || null
+  }
+
+  function resetForm() {
+    setDemandaVinculadaId('')
+    setForm((current) => ({
+      ...INITIAL_FORM,
+      service: current.service,
+      action: current.action,
+      empresa_id: current.empresa_id,
+      solicitante_nome: current.solicitante_nome,
+    }))
+  }
+
+  async function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (busy) return
+
+    if (!form.empresa_id) {
+      toast.error('Selecione a empresa antes de preparar a reserva.')
+      return
+    }
+    if (!form.viajante_nome.trim()) {
+      toast.error('Informe o viajante/hóspede/passageiro.')
+      return
+    }
+    if (!form.destino.trim() && !form.item_nome.trim()) {
+      toast.error('Informe destino, cidade, hotel, locadora ou produto.')
+      return
+    }
+
+    setBusy(true)
+    try {
+      const funcionario =
+        funcionarios.find((item) => item.id === form.funcionario_id) ||
+        encontrarFuncionarioPorCodigo(funcionarios, form.funcionario_codigo, form.empresa_id)
+      const ids = selectedSupplierIds.length
+        ? selectedSupplierIds
+        : selectSuppliersForService(form.service, 4).map((supplier) => supplier.id)
+
+      const actionLogs = prepararAcaoFornecedor({
+        service: form.service,
+        action: form.action,
+        supplier_ids: ids,
+        origem: form.origem,
+        destino: form.destino,
+        data_inicio: form.data_inicio,
+        data_fim: form.data_fim,
+        viajante: form.viajante_nome,
+        empresa_nome: empresa?.nome,
+        payload: {
+          item_nome: form.item_nome,
+          centro_custo: form.centro_custo,
+          solicitante_nome: form.solicitante_nome,
+          observacoes: form.observacoes,
+        },
+      })
+
+      const tipoServico = mapTipoServico(form.service)
+      const demandaVinculada = form.serial_os.trim() ? getAtendimentoBySerialOS(form.serial_os) : null
+      const atendimentoPayload: Omit<Atendimento, 'id' | 'created_at' | 'updated_at'> = {
+        empresa_id: form.empresa_id,
+        funcionario_id: funcionario?.id || null,
+        passageiro_nome: form.viajante_nome.trim(),
+        tipo_servico: tipoServico,
+        valor_cotacao: money(form.valor_estimado),
+        valor_custo: money(form.valor_estimado),
+        valor_venda: money(form.valor_estimado),
+        agente_user_id: user?.id || 'system',
+        status: 'pendente',
+        prioridade: form.prioridade,
+        origem: 'Outro',
+        observacoes: [
+          `Preparado em Reservas e cotações por ${user?.name || 'Sistema'}.`,
+          `Ação: ${capabilityLabel(form.action)} | Serviço: ${serviceLabel(form.service)}.`,
+          form.observacoes,
+        ].filter(Boolean).join('\n\n'),
+        data_atendimento: today(),
+        centro_custo: form.centro_custo || funcionario?.centro_custo || empresa?.centro_custo_padrao,
+        solicitante_nome: form.solicitante_nome || undefined,
+        origem_emissao: 'manual',
+        detalhes_aereo: tipoServico === 'Aéreo' ? {
+          origem: form.origem || undefined,
+          destino: form.destino || undefined,
+          data_ida: form.data_inicio || undefined,
+          data_volta: form.data_fim || undefined,
+        } : undefined,
+        detalhes_hotel: tipoServico === 'Hotel' ? {
+          hotel_nome: form.item_nome || undefined,
+          cidade: form.destino || undefined,
+          data_checkin: form.data_inicio || undefined,
+          data_checkout: form.data_fim || undefined,
+          num_hospedes: 1,
+          tarifa_unitaria: money(form.valor_estimado) || undefined,
+        } : undefined,
+        detalhes_carro: tipoServico === 'Carro' ? {
+          locadora: form.item_nome || undefined,
+          cidade_retirada: form.origem || form.destino || undefined,
+          data_retirada: form.data_inicio || undefined,
+          data_devolucao: form.data_fim || undefined,
+        } : undefined,
+        detalhes_pacote: tipoServico === 'Pacote' ? {
+          destino: form.destino || undefined,
+          data_ida: form.data_inicio || undefined,
+          data_volta: form.data_fim || undefined,
+          descricao: form.item_nome || undefined,
+        } : undefined,
+      }
+
+      let atendimento: Atendimento | null = null
+      if (demandaVinculada) {
+        const ok = updateAtendimento(demandaVinculada.id, {
+          ...atendimentoPayload,
+          status: form.action === 'emissao' || form.action === 'reserva' ? 'em_andamento' : demandaVinculada.status,
+          observacoes_internas: [
+            demandaVinculada.observacoes_internas,
+            `Vinculada em Reservas e cotações pelo Serial/OS ${demandaVinculada.serial_os}.`,
+          ].filter(Boolean).join('\n'),
+        })
+        if (!ok) {
+          toast.error('Não consegui atualizar a demanda vinculada.')
+          return
+        }
+        atendimento = {
+          ...demandaVinculada,
+          ...atendimentoPayload,
+          status: form.action === 'emissao' || form.action === 'reserva' ? 'em_andamento' : demandaVinculada.status,
+          updated_at: new Date().toISOString(),
+        }
+      } else {
+        atendimento = addAtendimento(atendimentoPayload)
+      }
+
+      if (!atendimento) {
+        toast.error('Não foi possível criar a demanda vinculada. Verifique o armazenamento/banco.')
+        return
+      }
+
+      let techQuote: any = null
+      if (form.action === 'cotacao' || form.action === 'status') {
+        const techResponse = await fetch('/api/travel/quotes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            service: form.service,
+            empresaId: form.empresa_id,
+            origem: form.origem || undefined,
+            destino: form.destino || form.item_nome || undefined,
+            dataInicio: form.data_inicio || undefined,
+            dataFim: form.data_fim || undefined,
+            adultos: 1,
+            raw: {
+              item_nome: form.item_nome,
+              serial_os: atendimento.serial_os,
+              centro_custo: form.centro_custo,
+              solicitante_nome: form.solicitante_nome,
+            },
+          }),
+        })
+        const payload = await techResponse.json().catch(() => null)
+        if (techResponse.ok && payload?.quote) {
+          techQuote = payload.quote
+          toast.success(`Cotação Tech preparada com ${techQuote.options?.length || 0} opção(ões).`)
+        } else if (payload?.code === 'TECH_NOT_CONFIGURED') {
+          toast.message('Tech Travel ainda não está configurada. Deixei o fluxo salvo para executar quando as credenciais forem inseridas.')
+        } else {
+          toast.error(payload?.error || 'Tech Travel não retornou cotação agora.')
+        }
+      }
+      const reserva = addSupplierReservation({
+        status: resolveStatus(form.action, actionLogs),
+        service: form.service,
+        action: form.action,
+        supplier_ids: ids,
+        empresa_id: form.empresa_id,
+        empresa_nome: empresa?.nome,
+        funcionario_id: funcionario?.id || null,
+        viajante_nome: form.viajante_nome.trim(),
+        solicitante_nome: form.solicitante_nome || undefined,
+        origem: form.origem || undefined,
+        destino: form.destino || undefined,
+        data_inicio: form.data_inicio || undefined,
+        data_fim: form.data_fim || undefined,
+        centro_custo: form.centro_custo || funcionario?.centro_custo || empresa?.centro_custo_padrao,
+        valor_estimado: money(form.valor_estimado) || undefined,
+        atendimento_id: atendimento.id,
+        observacoes: form.observacoes || undefined,
+        payload: {
+          item_nome: form.item_nome,
+          serial_os: atendimento.serial_os,
+          logs: actionLogs.map((log) => log.id),
+          tech_quote_id: techQuote?.id,
+          tech_options_count: techQuote?.options?.length,
+          tech_provider: 'tech-ttravel',
+        },
+        created_by: user?.id || 'system',
+      })
+
+      if (reserva) {
+        updateAtendimento(atendimento.id, {
+          observacoes_internas: [
+            atendimento.observacoes_internas,
+            `Reserva/cotação fornecedor: ${reserva.id}.`,
+            techQuote?.id ? `Cotação Tech: ${techQuote.id}.` : '',
+          ].filter(Boolean).join('\n'),
+        })
+      }
+
+      toast.success(
+        demandaVinculada
+          ? `Fluxo vinculado à ${atendimento.serial_os || demandaVinculada.serial_os}${reserva ? ` + reserva ${reserva.id}` : ''}.`
+          : `Fluxo criado: ${atendimento.serial_os || atendimento.id}${reserva ? ` + reserva ${reserva.id}` : ''}.`,
+      )
+      resetForm()
+      refresh()
+    } catch (error: any) {
+      toast.error(error?.message || 'Erro ao preparar reserva/cotação.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <div className="bbt-page-header">
+        <div>
+          <p className="bbt-section-label">Operação · Fornecedores</p>
+          <h1 className="bbt-page-title mt-1 flex items-center gap-2">
+            <CalendarCheck className="h-6 w-6 text-bbt-accent" /> Reservas e cotações
+          </h1>
+          <p className="bbt-page-subtitle">
+            Prepare cotações, reservas, emissões e consultas usando os conectores configurados. Tudo nasce vinculado a demanda, IA BIA e histórico operacional.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={refresh} className="bbt-button-ghost">
+            <RefreshCw className="h-4 w-4" /> Atualizar
+          </button>
+          <Link href="/dashboard/configuracoes" className="bbt-button-ghost">
+            <Settings className="h-4 w-4" /> Configurar conexões
+          </Link>
+        </div>
+      </div>
+
+      <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+        <form onSubmit={submit} className="bbt-card p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="font-semibold text-bbt-primary dark:text-white">Nova operação com fornecedor</h2>
+              <p className="mt-1 text-sm text-slate-500">Selecione serviço, fornecedor e dados da viagem. O sistema cria a demanda vinculada automaticamente.</p>
+            </div>
+            <span className="rounded-full bg-bbt-accent/10 px-3 py-1 text-xs font-semibold text-bbt-accent">IA BIA conectada</span>
+          </div>
+
+          <div className="mt-5 rounded-lg border border-bbt-accent/25 bg-bbt-accent/5 p-3">
+            <div className="grid gap-3 md:grid-cols-[minmax(240px,0.9fr)_minmax(280px,1.25fr)_auto] md:items-end">
+              <Field label="Serial/OS da demanda">
+                <input
+                  value={form.serial_os}
+                  onChange={(e) => {
+                    setDemandaVinculadaId('')
+                    setForm({ ...form, serial_os: e.target.value })
+                  }}
+                  onBlur={() => form.serial_os.trim() && aplicarDemandaPorSerial()}
+                  className="bbt-input"
+                  placeholder="Ex: OS-20260513-0001"
+                  list="reservas-os-disponiveis"
+                />
+                <datalist id="reservas-os-disponiveis">
+                  {demandasRecentes.map((item) => (
+                    <option key={item.id} value={item.serial_os || ''}>
+                      {item.passageiro_nome} · {empresas.find((empresaItem) => empresaItem.id === item.empresa_id)?.nome || 'Empresa não localizada'}
+                    </option>
+                  ))}
+                </datalist>
+              </Field>
+              <Field label="Demandas recentes sem conclusão">
+                <select
+                  value=""
+                  onChange={(event) => selecionarDemandaRecente(event.target.value)}
+                  className="bbt-input"
+                  aria-label="Selecionar demanda recente pela OS"
+                >
+                  <option value="">Selecione pela OS, viajante ou empresa</option>
+                  {demandasRecentes.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.serial_os} · {item.passageiro_nome} · {empresas.find((empresaItem) => empresaItem.id === item.empresa_id)?.nome || 'Empresa não localizada'}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <button type="button" onClick={() => aplicarDemandaPorSerial()} className="bbt-button-ghost justify-center">
+                Vincular OS
+              </button>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-slate-500">
+              Digite a OS ou escolha uma demanda recente. O sistema preenche empresa, viajante, destino, datas, hotel e centro de custo sem redigitação.
+            </p>
+            {demandaVinculada && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-bbt-accent/20 pt-3 text-xs">
+                <div className="min-w-0">
+                  <span className="font-semibold text-green-700 dark:text-green-400">OS vinculada: {demandaVinculada.serial_os}</span>
+                  <span className="ml-2 text-slate-500">
+                    {demandaVinculada.passageiro_nome} · {empresas.find((item) => item.id === demandaVinculada.empresa_id)?.nome || 'Empresa não localizada'} · {serviceLabel(serviceFromAtendimento(demandaVinculada.tipo_servico))}
+                  </span>
+                </div>
+                <Link href={`/dashboard/demandas?id=${encodeURIComponent(demandaVinculada.id)}`} className="font-semibold text-bbt-accent hover:underline">
+                  Abrir demanda
+                </Link>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-5 grid gap-3 md:grid-cols-4">
+            {SERVICES.map((item) => {
+              const Icon = item.icon
+              const active = form.service === item.value
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => setForm((current) => ({ ...current, service: item.value }))}
+                  className={`rounded-lg border p-3 text-left transition ${active ? 'border-bbt-accent bg-bbt-accent/10 text-bbt-accent' : 'border-bbt-gray-100 hover:border-bbt-accent/60 dark:border-slate-700'}`}
+                >
+                  <Icon className="mb-2 h-5 w-5" />
+                  <div className="font-semibold">{item.label}</div>
+                  <div className="mt-1 text-[11px] leading-4 text-slate-500">{item.hint}</div>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <Field label="Empresa *">
+              <select
+                value={form.empresa_id}
+                onChange={(e) => {
+                  const nextEmpresa = empresas.find((item) => item.id === e.target.value)
+                  setForm((current) => ({
+                    ...current,
+                    empresa_id: e.target.value,
+                    funcionario_id: '',
+                    funcionario_codigo: '',
+                    centro_custo: nextEmpresa?.centro_custo_padrao || current.centro_custo,
+                  }))
+                }}
+                className="bbt-input"
+                required
+              >
+                <option value="">Selecione a empresa</option>
+                {empresas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}
+              </select>
+            </Field>
+
+            <Field label="Solicitante">
+              <input value={form.solicitante_nome} onChange={(e) => setForm({ ...form, solicitante_nome: e.target.value })} className="bbt-input" placeholder="Nome de quem pediu" />
+            </Field>
+
+            <Field label="ID do funcionario/hospede">
+              <input
+                value={form.funcionario_codigo}
+                onChange={(e) => selecionarFuncionarioPorCodigo(e.target.value)}
+                className="bbt-input"
+                placeholder="Ex.: 1025"
+                inputMode="numeric"
+              />
+            </Field>
+
+            <Field label="Viajante cadastrado">
+              <select value={form.funcionario_id} onChange={(e) => selecionarFuncionario(e.target.value)} className="bbt-input">
+                <option value="">Selecionar ou preencher manualmente</option>
+                {funcionariosEmpresa.map((item) => <option key={item.id} value={item.id}>{item.codigo_identificacao ? `${item.codigo_identificacao} - ` : ''}{item.nome}</option>)}
+              </select>
+            </Field>
+
+            <Field label="Viajante / hóspede / passageiro *">
+              <input value={form.viajante_nome} onChange={(e) => setForm({ ...form, viajante_nome: e.target.value })} className="bbt-input" placeholder="Nome completo" required />
+            </Field>
+
+            <Field label={form.service === 'aereo' ? 'Origem' : 'Origem / retirada'}>
+              <input value={form.origem} onChange={(e) => setForm({ ...form, origem: e.target.value })} className="bbt-input" placeholder="Cidade, aeroporto ou local" />
+            </Field>
+
+            <Field label={form.service === 'hotelaria' ? 'Cidade / destino' : 'Destino'}>
+              <input value={form.destino} onChange={(e) => setForm({ ...form, destino: e.target.value })} className="bbt-input" placeholder="Cidade, aeroporto ou destino" />
+            </Field>
+
+            <Field label={itemLabel(form.service)}>
+              <input value={form.item_nome} onChange={(e) => setForm({ ...form, item_nome: e.target.value })} className="bbt-input" placeholder={itemPlaceholder(form.service)} />
+            </Field>
+
+            <Field label="Ação">
+              <select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value as SupplierCapability })} className="bbt-input">
+                {ACTIONS.map((item) => <option key={item} value={item}>{capabilityLabel(item)}</option>)}
+              </select>
+            </Field>
+
+            <Field label={form.service === 'hotelaria' ? 'Check-in / início' : 'Data ida / início'}>
+              <input type="date" value={form.data_inicio} onChange={(e) => setForm({ ...form, data_inicio: e.target.value })} className="bbt-input" />
+            </Field>
+
+            <Field label={form.service === 'hotelaria' ? 'Check-out / fim' : 'Data volta / fim'}>
+              <input type="date" value={form.data_fim} onChange={(e) => setForm({ ...form, data_fim: e.target.value })} className="bbt-input" />
+            </Field>
+
+            <Field label="Centro de custo">
+              <input value={form.centro_custo} onChange={(e) => setForm({ ...form, centro_custo: e.target.value })} className="bbt-input" placeholder="Centro de custo / obra / projeto" />
+            </Field>
+
+            <Field label="Valor estimado">
+              <input value={form.valor_estimado} onChange={(e) => setForm({ ...form, valor_estimado: e.target.value })} className="bbt-input" placeholder="0,00" />
+            </Field>
+          </div>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-[260px_1fr]">
+            <Field label="Prioridade">
+              <select value={form.prioridade} onChange={(e) => setForm({ ...form, prioridade: e.target.value as Prioridade })} className="bbt-input">
+                <option value="baixa">Baixa</option>
+                <option value="media">Média</option>
+                <option value="alta">Alta</option>
+                <option value="urgente">Urgente</option>
+              </select>
+            </Field>
+
+            <Field label="Observações">
+              <textarea value={form.observacoes} onChange={(e) => setForm({ ...form, observacoes: e.target.value })} className="bbt-input min-h-[90px] py-2" placeholder="Política, preferências, justificativa, bagagem, horários, faturamento..." />
+            </Field>
+          </div>
+
+          <div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-bbt-gray-100 pt-4 dark:border-slate-700">
+            <button type="button" onClick={resetForm} className="bbt-button-ghost">Limpar</button>
+            <button type="submit" disabled={busy} className="bbt-button-primary">
+              {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              Preparar e criar demanda
+            </button>
+          </div>
+        </form>
+
+        <aside className="space-y-5">
+          <div className="bbt-card p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="font-semibold text-bbt-primary dark:text-white">Fornecedores para {serviceLabel(form.service)}</h2>
+                <p className="mt-1 text-sm text-slate-500">Marque quem deve receber preparação/log da operação.</p>
+              </div>
+              <Building2 className="h-5 w-5 text-bbt-accent" />
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {suppliers.map((supplier) => {
+                const checked = selectedSupplierIds.includes(supplier.id)
+                const href = portalUrl(supplier)
+                return (
+                  <div key={supplier.id} className={`rounded-lg border p-3 transition ${checked ? 'border-bbt-accent bg-bbt-accent/10' : 'border-bbt-gray-100 dark:border-slate-700'}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <button type="button" onClick={() => toggleSupplier(supplier.id)} className="min-w-0 text-left">
+                        <div className="font-semibold text-bbt-primary dark:text-white">{supplier.nome}</div>
+                        <div className="mt-1 text-xs text-slate-500">{supplier.modo} · {supplier.status} · prioridade {supplier.prioridade}</div>
+                      </button>
+                      <input type="checkbox" checked={checked} onChange={() => toggleSupplier(supplier.id)} className="h-5 w-5 accent-bbt-accent" />
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {supplier.capacidades.slice(0, 5).map((cap) => (
+                        <span key={cap} className="rounded bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">{capabilityLabel(cap)}</span>
+                      ))}
+                      {href && (
+                        <a href={href} target="_blank" rel="noreferrer" className="ml-auto inline-flex items-center gap-1 text-xs font-semibold text-bbt-accent hover:underline">
+                          Abrir portal <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+              {suppliers.length === 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+                  <div className="flex gap-2">
+                    <AlertTriangle className="h-5 w-5 shrink-0" />
+                    <div>
+                      Nenhum fornecedor ativo para este serviço. Cadastre em Configurações &gt; Conexões, APIs e fornecedores.
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="bbt-card p-5">
+            <div className="flex items-center gap-2">
+              <Bot className="h-5 w-5 text-bbt-accent" />
+              <h2 className="font-semibold text-bbt-primary dark:text-white">Como a IA BIA usa isso</h2>
+            </div>
+            <div className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+              <p>Quando você pedir cotação, reserva ou status, a IA consulta estes conectores, a política da empresa, o cadastro do viajante e as demandas existentes.</p>
+              <p>Com API configurada, o conector fica pronto para endpoint/token. Sem API, o sistema prepara a operação e abre o portal correto com rastreio interno.</p>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="bbt-card overflow-hidden">
+          <div className="border-b border-bbt-gray-100 p-5 dark:border-slate-700">
+            <div className="flex items-center gap-2">
+              <ClipboardList className="h-5 w-5 text-bbt-accent" />
+              <h2 className="font-semibold text-bbt-primary dark:text-white">Reservas/cotações preparadas</h2>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-bbt-gray-50 dark:bg-slate-900/40">
+                <tr>
+                  <Th>Operação</Th>
+                  <Th>Empresa</Th>
+                  <Th>Viajante</Th>
+                  <Th>Período</Th>
+                  <Th>Valor</Th>
+                  <Th>Status</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {reservas.map((item) => (
+                  <ReservaRow key={item.id} item={item} />
+                ))}
+                {reservas.length === 0 && (
+                  <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-400">Nenhuma reserva/cotação preparada ainda.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bbt-card overflow-hidden">
+          <div className="border-b border-bbt-gray-100 p-5 dark:border-slate-700">
+            <h2 className="font-semibold text-bbt-primary dark:text-white">Logs de fornecedores</h2>
+            <p className="mt-1 text-sm text-slate-500">Auditoria das ações preparadas para APIs e portais.</p>
+          </div>
+          <div className="max-h-[520px] divide-y divide-bbt-gray-100 overflow-y-auto dark:divide-slate-700">
+            {logs.map((log) => <LogRow key={log.id} log={log} />)}
+            {logs.length === 0 && <div className="p-8 text-center text-sm text-slate-400">Sem logs ainda.</div>}
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function ReservaRow({ item }: { item: SupplierReservation }) {
+  return (
+    <tr className="border-t border-bbt-gray-100 hover:bg-bbt-gray-50 dark:border-slate-700 dark:hover:bg-slate-900/30">
+      <td className="px-4 py-3">
+        <div className="font-semibold text-bbt-primary dark:text-white">{serviceLabel(item.service)} · {capabilityLabel(item.action)}</div>
+        <div className="text-xs text-slate-500">{item.id}</div>
+      </td>
+      <td className="px-4 py-3">
+        <div className="font-medium">{item.empresa_nome || '-'}</div>
+        <div className="text-xs text-slate-500">{item.centro_custo || '-'}</div>
+      </td>
+      <td className="px-4 py-3">
+        <div className="font-medium">{item.viajante_nome}</div>
+        <div className="text-xs text-slate-500">{item.solicitante_nome || '-'}</div>
+      </td>
+      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+        {formatDate(item.data_inicio)} até {formatDate(item.data_fim)}
+        <div className="mt-1 text-slate-500">{[item.origem, item.destino].filter(Boolean).join(' → ') || '-'}</div>
+      </td>
+      <td className="px-4 py-3">{currency(item.valor_estimado || 0)}</td>
+      <td className="px-4 py-3"><StatusBadge status={item.status} /></td>
+    </tr>
+  )
+}
+
+function LogRow({ log }: { log: SupplierActionLog }) {
+  return (
+    <div className="p-4 text-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="font-semibold text-bbt-primary dark:text-white">{log.supplier_name}</div>
+          <div className="mt-1 text-xs text-slate-500">{actionLabel(log.action)} · {log.service ? serviceLabel(log.service) : 'geral'}</div>
+        </div>
+        <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${log.status === 'sucesso' ? 'bg-green-100 text-green-700' : log.status === 'falha' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{log.status}</span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-slate-500">{log.message}</p>
+    </div>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">{label}</label>
+      {children}
+    </div>
+  )
+}
+
+function Th({ children }: { children: React.ReactNode }) {
+  return <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300">{children}</th>
+}
+
+function StatusBadge({ status }: { status: SupplierReservationStatus }) {
+  const classes: Record<SupplierReservationStatus, string> = {
+    rascunho: 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200',
+    cotacao_preparada: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+    reserva_preparada: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300',
+    enviado_fornecedor: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300',
+    confirmado: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
+    falhou: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+    cancelado: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
+  }
+  return <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${classes[status]}`}>{status}</span>
+}
+
+function mapTipoServico(service: SupplierService): TipoServico {
+  if (service === 'aereo') return 'Aéreo'
+  if (service === 'hotelaria') return 'Hotel'
+  if (service === 'locacao') return 'Carro'
+  if (service === 'pacotes' || service === 'lazer' || service === 'transfer' || service === 'seguro') return 'Pacote'
+  return 'Outro'
+}
+
+function serviceFromAtendimento(tipo: TipoServico): SupplierService {
+  if (tipo === 'Aéreo') return 'aereo'
+  if (tipo === 'Hotel') return 'hotelaria'
+  if (tipo === 'Carro') return 'locacao'
+  if (tipo === 'Pacote') return 'pacotes'
+  return 'hotelaria'
+}
+
+function formFromAtendimento(
+  current: FormState,
+  demanda: Atendimento,
+  funcionarios: Funcionario[],
+  serialInformado = '',
+): FormState {
+  const funcionario = demanda.funcionario_id
+    ? funcionarios.find((item) => item.id === demanda.funcionario_id)
+    : null
+  const destino =
+    demanda.detalhes_hotel?.cidade ||
+    demanda.detalhes_aereo?.destino ||
+    demanda.detalhes_pacote?.destino ||
+    demanda.detalhes_carro?.cidade_retirada ||
+    ''
+  const valorEstimado = demanda.valor_venda || demanda.valor_final || demanda.valor_cotacao
+  const observacoesDemanda = String(demanda.observacoes || '').trim()
+  const observacoesAtuais = String(current.observacoes || '').trim()
+  const observacoes = observacoesDemanda && !observacoesAtuais.includes(observacoesDemanda)
+    ? [observacoesDemanda, observacoesAtuais].filter(Boolean).join('\n\n')
+    : observacoesAtuais
+
+  return {
+    ...current,
+    serial_os: demanda.serial_os || serialInformado,
+    service: serviceFromAtendimento(demanda.tipo_servico),
+    empresa_id: demanda.empresa_id || current.empresa_id,
+    funcionario_id: demanda.funcionario_id || '',
+    funcionario_codigo: funcionario?.codigo_identificacao || '',
+    viajante_nome: demanda.passageiro_nome || funcionario?.nome || current.viajante_nome,
+    solicitante_nome: demanda.solicitante_nome || current.solicitante_nome,
+    origem: demanda.detalhes_aereo?.origem || demanda.detalhes_carro?.cidade_retirada || current.origem,
+    destino: destino || current.destino,
+    item_nome:
+      demanda.detalhes_hotel?.hotel_nome ||
+      demanda.detalhes_carro?.locadora ||
+      demanda.detalhes_pacote?.descricao ||
+      current.item_nome,
+    data_inicio:
+      demanda.detalhes_hotel?.data_checkin ||
+      demanda.detalhes_aereo?.data_ida ||
+      demanda.detalhes_carro?.data_retirada ||
+      demanda.detalhes_pacote?.data_ida ||
+      current.data_inicio,
+    data_fim:
+      demanda.detalhes_hotel?.data_checkout ||
+      demanda.detalhes_aereo?.data_volta ||
+      demanda.detalhes_carro?.data_devolucao ||
+      demanda.detalhes_pacote?.data_volta ||
+      current.data_fim,
+    centro_custo: demanda.centro_custo || funcionario?.centro_custo || current.centro_custo,
+    valor_estimado: valorEstimado ? String(valorEstimado) : current.valor_estimado,
+    prioridade: demanda.prioridade || current.prioridade,
+    observacoes,
+  }
+}
+
+function resolveStatus(action: SupplierCapability, logs: SupplierActionLog[]): SupplierReservationStatus {
+  if (logs.length > 0 && logs.every((log) => log.status === 'falha')) return 'falhou'
+  if (action === 'cotacao' || action === 'pesquisa') return 'cotacao_preparada'
+  if (action === 'emissao' || action === 'reserva') return 'reserva_preparada'
+  if (action === 'cancelamento' || action === 'remarcacao') return 'enviado_fornecedor'
+  return 'rascunho'
+}
+
+function actionLabel(action: SupplierActionLog['action']): string {
+  return action === 'teste' ? 'teste' : capabilityLabel(action)
+}
+
+function itemLabel(service: SupplierService): string {
+  if (service === 'hotelaria') return 'Hotel preferido'
+  if (service === 'locacao') return 'Locadora / categoria'
+  if (service === 'aereo') return 'Cia / voo / localizador'
+  if (service === 'seguro') return 'Plano / seguradora'
+  return 'Produto / pacote'
+}
+
+function itemPlaceholder(service: SupplierService): string {
+  if (service === 'hotelaria') return 'Hotel, bairro ou preferência'
+  if (service === 'locacao') return 'Locadora, categoria ou retirada'
+  if (service === 'aereo') return 'Companhia, voo ou preferência'
+  if (service === 'seguro') return 'Seguro viagem / cobertura'
+  return 'Nome do pacote, lazer, transfer ou operador'
+}
+
+function money(value: string): number {
+  const normalized = String(value || '')
+    .replace(/[^\d,.-]/g, '')
+    .replace(/\./g, '')
+    .replace(',', '.')
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function currency(value: number): string {
+  return Number(value || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
+
+function today(): string {
+  return todayISODate()
+}
+
+function formatDate(value?: string): string {
+  if (!value) return '-'
+  const [year, month, day] = value.slice(0, 10).split('-')
+  if (!year || !month || !day) return value
+  return `${day}/${month}/${year}`
+}

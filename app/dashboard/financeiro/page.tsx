@@ -1,0 +1,819 @@
+'use client'
+import { addDaysISODate, lastDayOfMonthISODate, todayISODate } from '@/lib/date'
+import { useEffect, useState, useMemo } from 'react'
+import { useStore } from '@/lib/store'
+import { getCurrentUser, hasPermission } from '@/lib/auth'
+import {
+  getAllLancamentos, calcularResumoFinanceiro, pagarLancamento,
+  type LancamentoFinanceiro, type FormaPagamento,
+} from '@/lib/financeiro'
+import {
+  atualizarCarteiraEmpresa,
+  criarCartaoCorporativo,
+  garantirCarteiraEmpresa,
+  gerarFaturaEmpresa,
+  getAllCarteirasCorporativas,
+  getCartoesCorporativos,
+  getFaturasCorporativas,
+  marcarFaturaPaga,
+  registrarMovimentoCarteira,
+} from '@/lib/corporate-finance'
+import { sincronizarTudoOperacional } from '@/lib/operational-sync'
+import { useFiltroPersistente } from '@/lib/filtros'
+import { formatarValor, formatarData } from '@/lib/normalizers'
+import { Modal } from '@/components/ui/modal'
+import { toast } from 'sonner'
+import {
+  Wallet, ArrowDownCircle, ArrowUpCircle, AlertTriangle, TrendingUp,
+  CheckCircle2, RefreshCw, DollarSign, Building2, CreditCard, ReceiptText,
+  Plus, Send, LockKeyhole,
+} from 'lucide-react'
+import type { CartaoCorporativo } from '@/types'
+import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
+import { PageHero } from '@/components/ui/page-hero'
+
+type Aba = 'resumo' | 'receber' | 'pagar' | 'carteira' | 'cartoes' | 'faturas'
+
+export default function FinanceiroPage() {
+  const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const { empresas } = useStore()
+  const podeVer = hasPermission(user, 'ver_financeiro') || hasPermission(user, 'gerenciar_usuarios')
+
+  const [aba, setAba] = useState<Aba>('resumo')
+  const [reload, setReload] = useState(0)
+  const [pagamento, setPagamento] = useState<LancamentoFinanceiro | null>(null)
+  const [aporteValor, setAporteValor] = useState(0)
+  const [pixPagamento, setPixPagamento] = useState({ valor: 0, descricao: 'Pagamento corporativo via Pix' })
+  const [cartaoForm, setCartaoForm] = useState({
+    tipo: 'virtual' as CartaoCorporativo['tipo'],
+    apelido: 'Cartao viagem',
+    portador_nome: '',
+    limite: 1000,
+    merchant_lock: '',
+  })
+  const mesAtual = todayISODate().slice(0, 7)
+  const [periodoFatura, setPeriodoFatura] = useState({
+    inicio: `${mesAtual}-01`,
+    fim: ultimoDiaMes(mesAtual),
+    vencimento: addDays(ultimoDiaMes(mesAtual), 10),
+  })
+
+  const [filtro, setFiltro] = useFiltroPersistente(user?.id, 'financeiro', {
+    empresa_id: '',
+    desde: '',
+    ate: '',
+    status: '',
+  })
+
+  const lancamentos = useMemo(() => {
+    void reload
+    if (typeof window === 'undefined') return []
+    let r = getAllLancamentos()
+    if (filtro.empresa_id) r = r.filter((l) => l.empresa_id === filtro.empresa_id)
+    if (filtro.desde) r = r.filter((l) => l.data_vencimento >= filtro.desde!)
+    if (filtro.ate) r = r.filter((l) => l.data_vencimento <= filtro.ate!)
+    if (filtro.status) r = r.filter((l) => l.status === filtro.status)
+    return r.sort((a, b) => a.data_vencimento.localeCompare(b.data_vencimento))
+  }, [filtro, reload])
+
+  const resumo = useMemo(() => {
+    void reload
+    if (typeof window === 'undefined') return null
+    return calcularResumoFinanceiro({
+      desde: filtro.desde || undefined,
+      ate: filtro.ate || undefined,
+      empresa_id: filtro.empresa_id || undefined,
+    })
+  }, [filtro, reload])
+
+  const aReceber = lancamentos.filter((l) => l.tipo === 'receber')
+  const aPagar = lancamentos.filter((l) => l.tipo === 'pagar')
+  const empresaSelecionadaId = filtro.empresa_id || ''
+  const carteiras = useMemo(() => {
+    void reload
+    if (typeof window === 'undefined') return []
+    const all = getAllCarteirasCorporativas()
+    return empresaSelecionadaId ? all.filter((c) => c.company_id === empresaSelecionadaId) : all
+  }, [empresaSelecionadaId, reload])
+  const cartoes = useMemo(() => {
+    void reload
+    if (typeof window === 'undefined') return []
+    return getCartoesCorporativos(empresaSelecionadaId || undefined)
+  }, [empresaSelecionadaId, reload])
+  const faturas = useMemo(() => {
+    void reload
+    if (typeof window === 'undefined') return []
+    return getFaturasCorporativas(empresaSelecionadaId || undefined)
+  }, [empresaSelecionadaId, reload])
+  const carteiraSelecionada = empresaSelecionadaId ? carteiras.find((c) => c.company_id === empresaSelecionadaId) : null
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const tab = new URLSearchParams(window.location.search).get('aba') as Aba | null
+    if (tab && ['resumo', 'receber', 'pagar', 'carteira', 'cartoes', 'faturas'].includes(tab)) setAba(tab)
+  }, [])
+
+  function refresh() { setReload((n) => n + 1) }
+
+  function gerarRetroativos() {
+    const r = sincronizarTudoOperacional()
+    toast.success(`${r.atendimentosFinanceiro} atendimento(s), ${r.vouchersCriados + r.vouchersAtualizados} voucher(s) e financeiro sincronizados.`)
+    refresh()
+  }
+
+  function exigirEmpresaSelecionada(): string | null {
+    if (!empresaSelecionadaId) {
+      toast.error('Selecione uma empresa para usar carteira, cartoes ou faturas.')
+      return null
+    }
+    return empresaSelecionadaId
+  }
+
+  function ativarCarteira() {
+    const empresaId = exigirEmpresaSelecionada()
+    if (!empresaId) return
+    const wallet = garantirCarteiraEmpresa(empresaId)
+    atualizarCarteiraEmpresa(wallet.id, {
+      status: 'ativa',
+      pix_habilitado: true,
+      cartao_habilitado: true,
+      limite_credito: wallet.limite_credito || 50000,
+      limite_pix_diario: wallet.limite_pix_diario || 20000,
+      limite_cartao_mensal: wallet.limite_cartao_mensal || 50000,
+      provedor: wallet.provedor || 'pendente',
+    })
+    toast.success('Carteira corporativa habilitada para controle interno.')
+    refresh()
+  }
+
+  function registrarAporte() {
+    const empresaId = exigirEmpresaSelecionada()
+    if (!empresaId) return
+    if (aporteValor <= 0) {
+      toast.error('Informe um valor valido.')
+      return
+    }
+    registrarMovimentoCarteira({
+      company_id: empresaId,
+      tipo: 'credito',
+      origem: 'pix',
+      valor: aporteValor,
+      descricao: 'Aporte Pix/carteira corporativa registrado no financeiro',
+    })
+    setAporteValor(0)
+    toast.success('Aporte registrado na carteira.')
+    refresh()
+  }
+
+  function registrarPixPagamento() {
+    const empresaId = exigirEmpresaSelecionada()
+    if (!empresaId) return
+    if (pixPagamento.valor <= 0) {
+      toast.error('Informe um valor de Pix valido.')
+      return
+    }
+    const wallet = carteiraSelecionada || garantirCarteiraEmpresa(empresaId)
+    const saldoOperacional = Number(wallet.saldo_disponivel || 0) + Number(wallet.limite_credito || 0)
+    if (saldoOperacional < pixPagamento.valor) {
+      toast.error('Saldo/limite insuficiente para registrar este Pix.')
+      return
+    }
+    const movimento = registrarMovimentoCarteira({
+      company_id: empresaId,
+      tipo: 'debito',
+      origem: 'pix',
+      valor: pixPagamento.valor,
+      descricao: pixPagamento.descricao || 'Pagamento corporativo via Pix',
+    })
+    if (!movimento) {
+      toast.error('Nao foi possivel registrar o Pix.')
+      return
+    }
+    setPixPagamento({ valor: 0, descricao: 'Pagamento corporativo via Pix' })
+    toast.success('Pix corporativo registrado na carteira.')
+    refresh()
+  }
+
+  function criarCartao(tipo?: CartaoCorporativo['tipo']) {
+    const empresaId = exigirEmpresaSelecionada()
+    if (!empresaId) return
+    const card = criarCartaoCorporativo({
+      company_id: empresaId,
+      tipo: tipo || cartaoForm.tipo,
+      apelido: cartaoForm.apelido || 'Cartao viagem',
+      portador_nome: cartaoForm.portador_nome || undefined,
+      limite: cartaoForm.limite,
+      merchant_lock: cartaoForm.merchant_lock || undefined,
+      criado_por_user_id: user?.id,
+    })
+    if (!card) {
+      toast.error('Nao foi possivel criar o cartao.')
+      return
+    }
+    toast.success(card.status === 'ativo' ? 'Cartao criado.' : 'Cartao registrado como pendente de emissao no provedor.')
+    refresh()
+  }
+
+  function gerarFatura() {
+    const empresaId = exigirEmpresaSelecionada()
+    if (!empresaId) return
+    const fatura = gerarFaturaEmpresa({
+      company_id: empresaId,
+      lancamentos: getAllLancamentos(),
+      periodo_inicio: periodoFatura.inicio,
+      periodo_fim: periodoFatura.fim,
+      vencimento: periodoFatura.vencimento,
+    })
+    if (!fatura) {
+      toast.error('Nao foi possivel gerar a fatura.')
+      return
+    }
+    toast.success(`Fatura ${fatura.numero} gerada/atualizada.`)
+    refresh()
+  }
+
+  function quitarFatura(id: string) {
+    const fatura = marcarFaturaPaga(id)
+    if (!fatura) {
+      toast.error('Nao foi possivel quitar a fatura.')
+      return
+    }
+    toast.success(`Fatura ${fatura.numero} marcada como paga.`)
+    refresh()
+  }
+
+  if (!podeVer) {
+    return (
+      <div className="bbt-card p-10 text-center">
+        <AlertTriangle className="w-10 h-10 mx-auto text-amber-500 mb-3" />
+        <h3 className="font-semibold">Acesso restrito</h3>
+        <p className="text-sm text-slate-500 mt-1">Você precisa da permissão "ver_financeiro" para acessar este módulo.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <PageHero
+        eyebrow="Operações financeiras"
+        title="Financeiro"
+        icon={Wallet}
+        description="Contas a pagar e receber conectadas a demandas, vouchers manuais/importados e Wintour."
+        bgImage="https://images.unsplash.com/photo-1554224155-6726b3ff858f?auto=format&fit=crop&w=2000&q=85"
+        metrics={[
+          { icon: ArrowDownCircle, label: 'A receber', value: formatarValor(resumo?.total_a_receber || 0) },
+          { icon: ArrowUpCircle, label: 'A pagar', value: formatarValor(resumo?.total_a_pagar || 0) },
+          { icon: CheckCircle2, label: 'Recebido', value: formatarValor(resumo?.recebido || 0) },
+          { icon: TrendingUp, label: 'Saldo', value: formatarValor(resumo?.saldo_previsto || 0), highlight: (resumo?.saldo_previsto || 0) < 0 },
+        ]}
+        actions={
+          <button onClick={gerarRetroativos}
+            className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-white text-sm hover:bg-white/15 transition border border-white/15">
+            <RefreshCw className="w-4 h-4" /> Reprocessar sincronização
+          </button>
+        }
+      />
+
+      <div className="bbt-card p-3 flex flex-wrap gap-3 items-end">
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Empresa</label>
+          <select value={filtro.empresa_id || ''} onChange={(e) => setFiltro({ empresa_id: e.target.value })} className="bbt-input text-sm">
+            <option value="">Todas</option>
+            {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Desde</label>
+          <input type="date" value={filtro.desde || ''} onChange={(e) => setFiltro({ desde: e.target.value })} className="bbt-input text-sm" />
+        </div>
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Até</label>
+          <input type="date" value={filtro.ate || ''} onChange={(e) => setFiltro({ ate: e.target.value })} className="bbt-input text-sm" />
+        </div>
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Status</label>
+          <select value={filtro.status || ''} onChange={(e) => setFiltro({ status: e.target.value })} className="bbt-input text-sm">
+            <option value="">Todos</option>
+            <option value="pendente">Pendente</option>
+            <option value="pago">Pago</option>
+            <option value="parcial">Parcial</option>
+            <option value="atrasado">Atrasado</option>
+            <option value="cancelado">Cancelado</option>
+          </select>
+        </div>
+        <button onClick={() => setFiltro({ empresa_id: '', desde: '', ate: '', status: '' })}
+          className="text-xs text-bbt-accent hover:underline">Limpar filtros</button>
+      </div>
+
+      {resumo && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <KPI icon={ArrowDownCircle} cor="text-green-600" label="A Receber" valor={formatarValor(resumo.total_a_receber)} sub={`Recebido: ${formatarValor(resumo.recebido)}`} />
+          <KPI icon={ArrowUpCircle} cor="text-red-600" label="A Pagar" valor={formatarValor(resumo.total_a_pagar)} sub={`Pago: ${formatarValor(resumo.pago)}`} />
+          <KPI icon={TrendingUp} cor={resumo.saldo_previsto >= 0 ? 'text-green-600' : 'text-red-600'} label="Saldo Previsto" valor={formatarValor(resumo.saldo_previsto)} />
+          <KPI icon={AlertTriangle} cor="text-amber-600" label="Atrasados" valor={formatarValor(resumo.atrasados_receber + resumo.atrasados_pagar)} />
+        </div>
+      )}
+
+      <div className="bbt-tabs">
+        <BtnAba active={aba === 'resumo'} onClick={() => setAba('resumo')} label="Resumo" />
+        <BtnAba active={aba === 'receber'} onClick={() => setAba('receber')} label={`A Receber (${aReceber.length})`} />
+        <BtnAba active={aba === 'pagar'} onClick={() => setAba('pagar')} label={`A Pagar (${aPagar.length})`} />
+        <BtnAba active={aba === 'carteira'} onClick={() => setAba('carteira')} label={`Carteira (${carteiras.length})`} />
+        <BtnAba active={aba === 'cartoes'} onClick={() => setAba('cartoes')} label={`Cartoes (${cartoes.length})`} />
+        <BtnAba active={aba === 'faturas'} onClick={() => setAba('faturas')} label={`Faturas (${faturas.length})`} />
+      </div>
+
+      {aba === 'resumo' && resumo && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="bbt-card p-4 md:col-span-2">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Wallet className="w-5 h-5 text-bbt-accent" />
+                  Carteira Digital Corporativa, Pix e Cartoes
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  Controle saldos, limites, pagamentos Pix, cartoes fisicos/virtuais ilimitados e faturas por empresa.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => setAba('carteira')} className="bbt-button-primary">
+                  <Wallet className="w-4 h-4" /> Abrir carteira/Pix
+                </button>
+                <button type="button" onClick={() => setAba('cartoes')} className="bbt-button-outline">
+                  <CreditCard className="w-4 h-4" /> Cartoes fisicos/virtuais
+                </button>
+                <button type="button" onClick={() => setAba('faturas')} className="bbt-button-outline">
+                  <ReceiptText className="w-4 h-4" /> Faturas
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="bbt-card p-4">
+            <h3 className="font-semibold mb-3">Por categoria</h3>
+            <div className="space-y-2">
+              {Object.entries(resumo.por_categoria).map(([cat, vals]) => {
+                const v = vals as { receber: number; pagar: number }
+                return (
+                  <div key={cat} className="flex items-center justify-between text-sm border-b border-bbt-gray-100 dark:border-slate-700 py-1.5">
+                    <span>{cat}</span>
+                    <div className="flex gap-3 text-xs">
+                      <span className="text-green-600">+{formatarValor(v.receber)}</span>
+                      <span className="text-red-600">-{formatarValor(v.pagar)}</span>
+                    </div>
+                  </div>
+                )
+              })}
+              {Object.keys(resumo.por_categoria).length === 0 && (
+                <p className="text-xs text-slate-400 text-center py-3">Sem dados</p>
+              )}
+            </div>
+          </div>
+          <div className="bbt-card p-4">
+            <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <Building2 className="w-4 h-4 text-bbt-accent" /> Por empresa
+            </h3>
+            <div className="space-y-2">
+              {Object.entries(resumo.por_empresa).map(([empId, vals]) => {
+                const emp = empresas.find((e) => e.id === empId)
+                const v = vals as { receber: number; pagar: number }
+                return (
+                  <div key={empId} className="flex items-center justify-between text-sm border-b border-bbt-gray-100 dark:border-slate-700 py-1.5">
+                    <span className="truncate">{emp?.nome || empId}</span>
+                    <div className="flex gap-3 text-xs whitespace-nowrap">
+                      <span className="text-green-600">+{formatarValor(v.receber)}</span>
+                      <span className="text-red-600">-{formatarValor(v.pagar)}</span>
+                    </div>
+                  </div>
+                )
+              })}
+              {Object.keys(resumo.por_empresa).length === 0 && (
+                <p className="text-xs text-slate-400 text-center py-3">Sem dados</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(aba === 'receber' || aba === 'pagar') && (
+        <div className="bbt-card overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-bbt-gray-50 dark:bg-slate-900/30">
+              <tr>
+                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Vencimento</th>
+                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Descrição</th>
+                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">{aba === 'receber' ? 'Cliente' : 'Fornecedor'}</th>
+                <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider text-slate-500">Valor</th>
+                <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider text-slate-500">Pago</th>
+                <th className="px-3 py-2 text-center text-[10px] uppercase tracking-wider text-slate-500">Status</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {(aba === 'receber' ? aReceber : aPagar).map((l) => {
+                const emp = l.empresa_id ? empresas.find((e) => e.id === l.empresa_id) : null
+                return (
+                  <tr key={l.id} className="border-t border-bbt-gray-100 dark:border-slate-700 hover:bg-bbt-gray-50 dark:hover:bg-slate-900/30">
+                    <td className="px-3 py-2 whitespace-nowrap text-xs">{formatarData(l.data_vencimento)}</td>
+                    <td className="px-3 py-2 text-xs">{l.descricao}</td>
+                    <td className="px-3 py-2 text-xs truncate max-w-[180px]">{emp?.nome || l.fornecedor_nome || '—'}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-sm">{formatarValor(l.valor)}</td>
+                    <td className="px-3 py-2 text-right text-xs text-green-600">{formatarValor(l.valor_pago)}</td>
+                    <td className="px-3 py-2 text-center"><StatusBadge status={l.status} /></td>
+                    <td className="px-3 py-2">
+                      {l.status !== 'pago' && l.status !== 'cancelado' && (
+                        <button onClick={() => setPagamento(l)} className="text-xs bbt-button-primary py-1 px-2 flex items-center gap-1">
+                          <DollarSign className="w-3 h-3" /> {l.tipo === 'pagar' ? 'Pagar' : 'Receber'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+              {(aba === 'receber' ? aReceber : aPagar).length === 0 && (
+                <tr><td colSpan={7} className="px-3 py-8 text-center text-sm text-slate-400">Nenhum lançamento</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {aba === 'carteira' && (
+        <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
+          <div className="bbt-card p-4 space-y-4">
+            <div>
+              <Wallet className="w-6 h-6 text-bbt-accent mb-2" />
+              <h3 className="font-semibold">Carteira Digital Corporativa</h3>
+              <p className="text-sm text-slate-500 mt-1">
+                Controle interno de saldo, Pix, limite de credito e pagamentos corporativos. A execucao real depende de provedor financeiro conectado por API.
+              </p>
+            </div>
+            <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
+            <button onClick={ativarCarteira} className="bbt-button-primary w-full">
+              <CheckCircle2 className="w-4 h-4" /> Habilitar carteira da empresa
+            </button>
+            <div className="border-t border-bbt-gray-100 dark:border-slate-700 pt-3">
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Aporte Pix / saldo</label>
+              <div className="flex gap-2">
+                <input type="number" min="0" step="0.01" value={aporteValor} onChange={(e) => setAporteValor(Number(e.target.value || 0))} className="bbt-input" />
+                <button onClick={registrarAporte} className="bbt-button-accent">
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="border-t border-bbt-gray-100 dark:border-slate-700 pt-3">
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Pagamento Pix corporativo</label>
+              <input
+                value={pixPagamento.descricao}
+                onChange={(e) => setPixPagamento({ ...pixPagamento, descricao: e.target.value })}
+                className="bbt-input mb-2"
+                placeholder="Descricao do pagamento"
+              />
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={pixPagamento.valor}
+                  onChange={(e) => setPixPagamento({ ...pixPagamento, valor: Number(e.target.value || 0) })}
+                  className="bbt-input"
+                />
+                <button onClick={registrarPixPagamento} className="bbt-button-primary">
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="mt-2 text-[11px] text-slate-500">Registra debito Pix na carteira e atualiza saldo operacional.</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {(empresaSelecionadaId ? carteiras : carteiras.slice(0, 12)).map((c) => {
+              const emp = empresas.find((e) => e.id === c.company_id)
+              return (
+                <div key={c.id} className="bbt-card p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-slate-500">Empresa</div>
+                      <h3 className="font-semibold">{emp?.nome || c.company_id}</h3>
+                    </div>
+                    <StatusBadge status={c.status} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 mt-4 text-sm">
+                    <Info label="Saldo" value={formatarValor(c.saldo_disponivel)} />
+                    <Info label="Limite credito" value={formatarValor(c.limite_credito)} />
+                    <Info label="Pix diario" value={formatarValor(c.limite_pix_diario)} />
+                    <Info label="Cartao mes" value={formatarValor(c.limite_cartao_mensal)} />
+                  </div>
+                  <div className="mt-3 text-xs text-slate-500">
+                    Pix: {c.pix_habilitado ? 'habilitado' : 'pendente'} · Cartao: {c.cartao_habilitado ? 'habilitado' : 'pendente'} · Provedor: {c.provedor || 'pendente'}
+                  </div>
+                </div>
+              )
+            })}
+            {carteiras.length === 0 && (
+              <div className="bbt-card p-10 text-center text-sm text-slate-400 md:col-span-2">
+                Selecione uma empresa e habilite a carteira corporativa.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {aba === 'cartoes' && (
+        <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
+          <div className="bbt-card p-4 space-y-3">
+            <CreditCard className="w-6 h-6 text-bbt-accent" />
+            <h3 className="font-semibold">Cartoes fisicos e virtuais</h3>
+            <p className="text-sm text-slate-500">Crie cartoes ilimitados no controle interno. Quando o conector financeiro estiver ativo, esses registros viram chamadas de emissao na API.</p>
+            <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Tipo</label>
+              <select value={cartaoForm.tipo} onChange={(e) => setCartaoForm({ ...cartaoForm, tipo: e.target.value as CartaoCorporativo['tipo'] })} className="bbt-input">
+                <option value="virtual">Virtual</option>
+                <option value="fisico">Fisico</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Apelido</label>
+              <input value={cartaoForm.apelido} onChange={(e) => setCartaoForm({ ...cartaoForm, apelido: e.target.value })} className="bbt-input" />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Portador</label>
+              <input value={cartaoForm.portador_nome} onChange={(e) => setCartaoForm({ ...cartaoForm, portador_nome: e.target.value })} className="bbt-input" placeholder="Opcional" />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Limite</label>
+              <input type="number" min="0" step="0.01" value={cartaoForm.limite} onChange={(e) => setCartaoForm({ ...cartaoForm, limite: Number(e.target.value || 0) })} className="bbt-input" />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Restricao fornecedor/categoria</label>
+              <input value={cartaoForm.merchant_lock} onChange={(e) => setCartaoForm({ ...cartaoForm, merchant_lock: e.target.value })} className="bbt-input" placeholder="Ex: hotel, aéreo, Tech Travel" />
+            </div>
+            <button onClick={() => criarCartao()} className="bbt-button-primary w-full">
+              <Plus className="w-4 h-4" /> Criar cartao
+            </button>
+            {!carteiraSelecionada?.cartao_habilitado && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200">
+                Para o cartao nascer ativo, habilite a carteira da empresa na aba Carteira. Sem isso, ele fica como pendente de emissao.
+              </div>
+            )}
+          </div>
+          <div className="bbt-card overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-bbt-gray-50 dark:bg-slate-900/30">
+                <tr>
+                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Cartao</th>
+                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Empresa</th>
+                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Portador</th>
+                  <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider text-slate-500">Limite</th>
+                  <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider text-slate-500">Gasto mes</th>
+                  <th className="px-3 py-2 text-center text-[10px] uppercase tracking-wider text-slate-500">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cartoes.map((c) => {
+                  const emp = empresas.find((e) => e.id === c.company_id)
+                  return (
+                    <tr key={c.id} className="border-t border-bbt-gray-100 dark:border-slate-700">
+                      <td className="px-3 py-2">
+                        <div className="font-semibold">{c.apelido}</div>
+                        <div className="text-xs text-slate-500">{c.tipo} · {c.bandeira || 'Cartao'} final {c.ultimos4 || '----'}</div>
+                      </td>
+                      <td className="px-3 py-2 text-xs">{emp?.nome || c.company_id}</td>
+                      <td className="px-3 py-2 text-xs">{c.portador_nome || 'Empresa'}</td>
+                      <td className="px-3 py-2 text-right font-semibold">{formatarValor(c.limite)}</td>
+                      <td className="px-3 py-2 text-right text-xs">{formatarValor(c.gasto_mes || 0)}</td>
+                      <td className="px-3 py-2 text-center"><StatusBadge status={c.status} /></td>
+                    </tr>
+                  )
+                })}
+                {cartoes.length === 0 && (
+                  <tr><td colSpan={6} className="px-3 py-10 text-center text-sm text-slate-400">Nenhum cartao corporativo.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {aba === 'faturas' && (
+        <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
+          <div className="bbt-card p-4 space-y-3">
+            <ReceiptText className="w-6 h-6 text-bbt-accent" />
+            <h3 className="font-semibold">Gerar fatura da empresa</h3>
+            <p className="text-sm text-slate-500">Agrupa contas a receber do periodo para emissao e acompanhamento da cobranca.</p>
+            <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Inicio</label>
+              <input type="date" value={periodoFatura.inicio} onChange={(e) => setPeriodoFatura({ ...periodoFatura, inicio: e.target.value })} className="bbt-input" />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Fim</label>
+              <input type="date" value={periodoFatura.fim} onChange={(e) => setPeriodoFatura({ ...periodoFatura, fim: e.target.value })} className="bbt-input" />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Vencimento</label>
+              <input type="date" value={periodoFatura.vencimento} onChange={(e) => setPeriodoFatura({ ...periodoFatura, vencimento: e.target.value })} className="bbt-input" />
+            </div>
+            <button onClick={gerarFatura} className="bbt-button-primary w-full">
+              <ReceiptText className="w-4 h-4" /> Gerar/atualizar fatura
+            </button>
+          </div>
+          <div className="bbt-card overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-bbt-gray-50 dark:bg-slate-900/30">
+                <tr>
+                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Fatura</th>
+                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Empresa</th>
+                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500">Periodo</th>
+                  <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider text-slate-500">Total</th>
+                  <th className="px-3 py-2 text-center text-[10px] uppercase tracking-wider text-slate-500">Status</th>
+                  <th className="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {faturas.map((f) => {
+                  const emp = empresas.find((e) => e.id === f.company_id)
+                  return (
+                    <tr key={f.id} className="border-t border-bbt-gray-100 dark:border-slate-700">
+                      <td className="px-3 py-2">
+                        <div className="font-semibold">{f.numero}</div>
+                        <div className="text-xs text-slate-500">Venc. {formatarData(f.vencimento)}</div>
+                      </td>
+                      <td className="px-3 py-2 text-xs">{emp?.nome || f.company_id}</td>
+                      <td className="px-3 py-2 text-xs">{formatarData(f.periodo_inicio)} a {formatarData(f.periodo_fim)}</td>
+                      <td className="px-3 py-2 text-right font-semibold">{formatarValor(f.valor_total)}</td>
+                      <td className="px-3 py-2 text-center"><StatusBadge status={f.status} /></td>
+                      <td className="px-3 py-2 text-right">
+                        {f.status !== 'paga' && f.status !== 'cancelada' && (
+                          <button onClick={() => quitarFatura(f.id)} className="bbt-button-outline h-8 text-xs">
+                            <CheckCircle2 className="w-3 h-3" /> Marcar paga
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+                {faturas.length === 0 && (
+                  <tr><td colSpan={6} className="px-3 py-10 text-center text-sm text-slate-400">Nenhuma fatura corporativa.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <Modal open={!!pagamento} onClose={() => setPagamento(null)} title={pagamento ? `${pagamento.tipo === 'pagar' ? 'Pagar' : 'Receber'}: ${pagamento.descricao}` : ''} size="md">
+        {pagamento && user && (
+          <PagamentoForm lancamento={pagamento} userId={user.id} userName={user.name}
+            onSucesso={() => { setPagamento(null); refresh() }} />
+        )}
+      </Modal>
+
+      <AIAssistantFab
+        pageContext="Financeiro"
+        dataContext={`Total a receber: ${formatarValor(resumo?.total_a_receber || 0)}\nTotal a pagar: ${formatarValor(resumo?.total_a_pagar || 0)}\nRecebido: ${formatarValor(resumo?.recebido || 0)}\nPago: ${formatarValor(resumo?.pago || 0)}\nSaldo previsto: ${formatarValor(resumo?.saldo_previsto || 0)}\nLançamentos a receber: ${aReceber.length}\nLançamentos a pagar: ${aPagar.length}`}
+        suggestedPrompts={[
+          'Quais clientes estão atrasados nos pagamentos?',
+          'Resumo financeiro do mês',
+          'Quanto vou receber nos próximos 7 dias?',
+          'Qual fornecedor com maior valor a pagar?',
+          'Tem alguma anomalia no fluxo de caixa?',
+        ]}
+      />
+    </div>
+  )
+}
+
+function PagamentoForm({ lancamento, userId, userName, onSucesso }: any) {
+  const restante = lancamento.valor - lancamento.valor_pago
+  const [valor, setValor] = useState(restante)
+  const [data, setData] = useState(todayISODate())
+  const [forma, setForma] = useState<FormaPagamento>('PIX')
+
+  function submit() {
+    if (valor <= 0) { toast.error('Valor inválido'); return }
+    if (pagarLancamento(lancamento.id, valor, data, forma, userId, userName)) {
+      toast.success('Lançamento atualizado')
+      onSucesso()
+    } else { toast.error('Erro') }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="text-sm bg-bbt-gray-50 dark:bg-slate-800 rounded-lg p-3">
+        <div className="flex justify-between"><span>Valor total</span><strong>{formatarValor(lancamento.valor)}</strong></div>
+        <div className="flex justify-between"><span>Já {lancamento.tipo === 'pagar' ? 'pago' : 'recebido'}</span><span className="text-green-600">{formatarValor(lancamento.valor_pago)}</span></div>
+        <div className="flex justify-between border-t border-bbt-gray-200 dark:border-slate-700 mt-1 pt-1"><span>Restante</span><strong>{formatarValor(restante)}</strong></div>
+      </div>
+      <div>
+        <label className="text-xs uppercase tracking-wider text-slate-500">Valor</label>
+        <input type="number" step="0.01" value={valor} onChange={(e) => setValor(parseFloat(e.target.value) || 0)} className="bbt-input w-full" />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="text-xs uppercase tracking-wider text-slate-500">Data</label>
+          <input type="date" value={data} onChange={(e) => setData(e.target.value)} className="bbt-input w-full" />
+        </div>
+        <div>
+          <label className="text-xs uppercase tracking-wider text-slate-500">Forma</label>
+          <select value={forma} onChange={(e) => setForma(e.target.value as FormaPagamento)} className="bbt-input w-full">
+            <option>PIX</option>
+            <option>Boleto</option>
+            <option>TED</option>
+            <option>Cartão</option>
+            <option>Dinheiro</option>
+            <option>Faturamento</option>
+            <option>Outro</option>
+          </select>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 pt-2">
+        <button onClick={submit} className="bbt-button-primary flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4" /> Confirmar
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function KPI({ icon: Icon, cor, label, valor, sub }: any) {
+  return (
+    <div className="bbt-card p-3">
+      <Icon className={`w-5 h-5 ${cor} mb-1`} />
+      <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="text-lg font-bold">{valor}</div>
+      {sub && <div className="text-[10px] text-slate-400 mt-0.5">{sub}</div>}
+    </div>
+  )
+}
+
+function BtnAba({ active, onClick, label }: any) {
+  return (
+    <button
+      onClick={onClick}
+      className={`bbt-tab ${active ? 'bbt-tab-active' : ''}`}
+    >
+      {label}
+    </button>
+  )
+}
+
+function Info({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-bbt-gray-100 p-2 dark:border-slate-700">
+      <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="text-sm font-semibold">{value}</div>
+    </div>
+  )
+}
+
+function EmpresaCarteiraSelect({
+  empresas,
+  value,
+  onChange,
+}: {
+  empresas: Array<{ id: string; nome: string }>
+  value: string
+  onChange: (empresaId: string) => void
+}) {
+  return (
+    <div>
+      <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Empresa da carteira</label>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="bbt-input">
+        <option value="">Selecione uma empresa</option>
+        {empresas.map((empresa) => (
+          <option key={empresa.id} value={empresa.id}>{empresa.nome}</option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, { bg: string; label: string }> = {
+    pendente: { bg: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300', label: 'Pendente' },
+    pago: { bg: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400', label: 'Pago' },
+    parcial: { bg: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400', label: 'Parcial' },
+    atrasado: { bg: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400', label: 'Atrasado' },
+    cancelado: { bg: 'bg-slate-100 text-slate-400 dark:bg-slate-800', label: 'Cancelado' },
+    aberta: { bg: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400', label: 'Aberta' },
+    fechada: { bg: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300', label: 'Fechada' },
+    vencida: { bg: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400', label: 'Vencida' },
+    ativa: { bg: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400', label: 'Ativa' },
+    bloqueada: { bg: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400', label: 'Bloqueada' },
+    pendente_configuracao: { bg: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300', label: 'Pendente configuracao' },
+    ativo: { bg: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400', label: 'Ativo' },
+    bloqueado: { bg: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400', label: 'Bloqueado' },
+    pendente_emissao: { bg: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300', label: 'Pendente emissao' },
+  }
+  const c = map[status] || map.pendente
+  return <span className={`text-[10px] px-2 py-0.5 rounded ${c.bg}`}>{c.label}</span>
+}
+
+function ultimoDiaMes(yyyyMm: string): string {
+  return lastDayOfMonthISODate(yyyyMm)
+}
+
+function addDays(iso: string, days: number): string {
+  return addDaysISODate(iso, days)
+}

@@ -1,0 +1,121 @@
+════════════════════════════════════════════════════════════════
+  BBT CORPORATIVO V10 — Vouchers + IA Real + Voucher Imprimível
+════════════════════════════════════════════════════════════════
+
+🆕 PRINCIPAIS NOVIDADES DA V10
+
+✅ SISTEMA COMPLETO DE VOUCHERS EMITIDOS
+   - Cadastro de voucher com numeração sequencial (H-26262, A-...)
+   - 4 tipos: Hotel, Aéreo, Carro, Pacote
+   - 4 status: rascunho, emitido, confirmado, cancelado
+   - Layout de impressão fiel ao seu voucher BBT (Strassen Hotel)
+   - Vincula automaticamente a uma demanda (1 clique pra preencher tudo)
+   - Compartilhamento por WhatsApp, Email, Cópia de link
+   - Lista com filtros (tipo, status, empresa, busca)
+   - Estatísticas: total faturado, por tipo, por status
+
+✅ IA CLAUDE INTEGRADA (REAL)
+   - Chat conversacional em português: /dashboard/ia-chat
+   - Análise de mensagens (texto + imagens) na Caixa de Entrada
+   - Configurável via .env.local (ANTHROPIC_API_KEY)
+   - Sem chave: usa parser local (sistema funciona normal)
+   - Com chave: precisão muito maior em emails/prints/áudios
+
+✅ INTEGRAÇÃO VOUCHER + DEMANDA
+   - Botão "Gerar Voucher" no modal de demanda → preenche tudo
+   - Botão de voucher em cada card de demanda na lista
+   - Botão de voucher na caixa de entrada após criar demanda
+
+✅ CONFIGURAÇÕES MELHORADAS
+   - Card de Notificações (som + browser, com botão de testar)
+   - Card de IA (mostra se está configurada, com instruções)
+
+✅ DEBUG VISÍVEL NA IMPORTAÇÃO
+   - Quando o tipo não é detectado, mostra preview do PDF
+   - Console logs detalhados pra debug rápido
+
+════════════════════════════════════════════════════════════════
+  COMO INSTALAR
+════════════════════════════════════════════════════════════════
+
+PASSO 1 - Extrair o ZIP
+
+PASSO 2 - Abrir terminal na pasta:
+
+    cd bbt-v9
+    npm install
+    npm run dev
+
+PASSO 3 - Navegador: http://localhost:3000
+
+PASSO 4 - Login: use o e-mail administrativo e a senha configurada em BBT_SUPER_MASTER_PASSWORD.
+
+════════════════════════════════════════════════════════════════
+  ATIVAR A IA CLAUDE (OPCIONAL MAS RECOMENDADO)
+════════════════════════════════════════════════════════════════
+
+Sem chave, o sistema funciona normalmente com parser local.
+Com chave, a IA reconhece prints, áudios e emails com altíssima precisão.
+
+PASSO 1 - Pegue uma chave em https://console.anthropic.com
+          (cadastro grátis, custo ~R$ 0,03 por análise)
+
+PASSO 2 - Crie um arquivo .env.local na raiz do projeto:
+
+    ANTHROPIC_API_KEY=sk-ant-sua-chave-aqui
+
+PASSO 3 - Reinicie o servidor:
+
+    Ctrl+C
+    npm run dev
+
+PASSO 4 - Acesse /dashboard/configuracoes
+          O card "Inteligência Artificial" deve estar VERDE
+
+PASSO 5 - Acesse /dashboard/ia-chat e converse com o assistente
+
+════════════════════════════════════════════════════════════════
+  ROTEIRO DE PRIMEIRO USO V10
+════════════════════════════════════════════════════════════════
+
+1️⃣ Login
+
+2️⃣ Configurações > Backup > "Exportar backup completo"
+   (segurança antes de testar)
+
+3️⃣ Importar dados (se ainda não tiver):
+   - Planilha de hotéis primeiro
+   - Mapa de Produção PDF (cria empresas + demandas + funcionários)
+   - Planilha de funcionários
+
+4️⃣ Caixa de Entrada — testar IA
+   - Cole o email do Outlook (formato tabular Andressa/Rebic)
+   - Clique "Analisar com IA" (se chave configurada) ou
+     o parser local detecta automaticamente
+   - Confirme os campos e crie a demanda
+
+5️⃣ Vá em Demandas > clique no ícone FileText do card
+   ou
+   Vouchers > Novo Voucher
+   ou
+   Caixa de Entrada > após criar demanda > "Gerar Voucher"
+
+6️⃣ Imprima o voucher (Ctrl+P) - formato A4 idêntico ao seu modelo BBT
+
+════════════════════════════════════════════════════════════════
+  PRÓXIMOS PASSOS (NUVEM)
+════════════════════════════════════════════════════════════════
+
+Pra ter WhatsApp/email automático 24/7, leia PLANO-NUVEM.md.
+Resumo: migração pra Vercel + Supabase + Z-API, custo ~R$ 150-400/mês.
+
+════════════════════════════════════════════════════════════════
+  LOGIN
+════════════════════════════════════════════════════════════════
+
+Email: conta administrativa configurada no sistema
+Senha: valor privado de BBT_SUPER_MASTER_PASSWORD no servidor
+
+════════════════════════════════════════════════════════════════
+                       BBT V10 — 29/04/2026
+════════════════════════════════════════════════════════════════
