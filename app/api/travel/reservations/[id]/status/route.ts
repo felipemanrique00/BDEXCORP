@@ -8,7 +8,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
-  const guard = guardApiRequest(request, { requireAuth: true, roles: ['master'], rateLimit: { key: 'travel-status:get', limit: 80, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, { requireAuth: true, roles: ['master'], rateLimit: { key: 'travel-status:get', limit: 80, windowMs: 60_000 } })
   if (guard.response) return guard.response
 
   try {

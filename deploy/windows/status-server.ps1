@@ -24,7 +24,7 @@ $result = [ordered]@{
     working_set_mb = if ($process) { [Math]::Round($process.WorkingSet64 / 1MB, 1) } else { $null }
     state = if ($state) { [string]$state.status } else { 'not-initialized' }
     scheduled_task = if ($task) { [string]$task.State } else { 'not-installed' }
-    database_configured = $probe.database_configured
+    database_ready = $probe.database_ready
     log_directory = $paths.LogRoot
     backup_directory = $paths.BackupRoot
 }

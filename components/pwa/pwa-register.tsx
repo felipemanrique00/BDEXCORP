@@ -6,6 +6,7 @@
  * Silencioso: erros não quebram a aplicação.
  */
 import { useEffect } from 'react'
+import { reportClientFailure } from '@/lib/client-observability'
 
 export function PWARegister() {
   useEffect(() => {
@@ -16,7 +17,9 @@ export function PWARegister() {
     const handler = () => {
       navigator.serviceWorker
         .register('/sw.js', { scope: '/' })
-        .catch(() => undefined)
+        .catch((error) => {
+          reportClientFailure('service_worker_registration_failed', error, { component: 'pwa-register' })
+        })
     }
 
     if (document.readyState === 'complete') handler()

@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const Module = require('node:module')
 const ts = require('typescript')
@@ -71,9 +70,8 @@ const { detectarPassageirosSemFuncionario, detectarVendasDuplicadas } = require(
 const { scopeStorageEntriesForRead, scopeStorageEntriesForWrite } = require('../lib/security/storage-scope.ts')
 const { fetchServerSession } = require('../lib/client-session.ts')
 const { escapeHtmlText, serializeForInlineScript } = require('../lib/security/html.ts')
-const { voucherPdfBlob } = require('../lib/vouchers-storage.ts')
+const { validatePdfUpload } = require('../lib/security/pdf-upload.ts')
 const { readJsonBody, readJsonBodyResult, RequestBodyError } = require('../lib/security/request-body.ts')
-const { authRequired, signSession } = require('../lib/server-auth.ts')
 const { buildCsv, csvCell } = require('../lib/browser-download.ts')
 const { normalizeMaxOutputTokens } = require('../lib/server-ai.ts')
 const { maskSensitive } = require('../lib/integrations/tech/tech-errors.ts')
@@ -99,6 +97,14 @@ assertRouteUsesApiGuard('app/api/ia/search/route.ts', 'ia-search:post')
 
   const techEmissionsRoute = fs.readFileSync(path.join(root, 'app/api/integrations/tech/emissions/route.ts'), 'utf8')
   assert.match(techEmissionsRoute, /permission:\s*'importar_planilhas'/, 'relatorio Tech deve exigir permissao de importacao')
+
+  const readinessRoute = fs.readFileSync(path.join(root, 'app/api/ready/route.ts'), 'utf8')
+  const migrationRunner = fs.readFileSync(path.join(root, 'scripts/migrate.mjs'), 'utf8')
+  assert.match(readinessRoute, /DATABASE_ROLE_INSECURE/, 'readiness deve bloquear papel PostgreSQL inseguro')
+  assert.match(readinessRoute, /rolsuper/, 'readiness deve verificar superusuario')
+  assert.match(readinessRoute, /rolbypassrls/, 'readiness deve verificar BYPASSRLS')
+  assert.match(migrationRunner, /DATABASE_APP_ROLE/, 'migrations devem provisionar papel separado da aplicacao')
+  assert.match(migrationRunner, /nosuperuser[\s\S]*nobypassrls/, 'papel da aplicacao deve ser criado sem bypass de RLS')
   assert.match(techEmissionsRoute, /readJsonBodyResult<unknown>\(request,\s*32 \* 1024\)/, 'relatorio Tech deve limitar o corpo da requisicao')
 
   const storageRoute = fs.readFileSync(path.join(root, 'app/api/storage/route.ts'), 'utf8')
@@ -114,12 +120,18 @@ assertRouteUsesApiGuard('app/api/ia/search/route.ts', 'ia-search:post')
   assert.match(storageQuota, /wasStorageKeyCleared\(remoteMetadata, key\)/, 'dados apagados nao podem ser reenviados por navegadores antigos')
 
   const resetRoute = fs.readFileSync(path.join(root, 'app/api/system/reset/route.ts'), 'utf8')
+  const resetService = fs.readFileSync(path.join(root, 'lib/server/system-reset-service.ts'), 'utf8')
   assert.match(resetRoute, /permission:\s*'gerenciar_usuarios'/, 'reset completo deve exigir permissao administrativa')
-  assert.match(resetRoute, /RESETTABLE_SHARED_STORAGE_KEYS/, 'reset completo deve usar o catalogo central de dados')
-  assert.match(resetRoute, /fullReset:\s*true/, 'reset completo deve registrar o marcador global')
+  assert.match(resetRoute, /resetTenantBusinessData/, 'reset completo deve delegar para o servico transacional')
+  assert.match(resetService, /RESETTABLE_SHARED_STORAGE_KEYS/, 'reset completo deve usar o catalogo central de dados')
+  assert.match(resetService, /fullReset:\s*true/, 'reset completo deve registrar o marcador global')
 
   const settingsPage = fs.readFileSync(path.join(root, 'app/dashboard/configuracoes/page.tsx'), 'utf8')
-  assert.match(settingsPage, /resetAllSystemData\('APAGAR TUDO'\)/, 'tela de configuracoes deve aguardar o reset transacional')
+  assert.match(
+    settingsPage,
+    /await resetAllSystemData\('APAGAR TUDO',\s*senhaConfirmacao\)/,
+    'tela de configuracoes deve aguardar o reset transacional com reautenticacao',
+  )
   assert.doesNotMatch(settingsPage, /const chaves = \[/, 'tela de configuracoes nao deve manter uma lista manual incompleta')
 
   for (const requiredKey of [
@@ -411,28 +423,17 @@ assertRouteUsesApiGuard('app/api/ia/search/route.ts', 'ia-search:post')
 }
 
 {
-  const previous = {
-    NODE_ENV: process.env.NODE_ENV,
-    AUTH_REQUIRE_SESSION: process.env.AUTH_REQUIRE_SESSION,
-    AUTH_SECRET: process.env.AUTH_SECRET,
-    NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET,
-  }
-  try {
-    process.env.NODE_ENV = 'production'
-    process.env.AUTH_REQUIRE_SESSION = 'false'
-    delete process.env.AUTH_SECRET
-    delete process.env.NEXTAUTH_SECRET
-    assert.equal(authRequired(), true, 'producao nunca pode iniciar com APIs sem sessao')
-    assert.throws(
-      () => signSession({ id: 'user-a', email: 'a@example.com', name: 'A', role: 'master' }),
-      /AUTH_SECRET obrigatorio/,
-    )
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value == null) delete process.env[key]
-      else process.env[key] = value
-    }
-  }
+  const serverAuthSource = fs.readFileSync(path.join(root, 'lib/server-auth.ts'), 'utf8')
+  assert.match(
+    serverAuthSource,
+    /export function authRequired\(\): boolean \{\s*return true\s*\}/,
+    'as APIs nunca podem iniciar com sessao opcional',
+  )
+  assert.doesNotMatch(
+    serverAuthSource,
+    /AUTH_REQUIRE_SESSION/,
+    'a exigencia de sessao nao pode depender de uma flag de ambiente',
+  )
 }
 
 for (const directory of ['app/api/travel', 'app/api/integrations/tech']) {
@@ -466,12 +467,16 @@ for (const directory of ['app/api/travel', 'app/api/integrations/tech']) {
     }
   }
 
-  const authSource = fs.readFileSync(path.join(root, 'lib/auth.ts'), 'utf8')
+  const authService = fs.readFileSync(path.join(root, 'lib/server/auth-service.ts'), 'utf8')
   const usersPage = fs.readFileSync(path.join(root, 'app/dashboard/usuarios/page.tsx'), 'utf8')
   const requestersPage = fs.readFileSync(path.join(root, 'components/empresas/solicitantes-empresa-tab.tsx'), 'utf8')
-  assert.match(authSource, /data\.password\.length < 8/, 'dominio deve exigir senha minima de 8 caracteres')
-  assert.match(usersPage, /password\.length < 8/, 'cadastro interno deve validar senha minima de 8 caracteres')
-  assert.match(requestersPage, /password\.length < 8/, 'acesso do portal deve validar senha minima de 8 caracteres')
+  assert.match(authService, /password\.length < 12/, 'servidor deve exigir senha minima de 12 caracteres')
+  assert.match(authService, /!\/\[a-z\]\//, 'servidor deve exigir letra minuscula')
+  assert.match(authService, /!\/\[A-Z\]\//, 'servidor deve exigir letra maiuscula')
+  assert.match(authService, /!\/\\d\//, 'servidor deve exigir numero')
+  assert.match(authService, /!\/\[\^A-Za-z0-9\]\//, 'servidor deve exigir simbolo')
+  assert.match(usersPage, /password\.length < 12/, 'cadastro interno deve validar senha minima de 12 caracteres')
+  assert.match(requestersPage, /password\.length < 12/, 'acesso do portal deve validar senha minima de 12 caracteres')
 }
 
 for (const relativePath of [
@@ -494,10 +499,12 @@ for (const relativePath of [
   assert.ok(serialized.includes('\\u003c/script\\u003e'))
   assert.equal(escapeHtmlText('<img src=x onerror=alert(1)>'), '&lt;img src=x onerror=alert(1)&gt;')
 
-  const validPdf = `data:application/octet-stream;base64,${Buffer.from('%PDF-1.7\n%%EOF').toString('base64')}`
-  assert.equal(voucherPdfBlob({ base64_data: validPdf })?.type, 'application/pdf')
-  const htmlPayload = `data:text/html;base64,${Buffer.from('<script>alert(1)</script>').toString('base64')}`
-  assert.equal(voucherPdfBlob({ base64_data: htmlPayload }), null)
+  const validPdf = Buffer.from('%PDF-1.7\n%%EOF')
+  assert.doesNotThrow(() => validatePdfUpload(validPdf, 'voucher.pdf', 1024))
+  assert.throws(
+    () => validatePdfUpload(Buffer.from('<script>alert(1)</script>'), 'voucher.pdf', 1024),
+    /nao e um PDF valido/,
+  )
 
   assert.equal(csvCell('=HYPERLINK("https://example.invalid")'), '"\'=HYPERLINK(""https://example.invalid"")"')
   assert.equal(csvCell('  @SUM(1,1)'), '"\'  @SUM(1,1)"')
@@ -1072,71 +1079,11 @@ const atendimentos = [
   assert.equal(resolvidoImportacao?.metodo, 'alias_manual')
 }
 
-async function testFileStorageConcurrency() {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bbt-storage-test-'))
-  const storageFile = path.join(tempDir, 'app-kv.json')
-  const previousStorageFile = process.env.BBT_STORAGE_FILE
-  const previousDatabaseUrl = process.env.DATABASE_URL
-  const originalRename = fs.promises.rename
-  let renameAttempts = 0
-
-  process.env.BBT_STORAGE_FILE = storageFile
-  delete process.env.DATABASE_URL
-  fs.promises.rename = async (...args) => {
-    renameAttempts += 1
-    if (renameAttempts === 1) {
-      const error = new Error('arquivo temporariamente bloqueado')
-      error.code = 'EPERM'
-      throw error
-    }
-    return originalRename(...args)
-  }
-
-  try {
-    const { deleteStorageEntries, getStorageEntries, setStorageEntries } = require('../lib/server-db.ts')
-    const { isPasswordHash, verifyPassword } = require('../lib/security/password.ts')
-    await Promise.all([
-      setStorageEntries({ 'bbt-alertas': [{ id: 'alerta-a' }] }),
-      setStorageEntries({ 'bbt-auditoria': [{ id: 'audit-a' }] }),
-      setStorageEntries({ 'bbt-financeiro': [{ id: 'fin-a' }] }),
-    ])
-    const entries = await getStorageEntries()
-    assert.equal(entries['bbt-alertas']?.length, 1)
-    assert.equal(entries['bbt-auditoria']?.length, 1)
-    assert.equal(entries['bbt-financeiro']?.length, 1)
-    assert.ok(renameAttempts >= 2, 'storage deve repetir a troca atomica quando o Windows bloquear o arquivo')
-
-    await setStorageEntries({
-      'bbt-users-v4': [{ user: { id: 'user-a', email: 'a@example.com', ativo: true }, password: 'senha-segura' }],
-    })
-    const protectedEntries = await getStorageEntries()
-    const account = protectedEntries['bbt-users-v4'][0]
-    assert.equal(isPasswordHash(account.password), true)
-    assert.equal(await verifyPassword('senha-segura', account.password), true)
-    assert.equal(await verifyPassword('senha-incorreta', account.password), false)
-
-    const deleted = await deleteStorageEntries([
-      'bbt-alertas',
-      'bbt-auditoria',
-      'bbt-financeiro',
-      'bbt-users-v4',
-    ], { fullReset: true })
-    assert.equal(deleted, 4)
-    const clearedEntries = await getStorageEntries()
-    assert.equal(clearedEntries['bbt-alertas'], undefined)
-    assert.equal(clearedEntries['bbt-auditoria'], undefined)
-    assert.equal(clearedEntries['bbt-financeiro'], undefined)
-    assert.equal(clearedEntries['bbt-users-v4'], undefined)
-    assert.equal(clearedEntries[SYSTEM_STORAGE_META_KEY].full_reset_id.length > 0, true)
-    assert.equal(Boolean(clearedEntries[SYSTEM_STORAGE_META_KEY].cleared_keys['bbt-alertas']), true)
-  } finally {
-    fs.promises.rename = originalRename
-    if (previousStorageFile == null) delete process.env.BBT_STORAGE_FILE
-    else process.env.BBT_STORAGE_FILE = previousStorageFile
-    if (previousDatabaseUrl == null) delete process.env.DATABASE_URL
-    else process.env.DATABASE_URL = previousDatabaseUrl
-    fs.rmSync(tempDir, { recursive: true, force: true })
-  }
+{
+  const serverDbSource = fs.readFileSync(path.join(root, 'lib/server-db.ts'), 'utf8')
+  assert.match(serverDbSource, /withTenantTransaction\(/, 'persistencia compartilhada deve executar em transacao de tenant')
+  assert.match(serverDbSource, /tenant_id = \$1/, 'consultas compartilhadas devem filtrar pelo tenant')
+  assert.doesNotMatch(serverDbSource, /BBT_STORAGE_FILE|app-kv\.json|writeFile\(/, 'persistencia local nao pode voltar como fonte de verdade')
 }
 
 async function testClientSessionFailsClosed() {
@@ -1211,7 +1158,6 @@ async function testLazyWintourCsvParser() {
 testClientSessionFailsClosed()
   .then(testLimitedJsonReader)
   .then(testLazyWintourCsvParser)
-  .then(testFileStorageConcurrency)
   .then(() => console.log('domain-tests: ok'))
   .catch((error) => {
     console.error(error)

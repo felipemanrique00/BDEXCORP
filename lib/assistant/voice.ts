@@ -18,7 +18,7 @@ export async function transcribeAssistantAudio(input: {
   const provider = settings.voice.transcriptionProvider
 
   if (input.base64) {
-    if (process.env.OPENAI_API_KEY && provider !== 'mock') {
+    if (process.env.OPENAI_API_KEY && provider === 'openai') {
       try {
         const transcript = await transcribeAudioWithOpenAI({
           base64: input.base64,
@@ -54,28 +54,27 @@ export async function transcribeAssistantAudio(input: {
       }
     }
 
-    if (!input.textFallback?.trim()) {
-      const message = 'Nao consegui ler o audio porque o provedor de transcricao nao esta configurado no servidor.'
-      const log: AudioTranscriptionLog = {
-        id: createId('stt'),
-        provider,
-        status: 'failed',
-        language: settings.voice.language,
-        source: input.channel,
-        fileName: input.fileName,
-        error: message,
-        createdAt: new Date().toISOString(),
-      }
-      await appendAssistantList(ASSISTANT_KEYS.audioTranscriptions, log, 500)
-      throw new Error(message)
+    const message = 'Nao consegui ler o audio porque o provedor de transcricao nao esta configurado no servidor.'
+    const log: AudioTranscriptionLog = {
+      id: createId('stt'),
+      provider,
+      status: 'failed',
+      language: settings.voice.language,
+      source: input.channel,
+      fileName: input.fileName,
+      error: message,
+      createdAt: new Date().toISOString(),
     }
+    await appendAssistantList(ASSISTANT_KEYS.audioTranscriptions, log, 500)
+    throw new Error(message)
   }
 
-  const transcript = input.textFallback?.trim() || '[audio recebido - transcricao real exige provedor configurado]'
+  const transcript = input.textFallback?.trim()
+  if (!transcript) throw new Error('Audio ou transcricao obrigatoria.')
   const log: AudioTranscriptionLog = {
     id: createId('stt'),
-    provider,
-    status: 'mocked',
+    provider: 'provided-transcript',
+    status: 'success',
     language: settings.voice.language,
     source: input.channel,
     fileName: input.fileName,
@@ -98,7 +97,7 @@ export async function generateAssistantAudio(input: { text: string }): Promise<{
   const format = normalizeSpeechFormat(settings.voice.audioFormat)
   const openAIVoice = selectOpenAIVoice(settings.voice, process.env.OPENAI_TTS_VOICE)
 
-  if (process.env.OPENAI_API_KEY && provider !== 'mock' && settings.voice.textToSpeechEnabled) {
+  if (process.env.OPENAI_API_KEY && provider === 'openai' && settings.voice.textToSpeechEnabled) {
     try {
       const response = await fetch('https://api.openai.com/v1/audio/speech', {
         method: 'POST',
@@ -149,37 +148,22 @@ export async function generateAssistantAudio(input: { text: string }): Promise<{
     }
   }
 
-  if (provider === 'openai') {
-    const message = 'Geracao de audio real exige OPENAI_API_KEY configurada no servidor.'
-    const log: AudioGenerationLog = {
-      id: createId('tts'),
-      provider,
-      status: 'failed',
-      voice: settings.voice.voice,
-      format: settings.voice.audioFormat,
-      textPreview: input.text.slice(0, 180),
-      error: message,
-      createdAt: new Date().toISOString(),
-    }
-    await appendAssistantList(ASSISTANT_KEYS.audioGenerations, log, 500)
-    throw new Error(message)
-  }
-
+  const message = provider === 'openai'
+    ? 'Geracao de audio real exige OPENAI_API_KEY configurada no servidor.'
+    : `O provedor de audio "${provider}" nao possui integracao ativa no servidor.`
   const log: AudioGenerationLog = {
     id: createId('tts'),
     provider,
-    status: 'mocked',
+    status: 'failed',
     voice: settings.voice.voice,
     format: settings.voice.audioFormat,
     textPreview: input.text.slice(0, 180),
+    error: message,
     createdAt: new Date().toISOString(),
   }
   await appendAssistantList(ASSISTANT_KEYS.audioGenerations, log, 500)
-  return { text: input.text, audioUrl: undefined, log }
+  throw new Error(message)
 }
-
-export const transcribeAudioMock = transcribeAssistantAudio
-export const generateAudioMock = generateAssistantAudio
 
 function assertAudioInputSize(base64?: string, textFallback?: string): void {
   const encoded = String(base64 || '').replace(/^data:[^,]*,/, '').replace(/\s/g, '')
@@ -214,3 +198,4 @@ function clampSpeechSpeed(speed: number): number {
   if (!Number.isFinite(speed)) return 1
   return Math.min(4, Math.max(0.25, speed))
 }
+import 'server-only'

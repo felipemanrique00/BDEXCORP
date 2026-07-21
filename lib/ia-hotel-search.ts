@@ -9,7 +9,7 @@ export interface HotelAISuggestion extends Omit<Hotel, 'id'> {
 }
 
 export interface HotelSearchResponse {
-  source: 'gemini-google' | 'openai-web' | 'local-fallback'
+  source: 'gemini-google' | 'openai-web' | 'local-catalog'
   query: string
   summary: string
   suggestions: HotelAISuggestion[]

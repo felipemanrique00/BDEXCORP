@@ -1,89 +1,99 @@
 # BDEX - BBT Corporativo
 
-Plataforma de gestão de viagens corporativas da BBT Corporativo. Reúne operação, empresas e grupos, viajantes, vouchers, integrações Wintour e Tech Travel, financeiro, relatórios interativos e a assistente BIA.
+Plataforma multiempresa para operacao de viagens corporativas, empresas e grupos, viajantes, demandas, reservas, vouchers, financeiro, importacoes, relatorios e assistencia operacional.
+
+Esta pasta e a evolucao isolada para producao. O projeto de origem permanece sem alteracoes em `BDEX_RELATORIO_AEREO`.
 
 ## Stack
 
-- Next.js 15 com React 18 e TypeScript.
+- Next.js 15 (App Router), React 18 e TypeScript.
 - Tailwind CSS, Lucide, Recharts e Leaflet.
-- Zustand para estado da aplicação e Zod para validação.
-- PostgreSQL (`pg`) na implantação de produção.
-- Testes de domínio em Node.js e verificações de ESLint/TypeScript.
+- PostgreSQL 16 com migrations versionadas e Row Level Security.
+- Zod, React Hook Form e Zustand.
+- Vitest, Playwright, ESLint e TypeScript.
+- Docker multi-stage, Docker Compose e Caddy.
 
-## Preparação
+## Requisitos
 
-Requisitos: Node.js 20.9 ou superior e npm. O guia completo de implantação está em `INSTALAR.txt`.
+- Node.js 22 LTS e npm 10 ou versoes compativeis.
+- PostgreSQL 16 para qualquer ambiente que persista dados.
+- Docker Engine com Compose v2 para a implantacao de referencia.
+
+Nao existe fallback de producao para JSON local. O navegador mantem apenas cache de trabalho; a fonte compartilhada e PostgreSQL.
+
+## Desenvolvimento
+
+1. Instale as dependencias com `npm ci`.
+2. Crie `.env.local` a partir de `.env.example` e preencha as URLs separadas de aplicacao/migrations, `DATABASE_APP_*`, `AUTH_SECRET` e `APP_URL`.
+3. Execute `npm run db:migrate`.
+4. Defina as variaveis `BOOTSTRAP_*` e execute `npm run db:bootstrap` uma unica vez.
+5. Inicie com `npm run dev`.
+
+O bootstrap e idempotente pelo slug do tenant e nao imprime a senha informada.
+
+## Validacao
 
 ```bash
-npm install
-copy .env.example .env.local
-npm run dev
-```
-
-A aplicação local fica normalmente em `http://localhost:3000`.
-
-Nunca envie `.env.local`, `.env.production.local`, `.bbt-storage` ou logs para o repositório. As integrações opcionais devem ser configuradas apenas pelas variáveis documentadas em `.env.example`.
-
-## Validação
-
-```bash
+npm run db:validate-migrations
+npm run inventory:check
+npm run security:scan
 npm run lint
 npm run typecheck
 npm test
 npm run build
 ```
 
-Para executar toda a linha de qualidade em sequência:
+O comando `npm run validate` executa essa linha local completa. Testes com PostgreSQL, navegador, imagem e recuperacao de desastre estao no workflow `.github/workflows/quality.yml`.
+
+## Producao
+
+O caminho oficial e `docker-compose.production.yml`:
 
 ```bash
-npm run validate
+cp .env.example .env.production
+# Preencha apenas no servidor e proteja o arquivo.
+ENV_FILE=.env.production ./scripts/release.sh
 ```
 
-## Dados e armazenamento
+Servicos de referencia:
 
-- Em desenvolvimento, o storage compartilhado usa `.bbt-storage`, ignorado pelo Git.
-- O cliente hidrata os dados compartilhados e reidrata o store antes de liberar os fluxos autenticados.
-- Importações são consolidadas por chaves estáveis, preservam exclusões e não devem substituir registros de outra empresa.
-- Viajantes usam identificação permanente; aliases e reconciliação manual tratam variações de nomes.
-- O sistema inicia sem empresas, funcionários ou demandas de demonstração.
-- O reset completo é confirmado no servidor, limpa anexos locais e registra marcadores que impedem sessões antigas de restaurar dados apagados.
-- Produção deve usar PostgreSQL com `DATABASE_URL`, backups testados e política de retenção definida.
+- `app`: Next.js como usuario nao root e filesystem somente leitura;
+- `postgres`: rede interna, volume persistente e sem porta publica;
+- `migrate`: migrations com checksum e lock;
+- `caddy`: HTTPS e reverse proxy;
+- `backup`: PostgreSQL e arquivos privados;
+- `restore-validation`: restauracao obrigatoriamente isolada;
+- `bootstrap`: criacao controlada do primeiro tenant e administrador.
 
-Inicialização do banco de produção:
+Consulte [DEPLOYMENT-SERVER.md](docs/DEPLOYMENT-SERVER.md), [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) e [RUNBOOK.md](docs/RUNBOOK.md) antes da primeira implantacao.
 
-```bash
-npm run db:init
-```
+## Seguranca
 
-Os artefatos de implantação ficam em `deploy/postgres`, `deploy/scripts`, `deploy/systemd` e `deploy/nginx`.
+- Sessao opaca armazenada no PostgreSQL, cookie `HttpOnly`, `SameSite=Lax` e `Secure` em HTTPS.
+- Senhas com `scrypt`, politica forte e bloqueio progressivo de login.
+- Permissoes verificadas no servidor e escopo de empresa/grupo aplicado nas APIs.
+- Tenant obtido exclusivamente da sessao; RLS e transacoes definem `app.tenant_id`.
+- O processo web usa papel PostgreSQL sem `SUPERUSER/BYPASSRLS`; readiness bloqueia configuracao insegura.
+- Upload apenas de PDF validado por extensao, tamanho e assinatura, em volume privado.
+- Rate limiting compartilhado no PostgreSQL, auditoria e logs estruturados com redacao de segredos.
+- CSP e headers de seguranca configurados em `next.config.mjs`.
 
-## Segurança e acesso
+## Integracoes
 
-- APIs sensíveis exigem sessão, permissão e limites de requisição/corpo.
-- Usuários de empresa recebem apenas dados do seu escopo.
-- Custos internos, markup, observações internas e informações de pagamento não são expostos na visão do cliente.
-- Alterações de vouchers, hotéis, usuários e configurações administrativas são restritas à equipe autorizada.
+- Tech Travel Relatorios: preparada; exige `TECH_REPORTS_ENABLED` e credenciais reais.
+- Tech Travel transacional: permanece bloqueada enquanto cotacao/reserva/emissao/cancelamento nao forem homologados pelo fornecedor.
+- SMTP: necessario para convites e recuperacao de senha em operacao real.
+- OpenAI/Gemini: opcionais; indisponibilidade e exibida como erro, sem resposta simulada.
+- WhatsApp: somente habilite depois de configurar e homologar o transporte real.
 
-## Relatórios
+## Documentacao
 
-Os relatórios por empresa, grupo, viajante, centro de custo e agente compartilham filtros e regras de acesso. O dashboard corporativo possui gráficos interativos, evolução mensal, rankings e mapa Leaflet. A exportação HTML gera um arquivo autônomo com filtros e interações; os mapas e tiles dependem de conexão com a internet ao abrir o arquivo.
+- [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)
+- [SAAS-ARCHITECTURE.md](docs/SAAS-ARCHITECTURE.md)
+- [SECURITY.md](docs/SECURITY.md)
+- [ENVIRONMENT-VARIABLES.md](docs/ENVIRONMENT-VARIABLES.md)
+- [FEATURE-VERIFICATION.md](docs/FEATURE-VERIFICATION.md)
+- [LGPD-TECHNICAL-CONTROLS.md](docs/LGPD-TECHNICAL-CONTROLS.md)
+- [Inventario gerado](docs/FEATURE-INVENTORY.generated.md)
 
-## Tech Travel
-
-O relatório oficial de emissões pode ser consultado em **Emissões e importações**, sem enviar a credencial ao navegador. Configure `TECH_REPORTS_ENABLED`, `TECH_REPORTS_BASE_URL` e `TECH_REPORTS_KEY` apenas no ambiente do servidor. Esse acesso é independente do conector de cotações e reservas, que usa as variáveis `TECH_API_*`.
-
-Antes de importar, cada cliente retornado pela Tech Travel deve ser vinculado explicitamente a uma empresa local. Reimportações usam identificação estável e atualizam a emissão existente sem transformar margem em economia.
-
-## Documentação
-
-- `docs/AUDITORIA_PRE_DOCUMENTACAO.md`: inventário funcional e técnico.
-- `docs/AUDITORIA_SENIOR_2026_07_14.md`: auditoria e validação mais recente.
-- `docs/RELATORIO_DASHBOARD_INTERATIVO.md`: arquitetura do relatório interativo.
-- `docs/INTEGRACAO_TECH_TRAVEL_EMISSOES.md`: configuração e operação da importação de emissões.
-- `docs/finais`: apresentação, documentação técnica e pendências de implantação.
-
-## Produção
-
-Use HTTPS, Nginx, Node.js LTS, PostgreSQL, firewall, monitoramento, backup diário e teste periódico de restauração. O armazenamento local em JSON é adequado ao desenvolvimento e à migração, mas não substitui o banco transacional em operação concorrente de produção.
-
-Para a hospedagem restrita neste notebook Windows, consulte `HOSPEDAGEM-NO-NOTEBOOK.md`. Essa implantação usa o build de produção do Next.js em `127.0.0.1`, Tarefa Agendada do Windows, backup diário e Tailscale Serve, sem abrir portas no roteador.
+Nenhuma funcionalidade foi intencionalmente removida. Operacoes sem integracao real retornam indisponibilidade explicita em vez de sucesso ficticio.

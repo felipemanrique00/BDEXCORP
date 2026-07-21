@@ -11,6 +11,7 @@ import type { Atendimento, Empresa } from '@/types'
 import { normalizarValor, normalizarData, formatarValor } from './normalizers'
 import { registrarEvento } from './audit'
 import { compactarFinanceiro, loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 export type StatusLancamento = 'pendente' | 'pago' | 'parcial' | 'cancelado' | 'atrasado'
 export type TipoLancamento = 'pagar' | 'receber'
@@ -53,11 +54,13 @@ function load(): LancamentoFinanceiro[] {
 
 function save(arr: LancamentoFinanceiro[]) {
   if (typeof window === 'undefined') return
-  safeSetJSON(STORAGE_KEY, arr.map((item) => compactarFinanceiro(item)))
+  if (!safeSetJSON(STORAGE_KEY, arr.map((item) => compactarFinanceiro(item)))) {
+    throw new Error('Nao foi possivel preparar os dados financeiros para persistencia.')
+  }
 }
 
 function novoId(): string {
-  return `lan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  return createEntityId('lan', '_')
 }
 
 function recalcularStatus(l: LancamentoFinanceiro): StatusLancamento {

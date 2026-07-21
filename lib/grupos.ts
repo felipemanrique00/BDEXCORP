@@ -1,4 +1,5 @@
 import type { Empresa, GrupoEmpresarial, User } from '@/types'
+import { createEntityId } from '@/lib/ids'
 
 export type EscopoGrupoUsuario = {
   podeAcessar: boolean
@@ -11,7 +12,7 @@ export function normalizarListaIds(ids?: Array<string | null | undefined>): stri
 }
 
 export function gerarIdGrupoEmpresarial(): string {
-  return `grp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  return createEntityId('grp')
 }
 
 export function getEmpresaGrupoId(empresa: Empresa, grupos: GrupoEmpresarial[]): string | null {
@@ -149,4 +150,3 @@ export function resolverEscopoGrupoUsuario(
     empresaIdsPermitidas,
   }
 }
-

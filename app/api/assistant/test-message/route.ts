@@ -10,7 +10,8 @@ export const dynamic = 'force-dynamic'
 const MAX_MESSAGE_REQUEST_BYTES = 64 * 1024
 
 export async function POST(request: Request) {
-  const guard = guardApiRequest(request, { requireAuth: true, rateLimit: { key: 'assistant-test-message', limit: 40, windowMs: 60_000 } })
+  if (process.env.NODE_ENV === 'production') return NextResponse.json({ ok: false }, { status: 404 })
+  const guard = await guardApiRequest(request, { requireAuth: true, permission: 'gerenciar_usuarios', rateLimit: { key: 'assistant-test-message', limit: 20, windowMs: 60_000 } })
   if (guard.response) return guard.response
   try {
     const body = await readJsonBody<any>(request, MAX_MESSAGE_REQUEST_BYTES)

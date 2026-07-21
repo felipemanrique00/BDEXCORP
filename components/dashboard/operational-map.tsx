@@ -14,6 +14,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { findCityGeo } from '@/lib/br-cities-geo'
+import { reportClientFailure } from '@/lib/client-observability'
 import type { TipoServico } from '@/types'
 
 export interface MapPoint {
@@ -144,7 +145,9 @@ export default function OperationalMap({
     return () => {
       cancelled = true
       if (mapRef.current) {
-        try { mapRef.current.remove() } catch {}
+        try { mapRef.current.remove() } catch (error) {
+          reportClientFailure('map_cleanup_failed', error, { component: 'operational-map' })
+        }
         mapRef.current = null
       }
       tileLayerRef.current = null
@@ -188,7 +191,9 @@ export default function OperationalMap({
 
       // remove anterior
       if (tileLayerRef.current) {
-        try { tileLayerRef.current.remove() } catch {}
+        try { tileLayerRef.current.remove() } catch (error) {
+          reportClientFailure('map_tile_cleanup_failed', error, { component: 'operational-map' })
+        }
       }
       const url = theme === 'dark' ? TILE_DARK : TILE_LIGHT
       const tile = L.tileLayer(url, {
@@ -219,11 +224,15 @@ export default function OperationalMap({
 
       // Limpa anterior
       if (clusterGroupRef.current) {
-        try { clusterGroupRef.current.clearLayers(); clusterGroupRef.current.remove() } catch {}
+        try { clusterGroupRef.current.clearLayers(); clusterGroupRef.current.remove() } catch (error) {
+          reportClientFailure('map_cluster_cleanup_failed', error, { component: 'operational-map' })
+        }
         clusterGroupRef.current = null
       }
       if (fallbackLayerRef.current) {
-        try { fallbackLayerRef.current.clearLayers(); fallbackLayerRef.current.remove() } catch {}
+        try { fallbackLayerRef.current.clearLayers(); fallbackLayerRef.current.remove() } catch (error) {
+          reportClientFailure('map_layer_cleanup_failed', error, { component: 'operational-map' })
+        }
         fallbackLayerRef.current = null
       }
       markersRef.current = []
@@ -376,7 +385,9 @@ export default function OperationalMap({
       })
 
       if (cancelled || mapRef.current !== map) {
-        try { container.clearLayers() } catch {}
+        try { container.clearLayers() } catch (error) {
+          reportClientFailure('map_stale_layer_cleanup_failed', error, { component: 'operational-map' })
+        }
         return
       }
 
@@ -388,7 +399,9 @@ export default function OperationalMap({
       try {
         const group = L.featureGroup(markersRef.current)
         map.fitBounds(group.getBounds(), { padding: [40, 40], maxZoom: 6 })
-      } catch {}
+      } catch (error) {
+        reportClientFailure('map_fit_bounds_failed', error, { component: 'operational-map' })
+      }
     })()
 
     return () => {

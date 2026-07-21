@@ -34,7 +34,7 @@ function Get-BbtPaths {
         TunnelFile = Join-Path $runtime 'tailscale.json'
         LaunchFile = Join-Path $runtime 'launch-app.cmd'
         BackupRoot = Join-Path $script:BbtProjectRoot '.server-backups'
-        DataFile = Join-Path $script:BbtProjectRoot '.bbt-storage\app-kv.json'
+        FileStorageRoot = Join-Path $script:BbtProjectRoot '.bbt-storage\files'
         AppOutLog = Join-Path $runtime 'logs\application-out.log'
         AppErrorLog = Join-Path $runtime 'logs\application-error.log'
         SupervisorLog = Join-Path $runtime 'logs\supervisor.log'
@@ -77,8 +77,10 @@ function Initialize-BbtRuntime {
     New-Item -ItemType Directory -Path $paths.LogRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $paths.PrivateRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $paths.BackupRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $paths.FileStorageRoot -Force | Out-Null
     Protect-BbtDirectoryAcl -Path $paths.RuntimeRoot
     Protect-BbtDirectoryAcl -Path $paths.BackupRoot
+    Protect-BbtDirectoryAcl -Path $paths.FileStorageRoot
     return $paths
 }
 
@@ -216,14 +218,14 @@ function Invoke-BbtHealthProbe {
         return [pscustomobject]@{
             ok = [bool]$response.ok
             uri = $uri
-            database_configured = [bool]$response.database.configured
+            database_ready = [bool]$response.ok
             error = $null
         }
     } catch {
         return [pscustomobject]@{
             ok = $false
             uri = $uri
-            database_configured = $null
+            database_ready = $false
             error = $_.Exception.Message
         }
     }

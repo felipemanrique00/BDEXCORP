@@ -15,7 +15,7 @@ import {
 import Link from 'next/link'
 import { toast } from 'sonner'
 import {
-  getVouchersByFuncionario, addVoucher, deleteVoucher, fileToBase64,
+  getVouchersByFuncionario, addVoucher, deleteVoucher,
   downloadVoucher, openVoucherInNewTab, formatBytes, getTotalStorageSize,
   type Voucher,
 } from '@/lib/vouchers-storage'
@@ -422,17 +422,25 @@ function ArquivosTab({ funcionarioId, funcionarioNome }: { funcionarioId: string
   const [descricao, setDescricao] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<Voucher | null>(null)
 
-  function reload() { setVouchers(getVouchersByFuncionario(funcionarioId)) }
+  async function reload() {
+    try {
+      setVouchers(await getVouchersByFuncionario(funcionarioId))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel carregar os vouchers.')
+    }
+  }
   useEffect(() => {
-    setVouchers(getVouchersByFuncionario(funcionarioId))
+    void getVouchersByFuncionario(funcionarioId)
+      .then(setVouchers)
+      .catch(() => setVouchers([]))
   }, [funcionarioId])
 
   async function handleFile(file: File) {
     if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
       toast.error('Apenas arquivos PDF são aceitos.'); return
     }
-    if (file.size > 3 * 1024 * 1024) {
-      toast.error('Arquivo muito grande (máx 3MB).'); return
+    if (file.size > 15 * 1024 * 1024) {
+      toast.error('Arquivo muito grande (máx 15MB).'); return
     }
     setPendingFile(file)
     setDescricao(`Voucher ${new Date().toLocaleDateString('pt-BR')}`)
@@ -443,18 +451,16 @@ function ArquivosTab({ funcionarioId, funcionarioNome }: { funcionarioId: string
     if (!pendingFile) return
     setUploading(true)
     try {
-      const base64 = await fileToBase64(pendingFile)
-      const result = addVoucher({
+      await addVoucher({
+        file: pendingFile,
         funcionario_id: funcionarioId,
-        nome_arquivo: pendingFile.name,
-        tamanho_bytes: pendingFile.size,
-        mime_type: pendingFile.type || 'application/pdf',
         descricao: descricao || 'Voucher',
-        base64_data: base64,
       })
-      if (result) { toast.success('Voucher anexado!'); reload() }
-      else toast.error('Erro ao salvar. Espaço cheio.')
-    } catch { toast.error('Erro ao ler o arquivo.') }
+      toast.success('Voucher anexado!')
+      await reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Erro ao armazenar o arquivo.')
+    }
     finally {
       setUploading(false)
       setUploadModalOpen(false)
@@ -463,9 +469,7 @@ function ArquivosTab({ funcionarioId, funcionarioNome }: { funcionarioId: string
     }
   }
 
-  const totalSize = getTotalStorageSize()
-  const MAX = 5 * 1024 * 1024
-  const warn = totalSize > MAX * 0.7
+  const totalSize = getTotalStorageSize(vouchers)
 
   return (
     <div className="space-y-4">
@@ -476,21 +480,15 @@ function ArquivosTab({ funcionarioId, funcionarioNome }: { funcionarioId: string
               <FileCheck className="w-5 h-5 text-bbt-accent" />
               Vouchers e Arquivos de {funcionarioNome.split(' ')[0]}
             </h3>
-            <p className="text-xs text-slate-500 mt-1">{vouchers.length} arquivo(s) · PDFs até 3MB</p>
+            <p className="text-xs text-slate-500 mt-1">{vouchers.length} arquivo(s) · {formatBytes(totalSize)} armazenados</p>
           </div>
         </div>
         <label className="block border-2 border-dashed border-bbt-gray-100 dark:border-slate-700 rounded-xl p-8 text-center cursor-pointer hover:border-bbt-accent hover:bg-bbt-accent/5 transition">
           <Upload className="w-10 h-10 mx-auto text-bbt-accent mb-3" />
           <p className="font-medium text-bbt-primary dark:text-white">Clique para selecionar um PDF</p>
-          <p className="text-xs text-slate-500 mt-1">Vouchers de hotel, passagens, comprovantes — PDF até 3MB</p>
+          <p className="text-xs text-slate-500 mt-1">Vouchers de hotel, passagens e comprovantes · PDF até 15MB</p>
           <input type="file" accept=".pdf,application/pdf" onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} className="hidden" />
         </label>
-        {warn && (
-          <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-            <div>Armazenamento local {((totalSize / MAX) * 100).toFixed(0)}% cheio ({formatBytes(totalSize)}).</div>
-          </div>
-        )}
       </div>
 
       {vouchers.length === 0 ? (
@@ -547,7 +545,15 @@ function ArquivosTab({ funcionarioId, funcionarioNome }: { funcionarioId: string
       <ConfirmDialog
         open={!!confirmDelete}
         onClose={() => setConfirmDelete(null)}
-        onConfirm={() => { if (confirmDelete) { deleteVoucher(confirmDelete.id); reload(); toast.success('Voucher removido.') } }}
+        onConfirm={() => {
+          if (!confirmDelete) return
+          void deleteVoucher(confirmDelete.id)
+            .then(async () => {
+              await reload()
+              toast.success('Voucher removido.')
+            })
+            .catch((error) => toast.error(error instanceof Error ? error.message : 'Nao foi possivel remover o voucher.'))
+        }}
         title="Remover voucher"
         message={`Confirma a exclusão de "${confirmDelete?.descricao}"?`}
         confirmLabel="Remover"

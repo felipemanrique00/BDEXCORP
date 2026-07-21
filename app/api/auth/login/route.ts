@@ -1,76 +1,105 @@
 import { NextResponse } from 'next/server'
+import { z } from 'zod'
 
-import { SUPER_MASTER, getServerSuperMasterPassword } from '@/lib/auth-constants'
-import { getStorageEntries, setStorageEntries } from '@/lib/server-db'
+import {
+  authenticateCredentials,
+  createSession,
+  getClientIp,
+} from '@/lib/server/auth-service'
+import { logError } from '@/lib/server/logger'
 import { guardApiRequest } from '@/lib/security/api-guard'
-import { isPasswordHash, verifyPassword } from '@/lib/security/password'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
-import { sessionCookieName, sessionMaxAgeSeconds, signSession } from '@/lib/server-auth'
-import type { User } from '@/types'
+import { secureSessionCookie, sessionCookieName, sessionMaxAgeSeconds } from '@/lib/server-auth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-interface ContaLocal {
-  user: User
-  password: string
-}
+const loginSchema = z.object({
+  email: z.string().trim().email().max(254),
+  password: z.string().min(1).max(1_024),
+  tenant: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/).optional(),
+})
 
 export async function POST(request: Request) {
-  const guard = guardApiRequest(request, {
+  const guard = await guardApiRequest(request, {
     requireAuth: false,
     rateLimit: { key: 'auth-login:post', limit: 10, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
 
   try {
-    const body = await readJsonBody<{ email?: unknown; password?: unknown }>(request, 16 * 1024)
-    const email = String(body?.email || '').trim().toLowerCase()
-    const password = String(body?.password || '')
+    const body = loginSchema.parse(await readJsonBody<unknown>(request, 16 * 1024))
+    const metadata = {
+      ipAddress: getClientIp(request),
+      userAgent: request.headers.get('user-agent'),
+      requestId: guard.requestId,
+    }
+    const authentication = await authenticateCredentials(
+      body.email,
+      body.password,
+      body.tenant || null,
+      metadata,
+    )
 
-    if (!email || !password) {
-      return NextResponse.json({ ok: false, error: 'Informe e-mail e senha.' }, { status: 400 })
+    if (!authentication.principal) {
+      if (authentication.failure === 'workspace_required') {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: 'Informe o ambiente da organizacao para continuar.',
+            code: 'WORKSPACE_REQUIRED',
+            requestId: guard.requestId,
+          },
+          { status: 409, headers: { 'X-Request-Id': guard.requestId } },
+        )
+      }
+      return NextResponse.json(
+        { ok: false, error: 'Credenciais invalidas.', code: 'INVALID_CREDENTIALS', requestId: guard.requestId },
+        { status: 401, headers: { 'X-Request-Id': guard.requestId } },
+      )
     }
 
-    const user = await autenticar(email, password)
-    if (!user) {
-      return NextResponse.json({ ok: false, error: 'Credenciais invalidas.' }, { status: 401 })
-    }
-
-    const response = NextResponse.json({ ok: true, user })
-    const protocol = request.headers.get('x-forwarded-proto') || new URL(request.url).protocol.replace(':', '')
-    response.cookies.set(sessionCookieName(), signSession(user), {
+    const session = await createSession(authentication.principal, metadata)
+    const response = NextResponse.json(
+      {
+        ok: true,
+        user: session.principal.user,
+        tenant: {
+          id: session.principal.tenantId,
+          slug: session.principal.tenantSlug,
+          plan: session.principal.planKey,
+        },
+      },
+      { headers: { 'X-Request-Id': guard.requestId } },
+    )
+    response.cookies.set(sessionCookieName(), session.token, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: protocol === 'https',
+      secure: secureSessionCookie(request),
       maxAge: sessionMaxAgeSeconds(),
+      expires: session.expiresAt,
       path: '/',
+      priority: 'high',
     })
     return response
   } catch (error) {
     const bodyError = requestBodyErrorResponse(error)
     if (bodyError) {
-      return NextResponse.json({ ok: false, error: bodyError.message }, { status: bodyError.status })
+      return NextResponse.json(
+        { ok: false, error: bodyError.message, code: 'INVALID_REQUEST', requestId: guard.requestId },
+        { status: bodyError.status, headers: { 'X-Request-Id': guard.requestId } },
+      )
     }
-    console.error('[auth:login]', error)
-    return NextResponse.json({ ok: false, error: 'Falha no login.' }, { status: 500 })
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { ok: false, error: 'Informe e-mail e senha validos.', code: 'INVALID_REQUEST', requestId: guard.requestId },
+        { status: 400, headers: { 'X-Request-Id': guard.requestId } },
+      )
+    }
+    logError('auth_login_failed', error, { requestId: guard.requestId, errorCode: 'AUTH_LOGIN_FAILED' })
+    return NextResponse.json(
+      { ok: false, error: 'Falha ao autenticar.', code: 'AUTH_UNAVAILABLE', requestId: guard.requestId },
+      { status: 503, headers: { 'X-Request-Id': guard.requestId } },
+    )
   }
-}
-
-async function autenticar(email: string, password: string): Promise<User | null> {
-  const superPassword = getServerSuperMasterPassword()
-  if (email === SUPER_MASTER.email.toLowerCase() && superPassword && password === superPassword) {
-    return { ...SUPER_MASTER }
-  }
-
-  const entries = await getStorageEntries()
-  const contas = Array.isArray(entries['bbt-users-v4']) ? entries['bbt-users-v4'] as ContaLocal[] : []
-  const conta = contas.find(
-    (item) => item?.user?.email?.toLowerCase() === email && item.user.ativo !== false,
-  )
-
-  if (!conta || !(await verifyPassword(password, conta.password))) return null
-  if (!isPasswordHash(conta.password)) await setStorageEntries({ 'bbt-users-v4': contas })
-
-  return conta.user
 }

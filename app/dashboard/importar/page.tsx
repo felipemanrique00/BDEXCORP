@@ -15,6 +15,7 @@ import { upsertVoucherEmitido } from '@/lib/vouchers-emitidos-storage'
 import { encontrarFuncionarioConfiavel, encontrarFuncionarioPorNomeInteligente, normalizarTextoIdentidade } from '@/lib/funcionario-identidade'
 import type { Empresa, Funcionario, Hotel } from '@/types'
 import { CONFIG_COBRANCA_PADRAO } from '@/types'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 type Fase = 'selecionar' | 'detectando' | 'extraindo' | 'preview' | 'salvando' | 'concluido'
 
@@ -38,6 +39,17 @@ export default function ImportarPage() {
     setFase('selecionar'); setArquivo(null); setDeteccao(null); setResultadoMapa(null)
     setResultadoVoucher(null); setResultadoFuncs(null); setResultadoHoteis(null); setRegistrosEditados([])
     setRegistrosIgnorados(new Set()); setResumoFinal(null); setEmpresaDestino('')
+  }
+
+  async function confirmarPersistenciaImportacao(): Promise<boolean> {
+    try {
+      await commitPendingRemoteStorage()
+      return true
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a importacao no servidor.')
+      setFase('preview')
+      return false
+    }
   }
 
   async function handleArquivo(f: File) {
@@ -187,6 +199,7 @@ export default function ImportarPage() {
           criados++
         } catch (e) { console.error(e); ignorados++ }
       }
+      if (!await confirmarPersistenciaImportacao()) return
       setResumoFinal({ criados, atualizados, ignorados, funcionarios: novosFuncs })
       setFase('concluido')
       toast.success(`✓ ${criados} demandas criadas`)
@@ -228,6 +241,7 @@ export default function ImportarPage() {
       const novo = addFuncionario(dados)
       if (novo) { baseAtual.push(novo); criados++ }
     }
+    if (!await confirmarPersistenciaImportacao()) return
     setResumoFinal({ criados, atualizados, ignorados, funcionarios: criados })
     setFase('concluido')
     toast.success(`✓ ${criados} funcionários cadastrados, ${atualizados} atualizados`)
@@ -274,6 +288,7 @@ export default function ImportarPage() {
         criados++
       }
     }
+    if (!await confirmarPersistenciaImportacao()) return
     setResumoFinal({ criados, atualizados, ignorados, funcionarios: 0 })
     setFase('concluido')
     toast.success(`✓ ${criados} hotéis cadastrados, ${atualizados} atualizados`)
@@ -367,6 +382,8 @@ export default function ImportarPage() {
 
       if (!voucher) throw new Error('Não foi possível salvar o voucher.')
       if (atendimento) anexarVoucherAtendimento(atendimento.id, voucher.id)
+
+      if (!await confirmarPersistenciaImportacao()) return
 
       setResumoFinal({ criados: (atendimento ? 1 : 0) + 1, atualizados: 0, ignorados: 0, funcionarios: 0 })
       setFase('concluido')

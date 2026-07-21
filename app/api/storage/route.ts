@@ -3,7 +3,10 @@ import { NextResponse } from 'next/server'
 import {
   deleteStorageEntries,
   getStorageEntries,
+  getStorageEntriesByKeys,
+  MonthlyOperationLimitExceededError,
   setStorageEntries,
+  StorageQuotaExceededError,
 } from '@/lib/server-db'
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
@@ -12,8 +15,10 @@ import {
   scopeStorageEntriesForRead,
   scopeStorageEntriesForWrite,
 } from '@/lib/security/storage-scope'
-import { SYSTEM_STORAGE_META_KEY } from '@/lib/storage-keys'
+import { SYSTEM_STORAGE_META_KEY, isSharedStorageKey } from '@/lib/storage-keys'
 import { storageWriteAcknowledgesLatestClear } from '@/lib/storage-clear-metadata'
+import { logError } from '@/lib/server/logger'
+import { writeAuditEvent } from '@/lib/server/audit-log'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -22,30 +27,61 @@ const MAX_STORAGE_BODY_BYTES = 64 * 1024 * 1024
 const MAX_DELETE_BODY_BYTES = 64 * 1024
 
 export async function GET(request: Request) {
-  const guard = guardApiRequest(request, {
+  const guard = await guardApiRequest(request, {
     requireAuth: true,
     rateLimit: { key: 'storage:get', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
 
   try {
-    const entries = await getStorageEntries()
+    const requestedKeys = parseRequestedKeys(request)
+    const queryKeys = requestedKeys
+      ? Array.from(new Set([...requestedKeys, SYSTEM_STORAGE_META_KEY, 'bbt-data-v4']))
+      : null
+    const entries = queryKeys
+      ? await getStorageEntriesByKeys(queryKeys)
+      : await getStorageEntries()
+    const visibleEntries = scopeStorageEntriesForRead(entries, guard.user)
+    const responseEntries = requestedKeys
+      ? pickEntries(visibleEntries, [...requestedKeys, SYSTEM_STORAGE_META_KEY])
+      : visibleEntries
     return NextResponse.json({
+      ok: true,
       enabled: true,
       scoped: isRestrictedStorageUser(guard.user),
-      entries: scopeStorageEntriesForRead(entries, guard.user),
+      entries: responseEntries,
     })
   } catch (error) {
-    console.error('[storage:get]', error)
+    logError('storage_read_failed', error, { requestId: guard.requestId, errorCode: 'STORAGE_READ_FAILED' })
     return NextResponse.json(
-      { enabled: false, entries: {}, error: 'Falha ao ler armazenamento compartilhado.' },
+      { ok: false, enabled: false, entries: {}, error: 'Falha ao ler armazenamento compartilhado.' },
       { status: 500 },
     )
   }
 }
 
+function parseRequestedKeys(request: Request): string[] | null {
+  const raw = new URL(request.url).searchParams.get('keys')
+  if (raw == null) return null
+
+  return Array.from(new Set(
+    raw
+      .split(',')
+      .map((key) => key.trim())
+      .filter(isSharedStorageKey),
+  ))
+}
+
+function pickEntries(entries: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const selected: Record<string, unknown> = {}
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(entries, key)) selected[key] = entries[key]
+  }
+  return selected
+}
+
 export async function PUT(request: Request) {
-  const guard = guardApiRequest(request, {
+  const guard = await guardApiRequest(request, {
     requireAuth: true,
     rateLimit: { key: 'storage:put', limit: 240, windowMs: 60_000 },
   })
@@ -78,7 +114,20 @@ export async function PUT(request: Request) {
     for (const key of Object.keys(allowedEntries)) {
       if (Object.prototype.hasOwnProperty.call(visibleEntries, key)) mergedEntries[key] = visibleEntries[key]
     }
+    if (saved > 0) {
+      await writeAuditEvent({
+        action: 'storage.batch_write',
+        result: 'success',
+        entityType: 'tenant_storage',
+        metadata: {
+          keys: Object.keys(allowedEntries).sort(),
+          saved,
+          rejectedKeys,
+        },
+      })
+    }
     return NextResponse.json({
+      ok: true,
       enabled: true,
       scoped: isRestrictedStorageUser(guard.user),
       saved,
@@ -89,18 +138,24 @@ export async function PUT(request: Request) {
   } catch (error) {
     const bodyError = requestBodyErrorResponse(error)
     if (bodyError) {
-      return NextResponse.json({ enabled: true, saved: 0, error: bodyError.message }, { status: bodyError.status })
+      return NextResponse.json({ ok: false, enabled: true, saved: 0, error: bodyError.message }, { status: bodyError.status })
     }
-    console.error('[storage:put]', error)
+    if (error instanceof StorageQuotaExceededError) {
+      return NextResponse.json({ ok: false, enabled: true, saved: 0, error: error.message }, { status: 409 })
+    }
+    if (error instanceof MonthlyOperationLimitExceededError) {
+      return NextResponse.json({ ok: false, enabled: true, saved: 0, error: error.message, code: 'MONTHLY_OPERATION_LIMIT' }, { status: 409 })
+    }
+    logError('storage_write_failed', error, { requestId: guard.requestId, errorCode: 'STORAGE_WRITE_FAILED' })
     return NextResponse.json(
-      { enabled: true, saved: 0, error: 'Falha ao salvar armazenamento compartilhado.' },
+      { ok: false, enabled: true, saved: 0, error: 'Falha ao salvar armazenamento compartilhado.' },
       { status: 500 },
     )
   }
 }
 
 export async function DELETE(request: Request) {
-  const guard = guardApiRequest(request, {
+  const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'gerenciar_usuarios',
     rateLimit: { key: 'storage:delete', limit: 30, windowMs: 60_000 },
@@ -115,7 +170,16 @@ export async function DELETE(request: Request) {
     const keys = Array.isArray(body?.keys) ? body.keys.map(String) : []
     const deleted = await deleteStorageEntries(keys)
     const entries = await getStorageEntries()
+    if (deleted > 0) {
+      await writeAuditEvent({
+        action: 'storage.batch_delete',
+        result: 'success',
+        entityType: 'tenant_storage',
+        metadata: { keys: keys.filter(isSharedStorageKey).sort(), deleted },
+      })
+    }
     return NextResponse.json({
+      ok: true,
       enabled: true,
       deleted,
       metadata: entries[SYSTEM_STORAGE_META_KEY] || null,
@@ -123,11 +187,11 @@ export async function DELETE(request: Request) {
   } catch (error) {
     const bodyError = requestBodyErrorResponse(error)
     if (bodyError) {
-      return NextResponse.json({ enabled: true, deleted: 0, error: bodyError.message }, { status: bodyError.status })
+      return NextResponse.json({ ok: false, enabled: true, deleted: 0, error: bodyError.message }, { status: bodyError.status })
     }
-    console.error('[storage:delete]', error)
+    logError('storage_delete_failed', error, { requestId: guard.requestId, errorCode: 'STORAGE_DELETE_FAILED' })
     return NextResponse.json(
-      { enabled: true, deleted: 0, error: 'Falha ao remover armazenamento compartilhado.' },
+      { ok: false, enabled: true, deleted: 0, error: 'Falha ao remover armazenamento compartilhado.' },
       { status: 500 },
     )
   }

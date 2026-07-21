@@ -7,6 +7,8 @@ import { getCurrentUser } from '@/lib/auth'
 import { parseMensagem } from '@/lib/mensagem-parser'
 import { parseMensagemComIA, parseMensagemComIAEImagem, getStatusIA, type IAParserResult, type StatusIA } from '@/lib/ia-parser'
 import { aiErrorUserMessage } from '@/lib/ai-friendly-errors'
+import { reportClientFailure } from '@/lib/client-observability'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import { encontrarFuncionarioPorCPF } from '@/lib/voucher-parser'
 import { buscarFuncionariosPorNomeInteligente, encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
 import { addAtendimento, registrarLog } from '@/lib/atendimentos-storage'
@@ -62,7 +64,9 @@ export default function CaixaEntradaPage() {
   const [outlookAssistOpen, setOutlookAssistOpen] = useState(false)
 
   useEffect(() => {
-    getStatusIA(true).then(setIaStatus).catch(() => {})
+    getStatusIA(true).then(setIaStatus).catch((error) => {
+      reportClientFailure('ai_status_load_failed', error, { component: 'inbox' })
+    })
   }, [])
 
   // Parser local sem IA
@@ -461,7 +465,6 @@ export default function CaixaEntradaPage() {
       origem_emissao: 'caixa_entrada',
     }
 
-    await new Promise((r) => setTimeout(r, 300))
     const nova = addAtendimento(payload)
     if (!nova) { toast.error('Erro.'); setCriandoRapido(false); return }
 
@@ -470,6 +473,15 @@ export default function CaixaEntradaPage() {
       entidade: 'Atendimento', entidade_id: nova.id,
       descricao: `Criou via Caixa de Entrada${parsed?.ia_usado ? ' (IA)' : ''}: ${passageiroNome}`,
     })
+
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')
+      setDemandaCriada(nova)
+      setCriandoRapido(false)
+      return
+    }
 
     dispararAlertaNovaDemanda(passageiroNome, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
     setDemandaCriada(nova)

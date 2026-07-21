@@ -50,6 +50,8 @@ import { AI_SHORT_NAME } from '@/lib/branding'
 import { AIAssistantFab, AI_CONTEXT_EVENTS } from '@/components/ai/ai-assistant-fab'
 import type { Atendimento, CartaoCorporativo, Empresa, Prioridade, TipoServico } from '@/types'
 import { filtrarPeriodo, montarMetricasRelatorio, montarRelatorioOperacional } from '@/lib/relatorios'
+import { createEntityId } from '@/lib/ids'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 type Aba = 'home' | 'empresa' | 'viagens' | 'pedidos' | 'vouchers' | 'financeiro' | 'carteira' | 'relatorios' | 'pegada'
 type EscopoPortal = 'empresa' | 'grupo'
@@ -908,8 +910,8 @@ function EmpresaTab({ empresa, solicitanteAtual, solicitantes, funcionarios, pol
                   <Landmark className="w-5 h-5" />
                 </div>
                 <div>
-                  <div className="font-semibold text-bbt-primary dark:text-white">Abrir carteira digital</div>
-                  <div className="text-xs text-slate-500">Gerenciar Pix, cartões e limites.</div>
+                  <div className="font-semibold text-bbt-primary dark:text-white">Abrir controle financeiro</div>
+                  <div className="text-xs text-slate-500">Conciliar saldos, cartões emitidos e limites.</div>
                 </div>
               </div>
             </button>
@@ -1123,7 +1125,7 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
     try {
       const user = getCurrentUser()
       const novo: Atendimento = {
-        id: `at-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: createEntityId('at'),
         empresa_id: empresaId,
         funcionario_id: funcId || null,
         passageiro_nome: passageiro.trim(),
@@ -1144,12 +1146,14 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
           : { detalhes_pacote: { destino: destino.trim(), data_ida: dataInicio, data_volta: dataFim, descricao: observacoes } }),
         created_at: new Date().toISOString(),
       }
-      addAtendimento(novo)
+      const atendimento = addAtendimento(novo)
+      if (!atendimento) throw new Error('Falha ao preparar o pedido.')
+      await commitPendingRemoteStorage()
       toast.success('Pedido enviado! A BBT já recebeu.')
       setPassageiro(''); setOrigem(''); setDestino(''); setDataInicio(''); setDataFim(''); setObservacoes(''); setFuncId(''); setFuncCodigo('')
       onSaved()
     } catch (e: any) {
-      toast.error('Erro ao enviar pedido.')
+      toast.error(e?.message || 'Erro ao enviar pedido.')
     } finally {
       setEnviando(false)
     }
@@ -1340,7 +1344,7 @@ function FinanceiroTab({ carteira, lancamentos, isGroupScope, onOpenCarteira }: 
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <p className="bbt-section-label">Financeiro corporativo</p>
-            <h3 className="mt-1 font-bold text-bbt-primary dark:text-white">Faturas, carteira digital, Pix e cartões</h3>
+            <h3 className="mt-1 font-bold text-bbt-primary dark:text-white">Faturas e controle financeiro interno</h3>
             <p className="mt-1 text-sm text-slate-500">
               Toda movimentação financeira fica conectada a pedidos, vouchers, faturas e limites da empresa.
             </p>
@@ -1655,12 +1659,12 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
   const cartoes = (resumo?.cartoes || []) as CartaoCorporativo[]
   const faturas = resumo?.faturas || []
   const movimentos = resumo?.movimentos || []
-  const [limiteCredito, setLimiteCredito] = useState<number>(carteira?.limite_credito || 50000)
-  const [limitePix, setLimitePix] = useState<number>(carteira?.limite_pix_diario || 20000)
-  const [limiteCartao, setLimiteCartao] = useState<number>(carteira?.limite_cartao_mensal || 50000)
+  const [limiteCredito, setLimiteCredito] = useState<number>(carteira?.limite_credito || 0)
+  const [limitePix, setLimitePix] = useState<number>(carteira?.limite_pix_diario || 0)
+  const [limiteCartao, setLimiteCartao] = useState<number>(carteira?.limite_cartao_mensal || 0)
   const [valorAporte, setValorAporte] = useState<number>(0)
   const [pixValor, setPixValor] = useState<number>(0)
-  const [pixDescricao, setPixDescricao] = useState('Pagamento corporativo via Pix')
+  const [pixDescricao, setPixDescricao] = useState('Débito externo conciliado')
   const [cardForm, setCardForm] = useState<{
     tipo: CartaoCorporativo['tipo']
     apelido: string
@@ -1668,6 +1672,8 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
     funcionario_id: string
     limite: number
     merchant_lock: string
+    ultimos4: string
+    bandeira: NonNullable<CartaoCorporativo['bandeira']>
   }>({
     tipo: 'virtual',
     apelido: 'Cartão viagem',
@@ -1675,39 +1681,47 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
     funcionario_id: '',
     limite: 1000,
     merchant_lock: '',
+    ultimos4: '',
+    bandeira: 'Visa',
   })
 
   useEffect(() => {
-    setLimiteCredito(carteira?.limite_credito || 50000)
-    setLimitePix(carteira?.limite_pix_diario || 20000)
-    setLimiteCartao(carteira?.limite_cartao_mensal || 50000)
+    setLimiteCredito(carteira?.limite_credito || 0)
+    setLimitePix(carteira?.limite_pix_diario || 0)
+    setLimiteCartao(carteira?.limite_cartao_mensal || 0)
   }, [empresaId, carteira?.limite_cartao_mensal, carteira?.limite_credito, carteira?.limite_pix_diario])
 
   function refresh() {
     onChanged?.()
   }
 
-  function ativarCarteira() {
+  async function ativarCarteira() {
     const base = garantirCarteiraEmpresa(empresaId)
     const ok = atualizarCarteiraEmpresa(base.id, {
       status: 'ativa',
-      pix_habilitado: true,
-      cartao_habilitado: true,
+      pix_habilitado: false,
+      cartao_habilitado: false,
       limite_credito: Math.max(0, limiteCredito),
       limite_pix_diario: Math.max(0, limitePix),
       limite_cartao_mensal: Math.max(0, limiteCartao),
-      provedor: base.provedor === 'pendente' ? 'outro' : base.provedor,
-      conta_virtual: base.conta_virtual || `BDEX-${empresaId.slice(-6).toUpperCase()}`,
+      provedor: 'pendente',
+      conta_virtual: undefined,
     })
     if (!ok) {
       toast.error('Não foi possível salvar a carteira. Verifique o armazenamento do navegador.')
       return
     }
-    toast.success('Carteira digital ativada para a empresa.')
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o controle financeiro no servidor.')
+      return
+    }
+    toast.success('Controle interno salvo. Nenhuma conta bancária foi criada.')
     refresh()
   }
 
-  function registrarAporte() {
+  async function registrarAporte() {
     if (valorAporte <= 0) {
       toast.error('Informe um valor de aporte maior que zero.')
       return
@@ -1717,24 +1731,30 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
       tipo: 'credito',
       origem: 'manual',
       valor: valorAporte,
-      descricao: 'Aporte manual na carteira corporativa',
+      descricao: 'Credito externo conciliado no controle interno',
     })
     if (!movimento) {
       toast.error('Não foi possível registrar o aporte.')
       return
     }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o credito no servidor.')
+      return
+    }
     setValorAporte(0)
-    toast.success('Aporte registrado e saldo atualizado.')
+    toast.success('Credito conciliado registrado no controle interno.')
     refresh()
   }
 
-  function registrarPix() {
+  async function registrarPix() {
     if (pixValor <= 0) {
       toast.error('Informe um valor de Pix maior que zero.')
       return
     }
-    if (!carteira?.pix_habilitado) {
-      toast.error('Ative a carteira e o Pix antes de registrar pagamentos.')
+    if (!carteira || carteira.status !== 'ativa') {
+      toast.error('Habilite o controle interno antes de registrar movimentações.')
       return
     }
     const disponivel = Number(carteira.saldo_disponivel || 0) + Number(carteira.limite_credito || 0)
@@ -1745,21 +1765,27 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
     const movimento = registrarMovimentoCarteira({
       company_id: empresaId,
       tipo: 'debito',
-      origem: 'pix',
+      origem: 'manual',
       valor: pixValor,
-      descricao: pixDescricao || 'Pagamento corporativo via Pix',
+      descricao: pixDescricao || 'Débito externo conciliado',
     })
     if (!movimento) {
-      toast.error('Não foi possível registrar o Pix.')
+      toast.error('Não foi possível registrar o débito conciliado.')
+      return
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o debito no servidor.')
       return
     }
     setPixValor(0)
-    setPixDescricao('Pagamento corporativo via Pix')
-    toast.success('Pagamento Pix registrado na carteira.')
+    setPixDescricao('Débito externo conciliado')
+    toast.success('Débito já realizado registrado no controle interno.')
     refresh()
   }
 
-  function criarCartao(tipo?: CartaoCorporativo['tipo']) {
+  async function criarCartao(tipo?: CartaoCorporativo['tipo']) {
     const limite = Number(cardForm.limite || 0)
     if (limite <= 0) {
       toast.error('Informe o limite do cartão.')
@@ -1775,13 +1801,21 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
       funcionario_id: cardForm.funcionario_id || null,
       merchant_lock: cardForm.merchant_lock || undefined,
       criado_por_user_id: currentUser?.id,
+      ultimos4: cardForm.ultimos4,
+      bandeira: cardForm.bandeira,
     })
     if (!card) {
-      toast.error('Não foi possível criar o cartão.')
+      toast.error('Informe os quatro últimos dígitos de um cartão já emitido.')
       return
     }
-    toast.success(`${card.tipo === 'fisico' ? 'Cartão físico' : 'Cartão virtual'} criado para ${card.portador_nome || empresaNome}.`)
-    setCardForm((s) => ({ ...s, apelido: 'Cartão viagem', portador_nome: '', funcionario_id: '', limite: 1000, merchant_lock: '' }))
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o cartao no servidor.')
+      return
+    }
+    toast.success(`${card.tipo === 'fisico' ? 'Cartão físico' : 'Cartão virtual'} registrado para ${card.portador_nome || empresaNome}.`)
+    setCardForm((s) => ({ ...s, apelido: 'Cartão viagem', portador_nome: '', funcionario_id: '', limite: 1000, merchant_lock: '', ultimos4: '' }))
     refresh()
   }
 
@@ -1791,12 +1825,12 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
         <div className="absolute right-0 top-0 h-44 w-44 rounded-full bg-emerald-300/20 blur-3xl" />
         <div className="relative grid gap-5 xl:grid-cols-[1fr_440px]">
           <div>
-            <p className="bbt-section-label">Carteira digital corporativa</p>
+            <p className="bbt-section-label">Controle financeiro interno</p>
             <h2 className="mt-1 text-2xl font-bold text-bbt-primary dark:text-white">
-              Pix, cartões físicos e virtuais para {empresaNome}
+              Saldos conciliados e cartões emitidos de {empresaNome}
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-slate-600 dark:text-slate-300">
-              Controle saldo, limites, pagamentos instantâneos, cartões ilimitados e faturas em um só lugar. As movimentações ficam vinculadas ao financeiro da empresa e à operação de viagens.
+              Registre transações já realizadas e cartões reais já emitidos. Esta área não cria conta, cartão ou pagamento no provedor financeiro.
             </p>
             <div className="mt-5 grid gap-3 sm:grid-cols-3">
               <MiniStat label="Status" value={carteira?.status === 'ativa' ? 'Ativa' : 'Configuração pendente'} highlight={carteira?.status !== 'ativa'} />
@@ -1816,9 +1850,9 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
                 <Wallet className="h-4 w-4" />
                 Ativar/atualizar
               </button>
-              <button type="button" onClick={() => criarCartao('virtual')} className="bbt-button-outline flex-1">
+              <button type="button" onClick={() => document.getElementById('registro-cartao')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="bbt-button-outline flex-1">
                 <CreditCard className="h-4 w-4" />
-                Cartão virtual
+                Registrar cartão
               </button>
             </div>
           </div>
@@ -1855,8 +1889,8 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
           <div className="mb-4 flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-bbt-accent" />
             <div>
-              <h3 className="font-bold text-bbt-primary dark:text-white">Ações instantâneas</h3>
-              <p className="text-xs text-slate-500">Registre aportes e pagamentos Pix com reflexo imediato na carteira.</p>
+              <h3 className="font-bold text-bbt-primary dark:text-white">Conciliação manual</h3>
+              <p className="text-xs text-slate-500">Registre apenas créditos e débitos já realizados fora do sistema.</p>
             </div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
@@ -1866,26 +1900,26 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
                 <button type="button" onClick={registrarAporte} className="bbt-button-outline whitespace-nowrap">Creditar</button>
               </div>
             </Field>
-            <Field label="Pagamento Pix">
+            <Field label="Débito externo">
               <div className="flex gap-2">
                 <input type="number" min={0} value={pixValor} onChange={(e) => setPixValor(Number(e.target.value || 0))} className="bbt-input" />
-                <button type="button" onClick={registrarPix} className="bbt-button-outline whitespace-nowrap">Pagar</button>
+                <button type="button" onClick={registrarPix} className="bbt-button-outline whitespace-nowrap">Registrar</button>
               </div>
             </Field>
           </div>
-          <Field label="Descrição do Pix">
+          <Field label="Descrição e referência">
             <input value={pixDescricao} onChange={(e) => setPixDescricao(e.target.value)} className="bbt-input" />
           </Field>
         </div>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[420px_1fr]">
-        <div className="bbt-card p-5">
+        <div id="registro-cartao" className="bbt-card scroll-mt-6 p-5">
           <div className="mb-4 flex items-center gap-2">
             <CreditCard className="h-5 w-5 text-bbt-accent" />
             <div>
-              <h3 className="font-bold text-bbt-primary dark:text-white">Criar cartão corporativo</h3>
-              <p className="text-xs text-slate-500">Físico ou virtual, com limite e portador vinculado.</p>
+              <h3 className="font-bold text-bbt-primary dark:text-white">Registrar cartão corporativo</h3>
+              <p className="text-xs text-slate-500">Cadastre um cartão real já emitido pelo provedor financeiro.</p>
             </div>
           </div>
           <div className="space-y-3">
@@ -1913,6 +1947,19 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
               <input value={cardForm.portador_nome} onChange={(e) => setCardForm({ ...cardForm, portador_nome: e.target.value })} className="bbt-input" placeholder={empresaNome} />
             </Field>
             <div className="grid grid-cols-2 gap-3">
+              <Field label="Bandeira">
+                <select value={cardForm.bandeira} onChange={(e) => setCardForm({ ...cardForm, bandeira: e.target.value as NonNullable<CartaoCorporativo['bandeira']> })} className="bbt-input">
+                  <option value="Visa">Visa</option>
+                  <option value="Mastercard">Mastercard</option>
+                  <option value="Elo">Elo</option>
+                  <option value="Outra">Outra</option>
+                </select>
+              </Field>
+              <Field label="Quatro últimos dígitos">
+                <input inputMode="numeric" maxLength={4} value={cardForm.ultimos4} onChange={(e) => setCardForm({ ...cardForm, ultimos4: e.target.value.replace(/\D/g, '').slice(0, 4) })} className="bbt-input" placeholder="0000" />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               <Field label="Limite">
                 <input type="number" min={0} value={cardForm.limite} onChange={(e) => setCardForm({ ...cardForm, limite: Number(e.target.value || 0) })} className="bbt-input" />
               </Field>
@@ -1922,7 +1969,7 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
             </div>
             <button type="button" onClick={() => criarCartao()} className="bbt-button-primary w-full">
               <Plus className="h-4 w-4" />
-              Criar cartão
+              Registrar cartão
             </button>
           </div>
         </div>
@@ -1930,7 +1977,7 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
         <div className="bbt-card overflow-hidden">
           <div className="border-b border-bbt-gray-100 p-4 dark:border-slate-700">
             <h3 className="font-bold text-bbt-primary dark:text-white">Cartões da empresa</h3>
-            <p className="text-xs text-slate-500">Cartões físicos e virtuais conectados à carteira corporativa.</p>
+            <p className="text-xs text-slate-500">Registro interno de cartões emitidos e administrados pelo provedor financeiro.</p>
           </div>
           {cartoes.length === 0 ? (
             <div className="p-10 text-center text-sm text-slate-400">Nenhum cartão criado ainda.</div>
@@ -1949,7 +1996,7 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
                   <div className="mt-8 flex items-end justify-between">
                     <div>
                       <div className="text-xs text-blue-100/50">Final</div>
-                      <div className="font-mono text-lg tracking-widest">**** {c.ultimos4 || '0000'}</div>
+                      <div className="font-mono text-lg tracking-widest">**** {c.ultimos4 || '----'}</div>
                     </div>
                     <div className="text-right">
                       <div className="text-xs text-blue-100/50">Limite</div>

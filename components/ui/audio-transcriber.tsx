@@ -20,6 +20,7 @@ import { Mic, MicOff, Upload, Loader2, Trash2, ChevronDown, ChevronUp, FileAudio
 import { toast } from 'sonner'
 import type { IAParserResult } from '@/lib/ia-parser'
 import { arquivoParaBase64 } from '@/lib/demand-file-parser'
+import { reportClientFailure } from '@/lib/client-observability'
 
 interface Props {
   onTranscricao: (texto: string) => void
@@ -50,7 +51,9 @@ export function AudioTranscriber({ onTranscricao, onResultadoIA }: Props) {
     setSuportaMicrofone(!!SR)
     return () => {
       if (recogRef.current) {
-        try { recogRef.current.stop() } catch {}
+        try { recogRef.current.stop() } catch (error) {
+          reportClientFailure('speech_recognition_stop_failed', error, { component: 'audio-transcriber' })
+        }
       }
     }
   }, [])
@@ -96,7 +99,9 @@ export function AudioTranscriber({ onTranscricao, onResultadoIA }: Props) {
     r.onend = () => {
       // Se ainda gravando, reinicia (workaround do Chrome que para sozinho)
       if (gravandoRef.current) {
-        try { r.start() } catch {}
+        try { r.start() } catch (error) {
+          reportClientFailure('speech_recognition_restart_failed', error, { component: 'audio-transcriber' })
+        }
       }
     }
     return r
@@ -134,7 +139,9 @@ export function AudioTranscriber({ onTranscricao, onResultadoIA }: Props) {
     gravandoRef.current = false
     setGravando(false)
     if (recogRef.current) {
-      try { recogRef.current.stop() } catch {}
+      try { recogRef.current.stop() } catch (error) {
+        reportClientFailure('speech_recognition_stop_failed', error, { component: 'audio-transcriber' })
+      }
     }
   }
 
@@ -317,9 +324,13 @@ export function AudioTranscriber({ onTranscricao, onResultadoIA }: Props) {
                       recogRef.current = r
                       gravandoRef.current = true
                       setGravando(true)
-                      try { r.start() } catch {}
+                      try { r.start() } catch (error) {
+                        reportClientFailure('speech_recognition_start_failed', error, { component: 'audio-transcriber' })
+                      }
                     }
-                  } catch {}
+                  } catch (error) {
+                    reportClientFailure('speech_recognition_resume_failed', error, { component: 'audio-transcriber' })
+                  }
                 }
               }}
               onPause={() => { setTocando(false); pararGravacao() }}

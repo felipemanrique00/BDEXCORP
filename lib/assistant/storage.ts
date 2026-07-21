@@ -1,4 +1,5 @@
 import { getStorageEntries, setStorageEntries } from '@/lib/server-db'
+import { createEntityId } from '@/lib/ids'
 
 export const ASSISTANT_KEYS = {
   settings: 'bbt-assistant-settings-v1',
@@ -21,7 +22,7 @@ export const ASSISTANT_KEYS = {
 export type AssistantStorageKey = (typeof ASSISTANT_KEYS)[keyof typeof ASSISTANT_KEYS]
 
 export function createId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return createEntityId(prefix)
 }
 
 export async function getAssistantValue<T>(key: AssistantStorageKey, fallback: T): Promise<T> {

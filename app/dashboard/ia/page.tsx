@@ -27,6 +27,7 @@ import {
   type IAInteractionScope,
 } from '@/lib/ia-config-storage'
 import { getStatusIA, type StatusIA } from '@/lib/ia-parser'
+import { reportClientFailure } from '@/lib/client-observability'
 import { getAllAtendimentos } from '@/lib/atendimentos-storage'
 import { getAllAgentApprovals, getAllAgentQuotes, getAllAgentRuns, getAllAgentTasks } from '@/lib/ai-agent-storage'
 import { useStore } from '@/lib/store'
@@ -39,7 +40,9 @@ export default function IAPage() {
   const [status, setStatus] = useState<StatusIA | null>(null)
 
   useEffect(() => {
-    getStatusIA(true).then(setStatus).catch(() => {})
+    getStatusIA(true).then(setStatus).catch((error) => {
+      reportClientFailure('ai_status_load_failed', error, { component: 'ai-control-center' })
+    })
     if (typeof window === 'undefined') return
     const tab = new URLSearchParams(window.location.search).get('tab')
     if (tab === 'operacional' || tab === 'config' || tab === 'chat' || tab === 'canais') setAba(tab)
@@ -86,7 +89,9 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
     fetch('/api/integrations/tech/status')
       .then((response) => response.json())
       .then((payload) => setTechStatus(payload?.health || null))
-      .catch(() => {})
+      .catch((error) => {
+        reportClientFailure('tech_status_load_failed', error, { component: 'ai-control-center' })
+      })
   }, [])
 
   const stats = useMemo(() => {

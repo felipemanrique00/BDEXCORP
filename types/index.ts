@@ -64,6 +64,12 @@ export interface User {
   email: string
   name: string
   role: UserRole
+  tenant_id?: string
+  tenant_slug?: string
+  membership_id?: string
+  role_key?: string
+  platform_admin?: boolean
+  must_change_password?: boolean
   company_id: string | null
   empresa_ids?: string[]
   grupo_ids?: string[]
@@ -71,6 +77,7 @@ export interface User {
   permissoes?: Permissoes
   avatar?: string
   ativo?: boolean
+  status?: 'invited' | 'active' | 'blocked' | 'inactive'
   created_at?: string
 }
 

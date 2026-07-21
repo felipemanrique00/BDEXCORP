@@ -9,6 +9,7 @@ import { getCurrentUser } from '@/lib/auth'
 import { registrarLog } from '@/lib/atendimentos-storage'
 import { maskCPF, onlyDigits } from '@/lib/utils'
 import { encontrarFuncionarioConfiavel } from '@/lib/funcionario-identidade'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import type { Cargo, Funcionario } from '@/types'
 
 interface Props {
@@ -305,7 +306,7 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
     setLinhas((prev) => prev.map((l, i) => (i === index ? { ...l, cargo_mapeado: novoCargo } : l)))
   }
 
-  function confirmar() {
+  async function confirmar() {
     const paraImportar = statusFiltro === 'ativos'
       ? linhas.filter((l) => !l.situacao || /atividade|ativo|normal/i.test(l.situacao))
       : linhas
@@ -374,6 +375,13 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
         entidade: 'Funcionarios', entidade_id: companyId,
         descricao: `Importou ${importados} funcionário(s) e atualizou ${atualizados} para ${companyName}. Arquivo: ${file?.name || '?'}. Com CPF: ${comCpf}. Com nasc.: ${comNasc}.`,
       })
+    }
+
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a importacao no servidor.')
+      return
     }
 
     toast.success(`${importados} importados, ${atualizados} atualizados. (${comCpf} com CPF, ${comNasc} com data nasc.)`, { duration: 5000 })

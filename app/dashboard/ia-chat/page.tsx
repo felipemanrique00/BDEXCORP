@@ -13,6 +13,7 @@ import { avaliarPerguntaIA, getIAConfig } from '@/lib/ia-config-storage'
 import { aiErrorUserMessage } from '@/lib/ai-friendly-errors'
 import { humanizeAIText } from '@/lib/ai-humanize'
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { reportClientFailure } from '@/lib/client-observability'
 import {
   buscarHoteisComIA,
   extrairDestinoHotel,
@@ -72,7 +73,9 @@ export default function IAChatPage() {
     if (typeof window === 'undefined') return
     try {
       setMensagens(loadJSON<Msg[]>(STORAGE_HISTORICO, []))
-    } catch {}
+    } catch (error) {
+      reportClientFailure('ai_history_load_failed', error, { component: 'ia-chat' })
+    }
     getStatusIA(true).then(setStatus)
   }, [])
 
@@ -86,7 +89,9 @@ export default function IAChatPage() {
     if (typeof window === 'undefined') return
     try {
       safeSetJSON(STORAGE_HISTORICO, mensagens.slice(-60))
-    } catch {}
+    } catch (error) {
+      reportClientFailure('ai_history_save_failed', error, { component: 'ia-chat' })
+    }
   }, [mensagens])
 
   const contexto = useMemo(() => {

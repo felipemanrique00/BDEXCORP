@@ -4,14 +4,32 @@
   "private": true,
   "description": "BBT Corporativo - plataforma corporativa de viagens, despesas, vouchers e suporte IA",
   "scripts": {
+    "assets:prepare": "node scripts/prepare-assets.mjs",
+    "predev": "npm run assets:prepare",
+    "prebuild": "npm run assets:prepare",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "db:init": "node scripts/db-init.mjs",
-    "test": "node scripts/domain-tests.cjs",
+    "db:migrate": "node scripts/migrate.mjs up",
+    "db:status": "node scripts/migrate.mjs status",
+    "db:bootstrap": "node scripts/bootstrap.mjs",
+    "db:validate-migrations": "node scripts/validate-migrations.mjs",
+    "inventory:features": "node scripts/feature-inventory.mjs",
+    "inventory:check": "node scripts/feature-inventory.mjs --check",
+    "env:check": "node scripts/validate-environment.mjs",
+    "smoke": "node scripts/smoke-test.mjs",
+    "smoke:browser": "node scripts/browser-smoke.mjs",
+    "test": "npm run test:domain && npm run test:unit",
+    "test:domain": "node scripts/domain-tests.cjs",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "playwright test",
+    "test:load": "node scripts/load-test.mjs",
+    "test:ci": "npm run test:domain && npm run test:unit && npm run test:integration",
+    "security:scan": "node scripts/scan-secrets.mjs",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit",
-    "validate": "npm run lint && npm run typecheck && npm test && npm run build"
+    "typecheck": "tsc --noEmit --incremental false",
+    "validate": "npm run db:validate-migrations && npm run inventory:check && npm run security:scan && npm run lint && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -21,6 +39,7 @@
     "leaflet.markercluster": "^1.5.3",
     "lucide-react": "^0.462.0",
     "next": "^15.5.18",
+    "nodemailer": "^9.0.3",
     "papaparse": "^5.4.1",
     "pdfjs-dist": "^4.10.38",
     "pg": "^8.20.0",
@@ -37,8 +56,10 @@
     "zustand": "^5.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/leaflet": "^1.9.18",
     "@types/node": "^22.9.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/papaparse": "^5.3.15",
     "@types/pg": "^8.20.0",
     "@types/react": "^18.3.12",
@@ -48,6 +69,7 @@
     "eslint-config-next": "^15.1.0",
     "postcss": "^8.5.15",
     "tailwindcss": "^3.4.15",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.10"
   }
 }

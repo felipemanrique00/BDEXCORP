@@ -3,6 +3,7 @@ import { callGemini, callOpenAIResponses, extractJSON, getPaidAIStatus } from '@
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { classifyAIError } from '@/lib/ai-friendly-errors'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
+import { logError } from '@/lib/server/logger'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -64,7 +65,7 @@ Regras obrigatorias:
 - Documento escaneado/foto sempre precisa revisao se qualquer campo essencial estiver ilegivel.`
 
 export async function POST(req: NextRequest) {
-  const guard = guardApiRequest(req, {
+  const guard = await guardApiRequest(req, {
     requireAuth: true,
     rateLimit: { key: 'ia-extract-document', limit: 12, windowMs: 60_000 },
   })
@@ -123,7 +124,12 @@ export async function POST(req: NextRequest) {
       if (process.env.GEMINI_API_KEY) {
         try {
           return await extractWithGemini({ base64, mimeType, fileName: body.fileName })
-        } catch {}
+        } catch (fallbackError) {
+          logError('ai_document_fallback_failed', fallbackError, {
+            requestId: guard.requestId,
+            errorCode: 'AI_DOCUMENT_FALLBACK_FAILED',
+          })
+        }
       }
       const friendly = classifyAIError(e, 'openai')
       return NextResponse.json(

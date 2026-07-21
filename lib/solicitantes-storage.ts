@@ -2,6 +2,7 @@
 
 import type { SolicitanteEmpresa } from '@/types'
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 const STORAGE_KEY = 'bbt-solicitantes-empresa'
 
@@ -10,7 +11,7 @@ function nowIso(): string {
 }
 
 function novoId(): string {
-  return `sol_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  return createEntityId('sol', '_')
 }
 
 function load(): SolicitanteEmpresa[] {

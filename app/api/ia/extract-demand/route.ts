@@ -10,6 +10,7 @@ import {
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { classifyAIError } from '@/lib/ai-friendly-errors'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
+import { logError } from '@/lib/server/logger'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -69,7 +70,7 @@ Regras:
 - Nao invente CPF, telefone, empresa, hotel, cidade ou valor. Use null se nao apareceu.`
 
 export async function POST(req: NextRequest) {
-  const guard = guardApiRequest(req, {
+  const guard = await guardApiRequest(req, {
     requireAuth: true,
     rateLimit: { key: 'ia-extract-demand', limit: 20, windowMs: 60_000 },
   })
@@ -160,7 +161,12 @@ export async function POST(req: NextRequest) {
       if (process.env.GEMINI_API_KEY) {
         try {
           return await extractWithGemini({ kind, text, base64, mimeType, fileName: body.fileName })
-        } catch {}
+        } catch (fallbackError) {
+          logError('ai_demand_fallback_failed', fallbackError, {
+            requestId: guard.requestId,
+            errorCode: 'AI_DEMAND_FALLBACK_FAILED',
+          })
+        }
       }
       if (kind === 'text' || kind === 'email') {
         const friendly = classifyAIError(e, 'openai')

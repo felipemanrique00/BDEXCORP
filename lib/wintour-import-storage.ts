@@ -1,5 +1,6 @@
 import type { WintourSourceFormat } from '@/lib/wintour-import'
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 export interface WintourImportRun {
   id: string
@@ -48,7 +49,7 @@ export function getUltimaImportacaoWintour(): WintourImportRun | undefined {
 export function addWintourImportRun(run: Omit<WintourImportRun, 'id' | 'imported_at'>): WintourImportRun | null {
   const novo: WintourImportRun = {
     ...run,
-    id: `wintour-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: createEntityId('wintour'),
     imported_at: new Date().toISOString(),
   }
   const runs = getAllWintourImportRuns()

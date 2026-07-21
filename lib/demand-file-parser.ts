@@ -106,7 +106,11 @@ function decodeTransferEncoding(value: string): string {
       text = decodeURIComponent(
         escape(atob(payload)),
       )
-    } catch {}
+    } catch (error) {
+      console.warn('[demand-file-parser] Conteudo base64 invalido.', {
+        errorName: error instanceof Error ? error.name : typeof error,
+      })
+    }
   }
   return text.replace(/^content-[^\n]+$/gim, '').trim()
 }

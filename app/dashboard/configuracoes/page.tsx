@@ -31,9 +31,11 @@ export default function ConfiguracoesPage() {
     titulo: string
     mensagem: string
     palavraConfirmacao: string
+    requiresPassword?: boolean
     onConfirmar: () => void | Promise<void>
   } | null>(null)
   const [textoConfirmacao, setTextoConfirmacao] = useState('')
+  const [senhaConfirmacao, setSenhaConfirmacao] = useState('')
   const [confirmando, setConfirmando] = useState(false)
 
   // === Contadores de dados ===
@@ -86,7 +88,6 @@ export default function ConfiguracoesPage() {
       mensagens: ler('bbt-mensagens-thread'),
       transacoes: ler('bbt-transacoes'),
       alertas: ler('bbt-alertas'),
-      users: ler('bbt-users-v4'),
       fornecedores: ler('bbt-supplier-integrations-v1'),
       fornecedor_logs: ler('bbt-supplier-action-logs-v1'),
       reservas_fornecedores: ler('bbt-supplier-reservations-v1'),
@@ -138,7 +139,6 @@ export default function ConfiguracoesPage() {
         if (data.mensagens) safeSetJSON('bbt-mensagens-thread', data.mensagens)
         if (data.transacoes) safeSetJSON('bbt-transacoes', data.transacoes)
         if (data.alertas) safeSetJSON('bbt-alertas', data.alertas)
-        if (data.users) safeSetJSON('bbt-users-v4', data.users)
         if (data.fornecedores) safeSetJSON('bbt-supplier-integrations-v1', data.fornecedores)
         if (data.fornecedor_logs) safeSetJSON('bbt-supplier-action-logs-v1', data.fornecedor_logs)
         if (data.reservas_fornecedores) safeSetJSON('bbt-supplier-reservations-v1', data.reservas_fornecedores)
@@ -223,8 +223,11 @@ export default function ConfiguracoesPage() {
             obj.state.empresas = []
             obj.state.funcionarios = []
             obj.state.politicas = []
-            safeSetJSON(STORE_KEY, obj)
-          } catch { }
+            if (!safeSetJSON(STORE_KEY, obj)) throw new Error('Falha ao preparar a limpeza das empresas.')
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : 'Falha ao preparar a limpeza das empresas.')
+            throw error
+          }
         }
         safeRemove('bbt-atendimentos')
         await confirmarLimpezaCompartilhada()
@@ -246,8 +249,11 @@ export default function ConfiguracoesPage() {
             const obj = JSON.parse(raw)
             obj.state = obj.state || {}
             obj.state.hoteis = []
-            safeSetJSON(STORE_KEY, obj)
-          } catch { }
+            if (!safeSetJSON(STORE_KEY, obj)) throw new Error('Falha ao preparar a limpeza dos hoteis.')
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : 'Falha ao preparar a limpeza dos hoteis.')
+            throw error
+          }
         }
         await confirmarLimpezaCompartilhada()
         toast.success('✅ Hotéis apagados. Recarregando...')
@@ -259,10 +265,11 @@ export default function ConfiguracoesPage() {
   function limparAbsolutamenteTudo() {
     setConfirmacao({
       titulo: '⚠️ APAGAR ABSOLUTAMENTE TUDO?',
-      mensagem: `Isso apagará TODOS os dados do sistema:\n\n• Empresas, grupos, funcionários, hotéis e políticas\n• Demandas, reservas, vouchers, anexos e emissões\n• Financeiro, aprovações, transferências e reconciliação\n• Importações, relatórios salvos, auditoria e mensagens\n• Históricos da assistente e usuários cadastrados\n\nO acesso Master configurado no servidor será mantido.\nA limpeza será confirmada no servidor antes de recarregar.\n\n⚠️ NÃO TEM COMO RECUPERAR. Faça backup ANTES.`,
+      mensagem: `Isso apagará TODOS os dados operacionais do tenant:\n\n• Empresas, grupos, funcionários, hotéis e políticas\n• Demandas, reservas, vouchers, anexos e emissões\n• Financeiro, aprovações, transferências e reconciliação\n• Importações, relatórios salvos e históricos da assistente\n\nUsuários, permissões, tenant e trilha de auditoria serão preservados.\nA limpeza será confirmada no servidor antes de recarregar.\n\nEsta ação não pode ser desfeita. Faça um backup validado antes.`,
       palavraConfirmacao: 'APAGAR TUDO',
+      requiresPassword: true,
       onConfirmar: async () => {
-        const result = await resetAllSystemData('APAGAR TUDO')
+        const result = await resetAllSystemData('APAGAR TUDO', senhaConfirmacao)
         toast.success(`✅ Sistema zerado e verificado (${result.deleted} conjuntos removidos). Recarregando...`)
         setTimeout(() => window.location.reload(), 1500)
       },
@@ -273,6 +280,7 @@ export default function ConfiguracoesPage() {
     if (confirmando) return
     setConfirmacao(null)
     setTextoConfirmacao('')
+    setSenhaConfirmacao('')
   }
 
   async function confirmarExclusao() {
@@ -287,6 +295,7 @@ export default function ConfiguracoesPage() {
       await confirmacao.onConfirmar()
       setConfirmacao(null)
       setTextoConfirmacao('')
+      setSenhaConfirmacao('')
     } catch (error) {
       console.error('[configuracoes:limpeza]', error)
       toast.error(error instanceof Error ? error.message : 'Não foi possível concluir a limpeza.')
@@ -565,13 +574,26 @@ export default function ConfiguracoesPage() {
                 </label>
                 <input type="text" value={textoConfirmacao} onChange={(e) => setTextoConfirmacao(e.target.value)}
                   className="bbt-input w-full" placeholder={confirmacao.palavraConfirmacao} autoFocus />
+                {confirmacao.requiresPassword && (
+                  <label className="block pt-2 text-xs font-semibold text-slate-600 dark:text-slate-400">
+                    Confirme sua senha atual
+                    <input
+                      type="password"
+                      value={senhaConfirmacao}
+                      onChange={(event) => setSenhaConfirmacao(event.target.value)}
+                      autoComplete="current-password"
+                      className="bbt-input mt-1.5 w-full"
+                      required
+                    />
+                  </label>
+                )}
               </div>
             </div>
             <div className="p-4 border-t border-bbt-gray-100 dark:border-slate-700 flex justify-end gap-2">
               <button onClick={fecharConfirmacao} disabled={confirmando} className="bbt-button-ghost">Cancelar</button>
               <button
                 onClick={confirmarExclusao}
-                disabled={confirmando || textoConfirmacao !== confirmacao.palavraConfirmacao}
+                disabled={confirmando || textoConfirmacao !== confirmacao.palavraConfirmacao || (confirmacao.requiresPassword && !senhaConfirmacao)}
                 className="px-4 py-2 bg-red-500 text-white rounded-lg font-semibold hover:bg-red-600 disabled:opacity-30 disabled:cursor-not-allowed transition flex items-center gap-2">
                 {confirmando && <Loader2 className="w-4 h-4 animate-spin" />}
                 {confirmando ? 'Limpando e verificando...' : 'Confirmar e apagar'}

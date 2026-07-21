@@ -1,13 +1,14 @@
 // ============================================================
 // AUDITORIA & TRANSAÇÕES (com rollback)
 // Toda operação importante é registrada como evento estruturado.
-// Importações em massa rodam dentro de uma "transação simulada"
-// que pode ser desfeita se algo der errado.
+// Importações em massa usam um lote lógico com ações compensatórias registradas.
+// O mecanismo não substitui uma transação atômica do PostgreSQL.
 // ============================================================
 
 import type { LogAuditoria } from '@/types'
 
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 const STORAGE_LOGS = 'bbt-auditoria'
 const STORAGE_TX = 'bbt-transacoes'
@@ -31,7 +32,7 @@ export interface EventoAuditoria {
 }
 
 export function gerarId(): string {
-  return `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  return createEntityId('evt', '_')
 }
 
 function loadLogs(): EventoAuditoria[] {
@@ -125,7 +126,7 @@ function saveTx(arr: Transacao[]) {
  */
 export function iniciarTransacao(opts: { user_id: string; user_name: string; descricao: string }): string {
   const tx: Transacao = {
-    id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: createEntityId('tx', '_'),
     iniciada_em: new Date().toISOString(),
     user_id: opts.user_id,
     user_name: opts.user_name,

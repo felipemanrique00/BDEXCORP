@@ -1,48 +1,17 @@
-import pg from 'pg'
-import { readFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const { Pool } = pg
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
-const connectionString = process.env.DATABASE_URL
-
-if (!connectionString) {
-  console.error('DATABASE_URL nao configurado.')
-  process.exit(1)
-}
-
-const pool = new Pool({
-  connectionString,
-  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const migrationScript = join(root, 'scripts', 'migrate.mjs')
+const result = spawnSync(process.execPath, [migrationScript, 'up'], {
+  cwd: root,
+  env: process.env,
+  stdio: 'inherit',
 })
 
-try {
-  await pool.query(`
-    create table if not exists app_kv (
-      key text primary key,
-      value jsonb not null,
-      updated_at timestamptz not null default now()
-    );
-
-    create index if not exists app_kv_updated_at_idx on app_kv (updated_at desc);
-  `)
-
-  const schemaFiles = [
-    join(__dirname, '..', 'deploy', 'postgres', 'techtravel-schema.sql'),
-    join(__dirname, '..', 'deploy', 'postgres', 'assistant-schema.sql'),
-  ]
-
-  for (const file of schemaFiles) {
-    try {
-      await pool.query(await readFile(file, 'utf8'))
-    } catch (error) {
-      console.warn(`Aviso: schema opcional nao aplicado (${file}):`, error?.message || error)
-    }
-  }
-
-  console.log('Banco BBT Corporativo inicializado com sucesso.')
-} finally {
-  await pool.end()
+if (result.error) {
+  console.error(`Falha ao iniciar migrador: ${result.error.message}`)
+  process.exit(1)
 }
+process.exit(result.status ?? 1)

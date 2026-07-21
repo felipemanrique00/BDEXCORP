@@ -21,13 +21,14 @@ import type {
   TravelReservationRequest,
   TravelService,
 } from '@/lib/integrations/types'
+import { createEntityId } from '@/lib/ids'
 
 export async function techHealth(): Promise<IntegrationHealth> {
   const config = getTechConfig()
   const configured = techConfigured(config)
   if (!configured) {
     return {
-      ok: true,
+      ok: false,
       provider: 'tech-ttravel',
       mode: config.mode,
       configured: false,
@@ -102,9 +103,15 @@ export async function techSearchCities(args: { query: string; service: TravelSer
 }
 
 export async function techCreateQuote(request: TravelQuoteRequest): Promise<TravelQuote> {
+  if (!['aereo', 'hotelaria'].includes(request.service)) {
+    throw new TechIntegrationError(
+      `Cotação ${request.service} indisponível: o endpoint de disponibilidade não foi fornecido pela Tech Travel.`,
+      { status: 501, code: 'TECH_QUOTE_CAPABILITY_UNAVAILABLE' },
+    )
+  }
   const config = getTechConfig()
   const session = await getTechSession({ companyId: request.providerCompanyId })
-  const id = `tech_quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  const id = createEntityId('tech_quote', '_')
 
   if (request.service === 'aereo') {
     const response = await techRequest<any>(
@@ -171,36 +178,10 @@ export async function techCreateQuote(request: TravelQuoteRequest): Promise<Trav
     return quote
   }
 
-  const cities = request.destino
-    ? await techSearchCities({ query: request.destino, service: request.service, providerCompanyId: request.providerCompanyId })
-    : { cities: [], raw: null }
-
-  const quote: TravelQuote = {
-    id,
-    provider: 'tech-ttravel',
-    service: request.service,
-    request,
-    options: cities.cities.slice(0, 8).map((city: any, index: number) => ({
-      id: `${id}_city_${city.id}`,
-      provider: 'tech-ttravel',
-      service: request.service,
-      title: city.description,
-      subtitle: 'Base Tech Travel localizada. A disponibilidade específica depende do endpoint contratado para o serviço.',
-      metadata: { city, index },
-      raw: city.raw,
-    })),
-    raw: cities.raw,
-    createdAt: new Date().toISOString(),
-    warnings: ['A documentação enviada mapeia reserva/status para carro e rodoviário via OS, mas não traz endpoints completos de disponibilidade para esses serviços.'],
-  }
-  await logTechIntegration({
-    action: 'quote',
-    status: 'warning',
-    message: `Serviço ${request.service} preparado pela Tech com busca de cidade/base, aguardando endpoint de disponibilidade específico.`,
-    endpoint: '/BuscarCidades',
-    metadata: { quoteId: quote.id, service: quote.service },
+  throw new TechIntegrationError('Serviço de cotação Tech não mapeado.', {
+    status: 501,
+    code: 'TECH_QUOTE_CAPABILITY_UNAVAILABLE',
   })
-  return quote
 }
 
 export async function techFareAir(payload: Record<string, unknown>, providerCompanyId?: string | number | null) {
@@ -222,18 +203,24 @@ export async function techFareAir(payload: Record<string, unknown>, providerComp
 
 export async function techCreateReservation(request: TravelReservationRequest): Promise<TravelReservation> {
   if (!request.confirmed) {
-    return preparedReservation(request, 'prepared', 'A reserva foi preparada. Confirme a execução para enviar para a Tech Travel.')
+    throw new TechIntegrationError(
+      'Confirmação explícita obrigatória antes de enviar a reserva para a Tech Travel.',
+      { status: 409, code: 'TECH_RESERVATION_CONFIRMATION_REQUIRED' },
+    )
   }
 
   const key = getIdempotencyKey('tech_reservation', request, request.idempotencyKey)
   const cached = getIdempotentResult<TravelReservation>(key)
   if (cached) return cached
 
-  const session = await getTechSession({ companyId: request.payload?.providerCompanyId as any })
   const endpoint = request.service === 'hotelaria' ? '/Hotel/CriarReserva' : request.service === 'aereo' ? '/CriarReservaAereo' : null
   if (!endpoint) {
-    return preparedReservation(request, 'prepared', 'A documentação Tech enviada não traz endpoint de criação direta para este serviço; use OS/status ou complemente o contrato Tech.')
+    throw new TechIntegrationError(
+      `Reserva ${request.service} indisponível: o endpoint de criação não foi fornecido pela Tech Travel.`,
+      { status: 501, code: 'TECH_RESERVATION_CAPABILITY_UNAVAILABLE' },
+    )
   }
+  const session = await getTechSession({ companyId: request.payload?.providerCompanyId as any })
 
   const body =
     request.service === 'hotelaria'
@@ -247,7 +234,7 @@ export async function techCreateReservation(request: TravelReservationRequest): 
   })
 
   const reservation: TravelReservation = {
-    id: `tech_res_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: createEntityId('tech_res', '_'),
     provider: 'tech-ttravel',
     service: request.service,
     status: 'reserved',
@@ -427,19 +414,4 @@ async function techPostSensitive(endpoint: string, action: 'cancel' | 'cancel-ti
     durationMs: response.durationMs,
   })
   return setIdempotentResult(key, response.data)
-}
-
-function preparedReservation(request: TravelReservationRequest, status: TravelReservation['status'], message: string): TravelReservation {
-  return {
-    id: `tech_res_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    provider: 'tech-ttravel',
-    service: request.service,
-    status,
-    idOs: request.idOs ? String(request.idOs) : undefined,
-    localizador: request.localizador,
-    sistema: request.sistema,
-    request,
-    raw: { message },
-    createdAt: new Date().toISOString(),
-  }
 }

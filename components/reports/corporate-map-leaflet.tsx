@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { reportClientFailure } from '@/lib/client-observability'
 import type { DashboardMapPoint } from '@/lib/reporting/corporate-dashboard'
 
 interface Props {
@@ -27,14 +28,6 @@ export function CorporateMapLeaflet({ pontos, selected, onSelect, height = 300 }
 
     ;(async () => {
       try {
-        if (!document.getElementById('leaflet-css')) {
-          const link = document.createElement('link')
-          link.id = 'leaflet-css'
-          link.rel = 'stylesheet'
-          link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'
-          document.head.appendChild(link)
-        }
-
         const L: any = await import('leaflet')
         if (cancelled || !containerRef.current || mapRef.current) return
 
@@ -67,7 +60,9 @@ export function CorporateMapLeaflet({ pontos, selected, onSelect, height = 300 }
       if (mapRef.current) {
         try {
           mapRef.current.remove()
-        } catch {}
+        } catch (error) {
+          reportClientFailure('map_cleanup_failed', error, { component: 'corporate-map' })
+        }
         mapRef.current = null
       }
     }
@@ -82,7 +77,9 @@ export function CorporateMapLeaflet({ pontos, selected, onSelect, height = 300 }
         try {
           layerRef.current.clearLayers()
           layerRef.current.remove()
-        } catch {}
+        } catch (error) {
+          reportClientFailure('map_layer_cleanup_failed', error, { component: 'corporate-map' })
+        }
       }
 
       const layer = L.layerGroup()
@@ -120,7 +117,9 @@ export function CorporateMapLeaflet({ pontos, selected, onSelect, height = 300 }
         } else {
           mapRef.current.setView(BRAZIL_CENTER, 4)
         }
-      } catch {}
+      } catch (error) {
+        reportClientFailure('map_render_failed', error, { component: 'corporate-map' })
+      }
     })()
   }, [onSelect, pontos, ready, selected])
 

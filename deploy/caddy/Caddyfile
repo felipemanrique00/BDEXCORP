@@ -1,0 +1,42 @@
+{
+  email {$ACME_EMAIL}
+  admin off
+  log {
+    output stdout
+    format json
+    level INFO
+  }
+}
+
+{$APP_DOMAIN} {
+  encode zstd gzip
+
+  request_body {
+    max_size {$MAX_UPLOAD_SIZE}
+  }
+
+  @hidden path /.env* /.git/* /deploy/* /scripts/* /node_modules/*
+  respond @hidden 404
+
+  header {
+    -Server
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  }
+
+  reverse_proxy app:3000 {
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+    transport http {
+      dial_timeout 10s
+      response_header_timeout 120s
+    }
+  }
+
+  log {
+    output stdout
+    format json
+  }
+}

@@ -1,6 +1,7 @@
 'use client'
 
 import type { AssistantSetting } from '@/lib/assistant/types'
+import { reportClientFailure } from '@/lib/client-observability'
 
 const SETTINGS_CACHE_TTL_MS = 60_000
 
@@ -17,14 +18,17 @@ export function getAssistantSettingsClient(forceRefresh = false): Promise<Assist
 
   settingsRequest = fetch('/api/assistant/settings', { cache: 'no-store' })
     .then(async (response) => {
-      if (!response.ok) return null
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const payload = await response.json()
-      if (!payload?.ok || !payload?.settings) return null
+      if (!payload?.ok || !payload?.settings) throw new Error('Resposta de configuracao invalida.')
       settingsCache = payload.settings as AssistantSetting
       settingsCacheAt = Date.now()
       return settingsCache
     })
-    .catch(() => null)
+    .catch((error) => {
+      reportClientFailure('assistant_settings_load_failed', error, { component: 'assistant-settings-client' })
+      return null
+    })
     .finally(() => {
       settingsRequest = null
     })

@@ -1,5 +1,5 @@
 export type AssistantChannel = 'system' | 'whatsapp' | 'voice' | 'portal' | 'test'
-export type AssistantMode = 'mock' | 'sandbox' | 'production'
+export type AssistantMode = 'sandbox' | 'production'
 export type AssistantResponseMode = 'text' | 'audio' | 'auto'
 export type AssistantVoiceGender = 'female' | 'male' | 'neutral'
 export type AssistantPersonalityPresetId =
@@ -21,7 +21,7 @@ export interface AssistantSetting {
   id: 'default'
   active: boolean
   assistantName: string
-  provider: 'mock' | 'openai' | 'gemini' | 'custom'
+  provider: 'openai' | 'gemini' | 'custom'
   model: string
   temperature: number
   language: string
@@ -52,7 +52,7 @@ export interface AssistantSetting {
 
 export interface AssistantWhatsAppSetting {
   mode: AssistantMode
-  provider: 'mock' | 'whatsapp_web' | 'cloud_api' | 'evolution_api' | 'zapi' | 'twilio'
+  provider: 'whatsapp_web' | 'cloud_api' | 'evolution_api' | 'zapi' | 'twilio'
   autoReply: boolean
   autoSendFiles: boolean
   dailyMessageLimit: number
@@ -64,8 +64,8 @@ export interface AssistantWhatsAppSetting {
 export interface AssistantVoiceSetting {
   speechToTextEnabled: boolean
   textToSpeechEnabled: boolean
-  transcriptionProvider: 'browser' | 'mock' | 'openai' | 'custom'
-  voiceProvider: 'browser' | 'mock' | 'openai' | 'custom'
+  transcriptionProvider: 'browser' | 'openai' | 'custom'
+  voiceProvider: 'browser' | 'openai' | 'custom'
   voice: string
   voiceGender: AssistantVoiceGender
   speed: number
@@ -264,7 +264,7 @@ export interface VoucherSendLog {
 export interface AudioTranscriptionLog {
   id: string
   provider: string
-  status: 'success' | 'failed' | 'mocked'
+  status: 'success' | 'failed'
   language: string
   source: AssistantChannel
   fileName?: string
@@ -276,7 +276,7 @@ export interface AudioTranscriptionLog {
 export interface AudioGenerationLog {
   id: string
   provider: string
-  status: 'success' | 'failed' | 'mocked'
+  status: 'success' | 'failed'
   voice: string
   format: string
   textPreview: string

@@ -19,7 +19,7 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  if (!isPasswordHash(stored)) return safeTextCompare(password, stored)
+  if (!isPasswordHash(stored)) return false
 
   const parts = stored.split('$')
   if (parts.length !== 7) return false
@@ -50,10 +50,4 @@ function scryptAsync(password: string, salt: Buffer, keyLength: number, n: numbe
 
 function validCost(n: number, r: number, p: number): boolean {
   return Number.isInteger(n) && n >= 16_384 && n <= 262_144 && Number.isInteger(r) && r >= 1 && r <= 16 && Number.isInteger(p) && p >= 1 && p <= 4
-}
-
-function safeTextCompare(left: string, right: string): boolean {
-  const a = Buffer.from(left)
-  const b = Buffer.from(right)
-  return a.length === b.length && timingSafeEqual(a, b)
 }

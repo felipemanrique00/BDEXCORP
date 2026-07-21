@@ -17,12 +17,17 @@ interface IARequestShape {
   messages: Array<{ role: 'user' | 'assistant'; content: any }>
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const guard = await guardApiRequest(request, {
+    requireAuth: true,
+    rateLimit: { key: 'ia-status', limit: 120, windowMs: 60_000 },
+  })
+  if (guard.response) return guard.response
   return NextResponse.json(getPaidAIStatus())
 }
 
 export async function POST(req: NextRequest) {
-  const guard = guardApiRequest(req, {
+  const guard = await guardApiRequest(req, {
     requireAuth: true,
     rateLimit: { key: 'ia-chat', limit: 40, windowMs: 60_000 },
   })

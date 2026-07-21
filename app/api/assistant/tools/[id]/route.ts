@@ -9,7 +9,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const guard = guardApiRequest(request, {
+  const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'gerenciar_usuarios',
     rateLimit: { key: 'assistant-tools:put', limit: 40, windowMs: 60_000 },

@@ -1,0 +1,174 @@
+import 'server-only'
+
+import { hashPassword } from '@/lib/security/password'
+import { assertStrongPassword, type RequestSecurityMetadata } from '@/lib/server/auth-service'
+import { writeAuditEvent } from '@/lib/server/audit-log'
+import { queryDatabase, withTransaction } from '@/lib/server/database'
+import { sendTransactionalEmail } from '@/lib/server/email'
+import { getServerEnvironment } from '@/lib/server/environment'
+import { consumeRateLimit } from '@/lib/server/rate-limit'
+import { createOpaqueToken, hashSecureToken } from '@/lib/server/secure-token'
+
+interface ResetAccountRow {
+  user_id: string
+  email: string
+  name: string
+  tenant_id: string | null
+}
+
+export class InvalidPasswordResetTokenError extends Error {
+  constructor() {
+    super('Link de redefinicao invalido ou expirado.')
+  }
+}
+
+export async function requestPasswordReset(
+  emailInput: string,
+  metadata: RequestSecurityMetadata,
+): Promise<void> {
+  const email = emailInput.trim().toLowerCase()
+  const emailLimit = await consumeRateLimit(email, {
+    key: 'password-reset:email',
+    limit: 3,
+    windowMs: 60 * 60 * 1_000,
+  })
+  if (!emailLimit.allowed) return
+
+  const accountResult = await queryDatabase<ResetAccountRow>(
+    `select u.id as user_id, u.email::text, u.name, min(m.tenant_id::text)::uuid as tenant_id
+     from users u
+     join tenant_memberships m on m.user_id = u.id and m.status = 'active'
+     join tenants t on t.id = m.tenant_id and t.status in ('active', 'trial')
+     where u.email = $1 and u.status = 'active' and u.deleted_at is null
+     group by u.id, u.email, u.name
+     limit 1`,
+    [email],
+  )
+  const account = accountResult.rows[0]
+  if (!account) return
+
+  const environment = getServerEnvironment()
+  if (!environment.APP_URL) throw new Error('APP_URL obrigatorio para recuperacao de senha.')
+  const token = createOpaqueToken()
+  const tokenHash = hashSecureToken(token, 'password-reset')
+  const expiresAt = new Date(Date.now() + environment.PASSWORD_RESET_MINUTES * 60_000)
+
+  const tokenResult = await withTransaction(async (client) => {
+    await client.query(
+      'update password_reset_tokens set used_at = now() where user_id = $1 and used_at is null',
+      [account.user_id],
+    )
+    return client.query<{ id: string }>(
+      `insert into password_reset_tokens (user_id, token_hash, expires_at, requested_ip)
+       values ($1, $2, $3, $4::inet) returning id`,
+      [account.user_id, tokenHash, expiresAt, normalizeIp(metadata.ipAddress)],
+    )
+  })
+  const resetId = tokenResult.rows[0].id
+  const resetUrl = new URL('/redefinir-senha', environment.APP_URL)
+  resetUrl.searchParams.set('token', token)
+
+  try {
+    await sendTransactionalEmail({
+      to: account.email,
+      subject: 'Redefinicao de senha - BBT Corporativo',
+      text: `Ola, ${account.name}. Use o link a seguir para redefinir sua senha: ${resetUrl.toString()}\n\nO link expira em ${environment.PASSWORD_RESET_MINUTES} minutos. Se voce nao solicitou, ignore esta mensagem.`,
+      html: `<p>Ola, ${escapeHtml(account.name)}.</p><p>Use o link abaixo para redefinir sua senha:</p><p><a href="${escapeHtml(resetUrl.toString())}">Redefinir senha</a></p><p>O link expira em ${environment.PASSWORD_RESET_MINUTES} minutos. Se voce nao solicitou, ignore esta mensagem.</p>`,
+    })
+    await writeAuditEvent({
+      action: 'auth.password_reset_requested',
+      result: 'success',
+      tenantId: account.tenant_id,
+      actorUserId: account.user_id,
+      requestId: metadata.requestId,
+      ipAddress: metadata.ipAddress,
+      userAgent: metadata.userAgent,
+      entityType: 'password_reset',
+      entityId: resetId,
+    })
+  } catch (error) {
+    await queryDatabase('update password_reset_tokens set used_at = now() where id = $1', [resetId])
+    await writeAuditEvent({
+      action: 'auth.password_reset_requested',
+      result: 'failure',
+      tenantId: account.tenant_id,
+      actorUserId: account.user_id,
+      requestId: metadata.requestId,
+      ipAddress: metadata.ipAddress,
+      userAgent: metadata.userAgent,
+      entityType: 'password_reset',
+      entityId: resetId,
+      metadata: { reason: 'email_delivery_failed' },
+    })
+    throw error
+  }
+}
+
+export async function confirmPasswordReset(
+  token: string,
+  newPassword: string,
+  metadata: RequestSecurityMetadata,
+): Promise<void> {
+  assertStrongPassword(newPassword)
+  const passwordHash = await hashPassword(newPassword)
+  const tokenHash = hashSecureToken(token, 'password-reset')
+
+  const outcome = await withTransaction(async (client) => {
+    const result = await client.query<{
+      id: string
+      user_id: string
+      tenant_id: string | null
+    }>(
+      `select pr.id, pr.user_id,
+         (select min(m.tenant_id::text)::uuid from tenant_memberships m where m.user_id = pr.user_id) as tenant_id
+       from password_reset_tokens pr
+       where pr.token_hash = $1 and pr.used_at is null and pr.expires_at > now()
+       for update of pr`,
+      [tokenHash],
+    )
+    const reset = result.rows[0]
+    if (!reset) throw new InvalidPasswordResetTokenError()
+
+    await client.query(
+      `update user_credentials set
+         password_hash = $2, password_updated_at = now(), must_change_password = false,
+         failed_attempts = 0, locked_until = null
+       where user_id = $1`,
+      [reset.user_id, passwordHash],
+    )
+    await client.query('update password_reset_tokens set used_at = now() where id = $1', [reset.id])
+    await client.query(
+      `update user_sessions set status = 'revoked', revoked_at = now(), revocation_reason = 'password_reset'
+       where user_id = $1 and status = 'active'`,
+      [reset.user_id],
+    )
+    return reset
+  })
+
+  await writeAuditEvent({
+    action: 'auth.password_reset_completed',
+    result: 'success',
+    tenantId: outcome.tenant_id,
+    actorUserId: outcome.user_id,
+    requestId: metadata.requestId,
+    ipAddress: metadata.ipAddress,
+    userAgent: metadata.userAgent,
+    entityType: 'password_reset',
+    entityId: outcome.id,
+  })
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character] || character)
+}
+
+function normalizeIp(value: string | null | undefined): string | null {
+  const candidate = value?.split(',')[0]?.trim()
+  return candidate && /^[0-9a-f:.]+$/i.test(candidate) ? candidate : null
+}

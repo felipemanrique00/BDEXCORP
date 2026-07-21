@@ -7,7 +7,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function POST(request: Request) {
-  const guard = guardApiRequest(request, {
+  const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'gerenciar_usuarios',
     rateLimit: { key: 'assistant-wa-disconnect', limit: 20, windowMs: 60_000 },

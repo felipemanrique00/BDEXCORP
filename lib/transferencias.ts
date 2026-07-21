@@ -42,9 +42,9 @@ function load(): SolicitacaoTransferencia[] {
   return loadJSON<SolicitacaoTransferencia[]>(STORAGE_KEY, [])
 }
 
-function save(arr: SolicitacaoTransferencia[]) {
-  if (typeof window === 'undefined') return
-  safeSetJSON(STORAGE_KEY, arr.slice(-1000))
+function save(arr: SolicitacaoTransferencia[]): boolean {
+  if (typeof window === 'undefined') return false
+  return safeSetJSON(STORAGE_KEY, arr.slice(-1000))
 }
 
 // ============================================================
@@ -80,7 +80,7 @@ export function solicitarTransferencia(opts: {
   }
   const all = load()
   all.push(sol)
-  save(all)
+  if (!save(all)) return null
 
   registrarEvento({
     user_id: opts.origem_user_id,
@@ -117,17 +117,27 @@ export function aceitarTransferencia(
     motivo_saida: `Transferida para ${sol.destino_user_name}: ${sol.motivo}`,
   })
 
-  updateAtendimento(sol.atendimento_id, {
+  const atendimentoAtualizado = updateAtendimento(sol.atendimento_id, {
     agente_user_id: sol.destino_user_id,
     historico_agentes: historico,
     repassada_em: new Date().toISOString(),
     repassada_de: sol.origem_user_id,
     repassada_para: sol.destino_user_id,
   } as any)
+  if (!atendimentoAtualizado) return false
 
   sol.status = 'aceita'
   sol.respondida_em = new Date().toISOString()
-  save(all)
+  if (!save(all)) {
+    updateAtendimento(sol.atendimento_id, {
+      agente_user_id: at.agente_user_id,
+      historico_agentes: (at as any).historico_agentes || [],
+      repassada_em: (at as any).repassada_em,
+      repassada_de: (at as any).repassada_de,
+      repassada_para: (at as any).repassada_para,
+    } as any)
+    return false
+  }
 
   registrarEvento({
     user_id: userId,
@@ -155,7 +165,7 @@ export function recusarTransferencia(
   sol.status = 'recusada'
   sol.respondida_em = new Date().toISOString()
   sol.motivo_recusa = motivoRecusa.trim()
-  save(all)
+  if (!save(all)) return false
 
   registrarEvento({
     user_id: userId,
@@ -175,8 +185,7 @@ export function cancelarTransferencia(solicitacaoId: string, userId: string): bo
   if (sol.origem_user_id !== userId) return false  // só quem solicitou pode cancelar
   sol.status = 'cancelada'
   sol.respondida_em = new Date().toISOString()
-  save(all)
-  return true
+  return save(all)
 }
 
 // ============================================================

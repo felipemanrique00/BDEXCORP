@@ -10,6 +10,7 @@ import { CONFIG_COBRANCA_PADRAO } from '@/types'
 import { safeGetRaw, safeRemove, safeSetRaw } from '@/lib/storage-quota'
 import { aplicarVinculoEmpresaGrupo, gerarIdGrupoEmpresarial, sincronizarGruposComEmpresas } from '@/lib/grupos'
 import { garantirCodigoIdentificacao, normalizarAliasesFuncionario, normalizarFuncionariosComCodigo } from '@/lib/funcionario-identidade'
+import { createEntityId } from '@/lib/ids'
 
 interface DataState {
   empresas: Empresa[]
@@ -62,7 +63,7 @@ export const useStore = create<DataState>()(
       addEmpresa: (e) => {
         const novo: Empresa = {
           ...e,
-          id: `emp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          id: createEntityId('emp'),
           created_at: new Date().toISOString(),
           config_cobranca: e.config_cobranca || { ...CONFIG_COBRANCA_PADRAO },
         }
@@ -172,7 +173,7 @@ export const useStore = create<DataState>()(
         const base: Funcionario = {
           ...f,
           aliases_nome: normalizarAliasesFuncionario(f.aliases_nome),
-          id: `func-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          id: createEntityId('func'),
           created_at: now,
         }
         const novo = garantirCodigoIdentificacao(base, get().funcionarios)
@@ -257,7 +258,7 @@ export const useStore = create<DataState>()(
       addPolitica: (p) => {
         const novo: PoliticaCargo = {
           ...p,
-          id: `pol-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          id: createEntityId('pol'),
         }
         set((s) => ({ politicas: [...s.politicas, novo] }))
       },

@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useStore } from '@/lib/store'
 import { AI_NAME, AI_SHORT_NAME } from '@/lib/branding'
 import { getStatusIA, type StatusIA } from '@/lib/ia-parser'
+import { reportClientFailure } from '@/lib/client-observability'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { addAtendimento } from '@/lib/atendimentos-storage'
 import {
@@ -81,7 +82,9 @@ export function QuickAIPopup() {
   const audioChunksRef = useRef<Blob[]>([])
 
   useEffect(() => {
-    getStatusIA().then(setStatus).catch(() => {})
+    getStatusIA().then(setStatus).catch((error) => {
+      reportClientFailure('ai_status_load_failed', error, { component: 'quick-ai-popup' })
+    })
     getAssistantSettingsClient().then((settings) => {
       if (settings) setAssistantSettings(settings)
     })

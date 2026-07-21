@@ -781,37 +781,24 @@ async function fluxoHotelInteligente(pergunta: string, ctx: SystemAIContext, ops
         confianca: 'alta' as const,
       }))
 
+    if (!locais.length) {
+      return {
+        handled: true,
+        title: 'Busca de hoteis indisponivel',
+        badge: 'Integracao externa',
+        message: `A pesquisa externa falhou (${e?.message || 'erro externo'}) e nao ha hotel real cadastrado para esse destino. Nenhum cadastro foi criado.`,
+        links: [{ label: 'Abrir hoteis', href: '/dashboard/hoteis', kind: 'primary' }],
+        provedor: 'sistema',
+      }
+    }
+
     response = {
-      source: 'local-fallback' as const,
+      source: 'local-catalog' as const,
       query: pergunta,
       summary: /quota|billing|exceeded|insufficient/i.test(e?.message || '')
-        ? 'A busca web da IA retornou limite de quota/billing. Usei a base local e deixei a acao registrada para conferencia.'
-        : `A busca web falhou (${e?.message || 'erro externo'}). Usei a base local para nao travar a operacao.`,
-      suggestions: locais.length
-        ? locais
-        : [
-            {
-              nome: `Hotel corporativo ${destino || nomeHotel || 'destino'}`,
-              cidade: destino || '',
-              uf: '',
-              categoria: undefined,
-              observacoes: 'Sugestao local. Confirmar telefone, tarifa e disponibilidade antes de emitir.',
-              telefone: null,
-              faturado: false,
-              info_faturamento: null,
-              bebedouro: null,
-              valor_agua: null,
-              cafe_manha: null,
-              estacionamento: null,
-              tarifa_sgl: null,
-              tarifa_dbl: null,
-              tarifa_tpl: null,
-              formas_pagamento: ['CC', 'PX'] as any,
-              fonte_url: `https://www.google.com/search?q=${encodeURIComponent(`${destino || nomeHotel} hotel telefone`)}`,
-              fonte_titulo: 'Busca Google para conferencia',
-              confianca: 'baixa' as const,
-            },
-          ],
+        ? 'A busca externa atingiu o limite contratado. Foram exibidos somente os hoteis reais do cadastro.'
+        : `A busca externa falhou (${e?.message || 'erro externo'}). Foram exibidos somente os hoteis reais do cadastro.`,
+      suggestions: locais,
       citations: [],
       search_queries: [],
     }
@@ -830,7 +817,7 @@ async function fluxoHotelInteligente(pergunta: string, ctx: SystemAIContext, ops
   return {
     handled: true,
     title: 'Busca inteligente de hoteis',
-    badge: response.source === 'gemini-google' ? 'Gemini Google Search' : response.source === 'openai-web' ? 'GPT-5.2 Web Search' : 'Fallback local',
+    badge: response.source === 'gemini-google' ? 'Gemini Google Search' : response.source === 'openai-web' ? 'GPT-5.2 Web Search' : 'Catalogo cadastrado',
     message: [
       response.summary,
       cadastradas.length

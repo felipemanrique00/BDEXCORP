@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+
 import { z } from 'zod'
 
 import { getAssistantSettings } from '@/lib/assistant/settings'
@@ -22,7 +24,7 @@ export const DEFAULT_ASSISTANT_TOOLS: AssistantToolDefinition[] = [
   tool('getVoucherByCode', 'Localiza voucher por codigo, numero ou localizador.', 'read', 'vouchers', false, false),
   tool('getVoucherByCustomer', 'Busca vouchers pelo nome/documento do passageiro.', 'read', 'vouchers', true, false),
   tool('generateVoucherPDF', 'Gera documento HTML/PDF de voucher com mascara de dados sensiveis.', 'document', 'vouchers', true, true),
-  tool('sendVoucherPDF', 'Registra envio de voucher por WhatsApp ou canal interno.', 'message', 'whatsapp', true, true),
+  tool('sendVoucherPDF', 'Envia um voucher persistido por um canal integrado.', 'message', 'whatsapp', true, true),
   tool('getDemandsByCustomer', 'Consulta demandas por cliente, passageiro ou empresa.', 'read', 'demandas', true, false),
   tool('getReservationDetails', 'Consulta reservas Tech Travel por OS, localizador ou identificador.', 'read', 'reservas', false, false),
   tool('searchHotels', 'Busca hoteis cadastrados por cidade, UF ou nome.', 'read', 'hoteis', false, false),
@@ -245,21 +247,23 @@ async function sendVoucherPdfTool(input: unknown, context: AssistantToolRunConte
   const params = z.object({
     voucherId: z.string().min(1),
     documentId: z.string().optional(),
-    recipientPhone: z.string().optional(),
+    recipientPhone: z.string().min(8),
     recipientName: z.string().optional(),
   }).parse(input)
+  const error = 'Envio automatico bloqueado: o voucher precisa estar persistido como PDF e o adaptador do canal deve confirmar a entrega.'
   const log: VoucherSendLog = {
-    id: `send-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `send-${randomUUID()}`,
     voucherId: params.voucherId,
     documentId: params.documentId,
     channel: context.channel,
     recipientPhone: params.recipientPhone,
     recipientName: params.recipientName,
-    status: context.channel === 'whatsapp' ? 'queued' : 'sent',
+    status: 'failed',
+    error,
     createdAt: new Date().toISOString(),
   }
   await appendAssistantList(ASSISTANT_KEYS.voucherSendLogs, log, 500)
-  return { ok: true, data: log }
+  return { ok: false, error, data: log }
 }
 
 async function getDemandsByCustomer(input: unknown, context: AssistantToolRunContext): Promise<AssistantToolResult> {
@@ -316,7 +320,7 @@ async function getFinancialSummary(_input: unknown, context: AssistantToolRunCon
 async function transferToHuman(input: unknown, context: AssistantToolRunContext): Promise<AssistantToolResult> {
   const params = z.object({ reason: z.string().min(1), priority: z.enum(['low', 'normal', 'high', 'urgent']).default('normal') }).parse(input)
   const handoff = {
-    id: `handoff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `handoff-${randomUUID()}`,
     reason: params.reason,
     priority: params.priority,
     status: 'waiting_human',

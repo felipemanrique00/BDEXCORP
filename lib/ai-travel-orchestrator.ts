@@ -17,15 +17,11 @@ import {
   type HotelAISuggestion,
 } from '@/lib/ia-hotel-search'
 import {
-  addAgentApproval,
-  addAgentQuote,
   addAgentRun,
   addAgentTask,
   upsertAgentMemory,
-  type AgentQuoteOption,
 } from '@/lib/ai-agent-storage'
 import { AI_NAME } from '@/lib/branding'
-import { selectSuppliersForService, type SupplierIntegration } from '@/lib/supplier-integrations'
 import { encontrarFuncionarioConfiavel, encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
 
 export interface TravelAgentContext {
@@ -142,36 +138,6 @@ export async function runTravelAgent(
   const politicas = ops.politicas || ctx.politicas || []
   const policy = avaliarPolitica({ tipo, parsed, funcionario, empresa, politicas, dataInicio })
   const hotelPlan = await montarPlanoHotel(pergunta, destino, ctx, ops, tipo)
-  const quoteOptions = montarOpcoesCotacao({ pergunta, tipo, destino, origem, dataInicio, dataFim, hotelPlan, policy })
-  const totalMin = minTotal(quoteOptions)
-  const totalRecommended = recommendedTotal(quoteOptions)
-  const approval = policy.requiresApproval
-    ? addAgentApproval({
-        status: 'pendente',
-        requested_by_user_id: ops.currentUser?.id,
-        approver_name: policy.approverName,
-        empresa_id: empresa?.id,
-        funcionario_id: funcionario?.id || null,
-        amount: totalRecommended,
-        reason: 'Cotacao gerada pela IA ficou fora de uma ou mais regras de politica.',
-        policy_violations: policy.violations,
-        payload: { pergunta, destino, dataInicio, dataFim, tipo },
-      })
-    : undefined
-
-  const quote = addAgentQuote({
-    empresa_id: empresa?.id,
-    funcionario_id: funcionario?.id || null,
-    destination: destino || undefined,
-    start_date: dataInicio,
-    end_date: dataFim,
-    total_min: totalMin,
-    total_recommended: totalRecommended,
-    status: 'rascunho',
-    options: quoteOptions,
-    policy_violations: policy.violations,
-    approval_id: approval?.id,
-  })
 
   const atendimento = empresa && ops.createAtendimento
     ? ops.createAtendimento(montarAtendimento({
@@ -185,15 +151,12 @@ export async function runTravelAgent(
         dataInicio,
         dataFim,
         prioridade,
-        totalRecommended,
         currentUserId: ops.currentUser?.id || 'ia-operacional',
-        requiresApproval: policy.requiresApproval,
       }))
     : null
 
   criarTarefasOperacionais({
     atendimento,
-    quoteId: quote.id,
     tipo,
     destino,
     dataInicio,
@@ -206,20 +169,18 @@ export async function runTravelAgent(
 
   const plan = [
     'Identificar viajante, empresa, centro de custo e politica aplicavel.',
-    'Montar cotacao com a melhor opcao por custo-beneficio.',
-    policy.requiresApproval ? 'Enviar excecao para aprovacao antes de emitir.' : 'Preparar reserva dentro da politica.',
-    'Gerar voucher vinculado e iniciar monitoramento da viagem.',
+    'Consultar tarifa e disponibilidade em provedor real.',
+    'Aplicar a politica sobre os valores retornados.',
+    'Submeter aprovacao, reservar e emitir somente depois da conferencia.',
   ]
 
   addAgentRun({
     input: pergunta,
     intent,
-    status: policy.requiresApproval || hotelPlan.externalWarning ? 'pendente' : 'concluido',
-    summary: `Cotacao ${quote.id} criada para ${destino || 'destino nao informado'}.`,
+    status: 'pendente',
+    summary: `Demanda registrada para cotacao real em ${destino || 'destino nao informado'}.`,
     plan,
     created_entities: [
-      { type: 'cotacao', id: quote.id, label: 'Cotacao IA' },
-      ...(approval ? [{ type: 'aprovacao', id: approval.id, label: 'Aprovacao pendente' }] : []),
       ...(atendimento ? [{ type: 'atendimento', id: atendimento.id, label: atendimento.passageiro_nome }] : []),
     ],
     blocked_by: [
@@ -228,17 +189,14 @@ export async function runTravelAgent(
     ],
   })
 
-  return montarRespostaCotacao({
+  return montarRespostaTriagem({
     empresa,
     funcionario,
     atendimento,
-    quoteId: quote.id,
-    approvalId: approval?.id,
     tipo,
     destino,
     dataInicio,
     dataFim,
-    quoteOptions,
     policy,
     hotelPlan,
   })
@@ -414,8 +372,9 @@ async function montarPlanoHotel(
       sources = response.citations || []
     } catch (e: any) {
       externalWarning = normalizarErroExterno(e?.message || 'Falha na busca web de hoteis.')
-      if (!suggestions.length) suggestions = fallbackHotels(destino, uf)
-      summary = `${summary} Busca web indisponivel agora; deixei sugestoes operacionais para conferencia.`
+      summary = suggestions.length
+        ? `${summary} A busca externa falhou; foram mantidos somente os hoteis reais do cadastro.`
+        : `${summary} A busca externa falhou e nenhuma sugestao foi criada.`
     }
   }
 
@@ -432,100 +391,6 @@ async function montarPlanoHotel(
   }
 
   return { suggestions, cadastradas, summary, sources, externalWarning }
-}
-
-function montarOpcoesCotacao({
-  pergunta,
-  tipo,
-  destino,
-  origem,
-  dataInicio,
-  dataFim,
-  hotelPlan,
-  policy,
-}: {
-  pergunta: string
-  tipo: TipoServico
-  destino: string
-  origem: string
-  dataInicio: string
-  dataFim?: string
-  hotelPlan: HotelPlan
-  policy: PolicyDecision
-}): AgentQuoteOption[] {
-  const options: AgentQuoteOption[] = []
-  const dias = Math.max(1, dataFim ? diffDias(dataInicio, dataFim) : 1)
-  const aereoSuppliers = fornecedoresOuFallback('aereo', ['Tech Travel / TTravel Connect'])
-  const hotelSuppliers = fornecedoresOuFallback('hotelaria', ['Tech Travel / TTravel Connect'])
-  const carroSuppliers = fornecedoresOuFallback('locacao', ['Tech Travel / TTravel Connect'])
-  const pacoteSuppliers = fornecedoresOuFallback('pacotes', ['Tech Travel / TTravel Connect'])
-
-  if (precisaAereo(pergunta, tipo)) {
-    const base = estimarAereo(destino, dataInicio)
-    const labels = ['Menor tarifa', 'Melhor custo-beneficio', 'Mais confortavel']
-    const multipliers = [0.88, 1, 1.35]
-    const advantages = ['Menor custo disponivel', 'Horario comercial, menor risco operacional', 'Voo direto e horario mais conveniente']
-    const risks = ['Pode ter conexao, franquia menor ou horario ruim', 'Sujeito a disponibilidade no momento da emissao', 'Maior custo e possivel aprovacao']
-    aereoSuppliers.slice(0, 3).forEach((supplier, index) => {
-      options.push(option('aereo', labels[index], supplier.nome, base * multipliers[index], advantages[index], risks[index], policyStatus(policy), supplierPayload(supplier)))
-    })
-  }
-
-  if (precisaHotel(pergunta, tipo)) {
-    const hotels = hotelPlan.suggestions.length ? hotelPlan.suggestions : fallbackHotels(destino, extrairUF(pergunta))
-    hotels.slice(0, 3).forEach((h, index) => {
-      const diaria = h.tarifa_sgl || h.tarifa_dbl || estimarDiariaHotel(destino, index)
-      const supplier = hotelSuppliers[index % hotelSuppliers.length]
-      options.push(option(
-        'hotel',
-        index === 0 ? 'Hotel recomendado' : `Hotel opcao ${index + 1}`,
-        supplier ? `${supplier.nome} - ${h.nome}` : h.nome,
-        diaria * dias,
-        h.telefone ? `Contato localizado: ${h.telefone}` : 'Perfil corporativo para conferencia',
-        h.confianca === 'baixa' ? 'Telefone/tarifa precisam conferencia' : 'Confirmar disponibilidade antes de emitir',
-        policyStatus(policy),
-        { cidade: h.cidade, uf: h.uf, telefone: h.telefone, noites: dias, diaria, fornecedor: supplierPayload(supplier) },
-      ))
-    })
-  }
-
-  if (precisaCarro(pergunta, tipo)) {
-    const base = 210 * dias
-    carroSuppliers.slice(0, 2).forEach((supplier, index) => {
-      options.push(option(
-        'carro',
-        index === 0 ? 'Locacao economica' : 'Locacao executiva',
-        supplier.nome,
-        base * (index === 0 ? 1 : 1.45),
-        index === 0 ? 'Categoria economica e bom custo' : 'Maior conforto para agenda intensa',
-        index === 0 ? 'Confirmar franquia e horario de retirada' : 'Maior custo',
-        policyStatus(policy),
-        supplierPayload(supplier),
-      ))
-    })
-  }
-
-  if (tipo === 'Pacote' || /lazer|pacote|operadora/.test(normalizarTexto(pergunta))) {
-    pacoteSuppliers.slice(0, 3).forEach((supplier, index) => {
-      const base = 1400 + index * 420
-      options.push(option(
-        'pacote',
-        index === 0 ? 'Pacote recomendado' : `Pacote opcao ${index + 1}`,
-        supplier.nome,
-        base,
-        'Operadora/consolidadora habilitada nas Configuracoes de fornecedores',
-        'Confirmar disponibilidade, regras de cancelamento e comissionamento',
-        policyStatus(policy),
-        supplierPayload(supplier),
-      ))
-    })
-  }
-
-  if (!options.length) {
-    options.push(option('pacote', 'Triagem operacional', origem || destino || 'BBT', 0, 'Dados ainda incompletos', 'IA precisa de origem, destino, datas e passageiro', 'requer_aprovacao'))
-  }
-
-  return options
 }
 
 function avaliarPolitica({
@@ -587,9 +452,7 @@ function montarAtendimento({
   dataInicio,
   dataFim,
   prioridade,
-  totalRecommended,
   currentUserId,
-  requiresApproval,
 }: {
   empresa: Empresa
   funcionario?: Funcionario
@@ -601,9 +464,7 @@ function montarAtendimento({
   dataInicio: string
   dataFim?: string
   prioridade: Prioridade
-  totalRecommended: number
   currentUserId: string
-  requiresApproval: boolean
 }): Omit<Atendimento, 'id' | 'created_at' | 'updated_at'> {
   const passageiro = parsed.passageiro_nome || funcionario?.nome || extrairNomeLivre(pergunta) || 'Passageiro nao informado'
   return {
@@ -611,18 +472,18 @@ function montarAtendimento({
     funcionario_id: funcionario?.id || null,
     passageiro_nome: passageiro,
     tipo_servico: tipo,
-    valor_cotacao: totalRecommended,
-    valor_final: totalRecommended,
+    valor_cotacao: 0,
+    valor_final: 0,
     valor_custo: 0,
-    valor_venda: totalRecommended,
+    valor_venda: 0,
     agente_user_id: currentUserId,
-    status: requiresApproval ? 'pendente' : 'em_andamento',
+    status: 'pendente',
     prioridade,
     origem: 'Outro',
     observacoes: [
       `Demanda criada pela ${AI_NAME}.`,
       pergunta,
-      requiresApproval ? 'Status: aguardando aprovacao de politica.' : 'Status: preparada para reserva/emissao.',
+      'Status: aguardando cotacao real de fornecedor.',
     ].join('\n\n'),
     data_atendimento: todayISODate(),
     origem_emissao: 'caixa_entrada',
@@ -671,7 +532,6 @@ function montarAtendimento({
 
 function criarTarefasOperacionais({
   atendimento,
-  quoteId,
   tipo,
   destino,
   dataInicio,
@@ -680,7 +540,6 @@ function criarTarefasOperacionais({
   prioridade,
 }: {
   atendimento: Atendimento | null
-  quoteId: string
   tipo: TipoServico
   destino: string
   dataInicio: string
@@ -690,166 +549,125 @@ function criarTarefasOperacionais({
 }) {
   addAgentTask({
     kind: 'cotacao',
-    title: 'Cotacao inteligente criada',
-    description: `Cotacao ${quoteId} para ${destino || 'destino nao informado'}.`,
-    status: 'concluida',
+    title: 'Obter cotacao real',
+    description: externalWarning ||
+      `Consultar tarifa e disponibilidade para ${destino || 'o destino informado'} em provedor integrado ou fornecedor homologado.`,
+    status: 'pendente',
     priority: prioridade,
-    requires_human: false,
-    entity_type: 'cotacao',
-    entity_id: quoteId,
+    requires_human: true,
+    entity_type: atendimento ? 'atendimento' : undefined,
+    entity_id: atendimento?.id,
+    due_at: dataInicio,
   })
+
   if (requiresApproval) {
     addAgentTask({
       kind: 'aprovacao',
-      title: 'Aprovacao de politica pendente',
-      description: 'A cotacao tem excecao de politica e deve ser aprovada antes da emissao.',
+      title: 'Revisar politica antes da cotacao',
+      description: 'A demanda possui uma excecao conhecida. O valor real ainda deve ser cotado antes da aprovacao financeira.',
       status: 'pendente',
       priority: prioridade,
       requires_human: true,
-      entity_type: atendimento ? 'atendimento' : 'cotacao',
-      entity_id: atendimento?.id || quoteId,
+      entity_type: atendimento ? 'atendimento' : undefined,
+      entity_id: atendimento?.id,
       due_at: dataInicio,
     })
   }
+
   if (tipo === 'Hotel' || tipo === 'Pacote') {
     addAgentTask({
       kind: 'reserva_hotel',
-      title: 'Reservar hotel',
-      description: externalWarning || 'Confirmar disponibilidade, tarifa, faturamento e prazo de cancelamento.',
+      title: 'Validar hotel e disponibilidade',
+      description: 'Confirmar disponibilidade, tarifa, faturamento e cancelamento antes de reservar.',
       status: 'pendente',
       priority: prioridade,
-      requires_human: Boolean(externalWarning),
-      entity_type: atendimento ? 'atendimento' : 'cotacao',
-      entity_id: atendimento?.id || quoteId,
+      requires_human: true,
+      entity_type: atendimento ? 'atendimento' : undefined,
+      entity_id: atendimento?.id,
       due_at: dataInicio,
     })
   }
+
   if (tipo === 'Aéreo' || tipo === 'Pacote') {
     addAgentTask({
       kind: 'reserva_aereo',
-      title: 'Preparar emissao aerea',
-      description: 'Validar horario, bagagem, politica e forma de pagamento antes de emitir.',
+      title: 'Consultar disponibilidade aerea',
+      description: 'Obter opcoes reais de voo, bagagem e tarifa antes de solicitar aprovacao ou emitir.',
       status: 'pendente',
       priority: prioridade,
-      requires_human: requiresApproval,
-      entity_type: atendimento ? 'atendimento' : 'cotacao',
-      entity_id: atendimento?.id || quoteId,
+      requires_human: true,
+      entity_type: atendimento ? 'atendimento' : undefined,
+      entity_id: atendimento?.id,
       due_at: dataInicio,
     })
   }
-  addAgentTask({
-    kind: 'voucher',
-    title: 'Gerar voucher vinculado',
-    description: 'Gerar e enviar voucher apos confirmacao/reserva.',
-    status: 'pendente',
-    priority: prioridade,
-    requires_human: false,
-    entity_type: atendimento ? 'atendimento' : 'cotacao',
-    entity_id: atendimento?.id || quoteId,
-  })
-  addAgentTask({
-    kind: 'monitoramento',
-    title: 'Monitorar viagem',
-    description: 'Acompanhar status, check-in, atraso, cancelamento e risco operacional ate o retorno.',
-    status: 'pendente',
-    priority: prioridade,
-    requires_human: false,
-    entity_type: atendimento ? 'atendimento' : 'cotacao',
-    entity_id: atendimento?.id || quoteId,
-    due_at: dataInicio,
-  })
 }
-
-function montarRespostaCotacao({
+function montarRespostaTriagem({
   empresa,
   funcionario,
   atendimento,
-  quoteId,
-  approvalId,
   tipo,
   destino,
   dataInicio,
   dataFim,
-  quoteOptions,
   policy,
   hotelPlan,
 }: {
   empresa?: Empresa
   funcionario?: Funcionario
   atendimento: Atendimento | null
-  quoteId: string
-  approvalId?: string
   tipo: TipoServico
   destino: string
   dataInicio: string
   dataFim?: string
-  quoteOptions: AgentQuoteOption[]
   policy: PolicyDecision
   hotelPlan: HotelPlan
 }): TravelAgentResponse {
-  const recomendado = quoteOptions.find((o) => /custo-beneficio|recomendado/i.test(o.label)) || quoteOptions[0]
   const pendencias = [
-    !empresa ? 'Confirmar empresa para aplicar politica, centro de custo e aprovador correto.' : '',
-    !funcionario ? 'Confirmar ou cadastrar o viajante para vincular a demanda ao perfil certo.' : '',
-    policy.violations.length ? `Revisar politica: ${policy.violations.join(' ')}` : '',
-    hotelPlan.externalWarning ? `Conferir busca externa: ${hotelPlan.externalWarning}` : '',
+    !empresa ? 'Confirmar a empresa para aplicar politica, centro de custo e aprovador.' : '',
+    !funcionario ? 'Confirmar ou cadastrar o viajante para vincular a demanda ao ID correto.' : '',
+    ...policy.violations,
+    hotelPlan.externalWarning ? `Pesquisa externa: ${hotelPlan.externalWarning}` : '',
   ].filter(Boolean)
 
   return {
     handled: true,
-    title: 'Cotação preparada',
-    badge: policy.requiresApproval ? 'Precisa revisar política' : 'Pronta para revisão',
+    title: atendimento ? 'Demanda registrada para cotacao' : 'Dados preparados para cotacao',
+    badge: 'Aguardando fornecedor real',
     message: [
-      'Preparei uma cotação inicial para essa viagem.',
+      atendimento
+        ? `A demanda ${atendimento.id} foi registrada sem valor estimado.`
+        : 'Os dados foram organizados, mas a demanda ainda precisa de uma empresa valida para ser registrada.',
       '',
-      'Resumo',
-      `Empresa: ${empresa?.nome || 'preciso confirmar'}.`,
-      `Viajante: ${funcionario ? `${funcionario.nome}${funcionario.cargo ? ` (${funcionario.cargo})` : ''}` : 'preciso confirmar ou cadastrar'}.`,
-      `Serviço: ${tipo}.`,
-      `Destino: ${destino || 'não informado'}.`,
-      `Período: ${formatarData(dataInicio)}${dataFim ? ` até ${formatarData(dataFim)}` : ''}.`,
+      `Empresa: ${empresa?.nome || 'nao confirmada'}.`,
+      `Viajante: ${funcionario?.nome || 'nao confirmado'}.`,
+      `Servico: ${tipo}.`,
+      `Destino: ${destino || 'nao informado'}.`,
+      `Periodo: ${formatarData(dataInicio)}${dataFim ? ` ate ${formatarData(dataFim)}` : ''}.`,
       '',
-      recomendado
-        ? [
-            'Melhor opção inicial',
-            `${recomendado.provider} - ${dinheiro(recomendado.price)}.`,
-            `Motivo: ${recomendado.advantage}. Risco: ${recomendado.risk}.`,
-          ].join('\n')
+      'Nenhuma tarifa foi inventada. O proximo passo e consultar a Tech Travel ou um fornecedor homologado.',
+      pendencias.length ? ['Pendencias', ...pendencias.map((item) => `- ${item}`)].join('\n') : '',
+      hotelPlan.cadastradas.length
+        ? `${hotelPlan.cadastradas.length} hotel(is) com fonte real foram adicionados ao cadastro.`
         : '',
-      '',
-      pendencias.length
-        ? ['Antes de emitir', ...pendencias.map((item) => `- ${item}`)].join('\n')
-        : 'Política: dentro das regras conhecidas. Pode seguir para reserva/voucher depois da conferência operacional.',
-      hotelPlan.cadastradas.length ? `Cadastrei ${hotelPlan.cadastradas.length} hotel(is) novo(s) no módulo Hotéis.` : '',
-      '',
-      [
-        'Próximos passos',
-        '- Conferir empresa, viajante, datas e política.',
-        policy.requiresApproval
-          ? '- Aprovação registrada para revisão antes da emissão.'
-          : '- Seguir para reserva e voucher quando a opção for confirmada.',
-        '- Manter monitoramento da viagem depois da confirmação.',
-      ].join('\n'),
-    ]
-      .filter(Boolean)
-      .join('\n'),
+    ].filter(Boolean).join('\n'),
     links: [
-      { label: `Painel da ${AI_NAME}`, href: '/dashboard/ia?tab=operacional', kind: 'primary' },
-      ...(atendimento ? [{ label: 'Criar voucher', href: `/dashboard/vouchers/novo?atendimento=${atendimento.id}`, kind: 'secondary' as const }] : []),
-      { label: 'Reservas e cotacoes', href: '/dashboard/reservas', kind: 'secondary' },
+      { label: 'Abrir reservas e cotacoes', href: '/dashboard/reservas', kind: 'primary' },
       { label: 'Abrir demandas', href: '/dashboard/demandas', kind: 'secondary' },
       { label: 'Abrir hoteis', href: `/dashboard/hoteis?busca=${encodeURIComponent(destino || '')}`, kind: 'secondary' },
     ],
-    cards: quoteOptions.slice(0, 6).map((o) => ({
-      title: o.label,
-      subtitle: `${o.provider} - ${dinheiro(o.price)}`,
-      meta: `${o.advantage} | Risco: ${o.risk}`,
+    cards: hotelPlan.suggestions.slice(0, 6).map((hotel) => ({
+      title: hotel.nome,
+      subtitle: `${hotel.cidade}/${hotel.uf}`,
+      meta: hotel.tarifa_sgl
+        ? `Tarifa cadastrada: ${dinheiro(hotel.tarifa_sgl)}`
+        : hotel.fonte_titulo || 'Sem tarifa cadastrada',
+      href: hotel.fonte_url || `/dashboard/hoteis?busca=${encodeURIComponent(hotel.nome)}`,
     })),
     sources: hotelPlan.sources,
     provedor: 'sistema',
   }
 }
-
 function salvarMemoriaSeAplicavel(pergunta: string, funcionario?: Funcionario, empresa?: Empresa) {
   if (!funcionario) return
   const q = normalizarTexto(pergunta)
@@ -983,156 +801,26 @@ function prioridadePorPergunta(pergunta: string, dataInicio?: string): Prioridad
   return 'media'
 }
 
-function fornecedoresOuFallback(service: 'aereo' | 'hotelaria' | 'locacao' | 'pacotes', nomes: string[]): SupplierIntegration[] {
-  const configured = selectSuppliersForService(service, 6)
-  if (configured.length) return configured
-  return nomes.map((nome, index) => ({
-    id: nome.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-    nome,
-    tipo: 'outro',
-    servicos: [service],
-    capacidades: ['pesquisa', 'cotacao', 'reserva', 'voucher', 'status'],
-    modo: 'portal_assistido',
-    status: 'pendente_configuracao',
-    prioridade: 50 - index,
-    auth_type: 'portal',
-    created_at: new Date().toISOString(),
-  }))
-}
-
-function supplierPayload(supplier?: SupplierIntegration): Record<string, any> | undefined {
-  if (!supplier) return undefined
+function hotelParaSugestao(hotel: Hotel): HotelAISuggestion {
   return {
-    fornecedor_id: supplier.id,
-    fornecedor_nome: supplier.nome,
-    fornecedor_modo: supplier.modo,
-    fornecedor_status: supplier.status,
-    portal_url: supplier.portal_url,
-    capacidades: supplier.capacidades,
-  }
-}
-
-function option(
-  service: AgentQuoteOption['service'],
-  label: string,
-  provider: string,
-  price: number,
-  advantage: string,
-  risk: string,
-  policy_status: AgentQuoteOption['policy_status'],
-  payload?: Record<string, any>,
-): AgentQuoteOption {
-  return {
-    id: `opt-${service}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    label,
-    service,
-    provider,
-    price: Math.round(price),
-    currency: 'BRL',
-    advantage,
-    risk,
-    policy_status,
-    payload,
-  }
-}
-
-function policyStatus(policy: PolicyDecision): AgentQuoteOption['policy_status'] {
-  if (policy.requiresApproval) return 'requer_aprovacao'
-  if (policy.violations.length) return 'fora'
-  return 'dentro'
-}
-
-function minTotal(options: AgentQuoteOption[]): number {
-  const byService = new Map<string, number>()
-  options.filter((o) => o.price > 0).forEach((o) => {
-    byService.set(o.service, Math.min(byService.get(o.service) ?? Number.POSITIVE_INFINITY, o.price))
-  })
-  return Array.from(byService.values()).reduce((sum, value) => sum + value, 0)
-}
-
-function recommendedTotal(options: AgentQuoteOption[]): number {
-  return options
-    .filter((o) => /custo-beneficio|recomendado|economica/i.test(o.label))
-    .reduce((sum, o) => sum + o.price, 0) || options.reduce((sum, o) => sum + o.price, 0)
-}
-
-function estimarAereo(destino: string, dataInicio: string): number {
-  const key = normalizarTexto(destino)
-  const base: Record<string, number> = {
-    brasilia: 820,
-    'sao paulo': 980,
-    'rio de janeiro': 1120,
-    recife: 1550,
-    'campo grande': 1320,
-    goiania: 620,
-  }
-  const dias = diffDias(todayISODate(), dataInicio)
-  const urgency = dias <= 3 ? 1.35 : dias <= 7 ? 1.18 : 1
-  return (base[key] || 1100) * urgency
-}
-
-function estimarDiariaHotel(destino: string, index: number): number {
-  const key = normalizarTexto(destino)
-  const base: Record<string, number> = {
-    brasilia: 390,
-    'sao paulo': 520,
-    'rio de janeiro': 560,
-    recife: 420,
-    'campo grande': 360,
-    goiania: 340,
-  }
-  return (base[key] || 330) * (index === 0 ? 1 : index === 1 ? 0.85 : 1.2)
-}
-
-function hotelParaSugestao(h: Hotel): HotelAISuggestion {
-  return {
-    nome: h.nome,
-    cidade: h.cidade,
-    uf: h.uf,
-    categoria: h.categoria,
-    observacoes: h.observacoes,
-    telefone: h.telefone,
-    faturado: h.faturado,
-    info_faturamento: h.info_faturamento,
-    bebedouro: h.bebedouro,
-    valor_agua: h.valor_agua,
-    cafe_manha: h.cafe_manha,
-    estacionamento: h.estacionamento,
-    tarifa_sgl: h.tarifa_sgl,
-    tarifa_dbl: h.tarifa_dbl,
-    tarifa_tpl: h.tarifa_tpl,
-    formas_pagamento: h.formas_pagamento,
+    nome: hotel.nome,
+    cidade: hotel.cidade,
+    uf: hotel.uf,
+    categoria: hotel.categoria,
+    observacoes: hotel.observacoes,
+    telefone: hotel.telefone,
+    faturado: hotel.faturado,
+    info_faturamento: hotel.info_faturamento,
+    bebedouro: hotel.bebedouro,
+    valor_agua: hotel.valor_agua,
+    cafe_manha: hotel.cafe_manha,
+    estacionamento: hotel.estacionamento,
+    tarifa_sgl: hotel.tarifa_sgl,
+    tarifa_dbl: hotel.tarifa_dbl,
+    tarifa_tpl: hotel.tarifa_tpl,
+    formas_pagamento: hotel.formas_pagamento,
     confianca: 'alta',
   }
-}
-
-function fallbackHotels(destino: string, uf: string): HotelAISuggestion[] {
-  const cidade = destino || 'Destino nao informado'
-  const names = [
-    `Hotel corporativo ${cidade}`,
-    `ibis ${cidade}`,
-    `Comfort Hotel ${cidade}`,
-  ]
-  return names.map((nome, index) => ({
-    nome,
-    cidade,
-    uf: uf || CITY_UF[normalizarTexto(cidade)] || '',
-    observacoes: 'Sugestao local para triagem. Confirmar telefone, tarifa e disponibilidade.',
-    telefone: null,
-    faturado: false,
-    info_faturamento: null,
-    bebedouro: null,
-    valor_agua: null,
-    cafe_manha: null,
-    estacionamento: null,
-    tarifa_sgl: estimarDiariaHotel(cidade, index),
-    tarifa_dbl: null,
-    tarifa_tpl: null,
-    formas_pagamento: ['CC', 'PX'],
-    fonte_url: `https://www.google.com/search?q=${encodeURIComponent(`${nome} telefone`)}`,
-    fonte_titulo: 'Busca Google para conferencia',
-    confianca: 'baixa',
-  }))
 }
 
 function extrairDestinoLivre(pergunta: string): string {

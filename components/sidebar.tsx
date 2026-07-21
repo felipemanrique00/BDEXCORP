@@ -15,12 +15,8 @@ import {
 
 import { BBTLogo } from '@/components/branding/bbt-logo'
 import { getCurrentUser, logout } from '@/lib/auth'
-import { getAllAtendimentos } from '@/lib/atendimentos-storage'
-import { getAllVouchersEmitidos } from '@/lib/vouchers-emitidos-storage'
 import { getUltimaVista, NOVA_DEMANDA_EVENT } from '@/lib/notificacoes'
-import { getOperationalAlerts } from '@/lib/operational-alerts'
 import { buildSidebarMenu, type SidebarMenuItem } from '@/lib/navigation'
-import { safeGetRaw } from '@/lib/storage-quota'
 import { cn } from '@/lib/utils'
 import type { User } from '@/types'
 
@@ -57,11 +53,12 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   useEffect(() => {
     if (pathname.startsWith('/dashboard/demandas')) pendingNewDemandsRef.current = 0
     setUser(getCurrentUser())
-    atualizarBadges()
-    const interval = window.setInterval(atualizarBadges, 5000)
+    void atualizarBadges()
+    const interval = window.setInterval(() => void atualizarBadges(), 15_000)
     const handleNovaDemanda = () => {
       pendingNewDemandsRef.current += 1
-      atualizarBadges()
+      setNovasDemandas((current) => Math.max(current, pendingNewDemandsRef.current))
+      window.setTimeout(() => void atualizarBadges(), 750)
     }
     window.addEventListener(NOVA_DEMANDA_EVENT, handleNovaDemanda)
     return () => {
@@ -70,36 +67,21 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
     }
   }, [pathname])
 
-  function atualizarBadges() {
+  async function atualizarBadges() {
     if (typeof window === 'undefined') return
-
     try {
-      const raw = safeGetRaw('bbt-caixa-entrada')
-      const itens = raw ? JSON.parse(raw) : []
-      setNaoLidas(Array.isArray(itens) ? itens.filter((m) => !m.lida && m.status === 'pendente').length : 0)
+      const query = new URLSearchParams()
+      const lastSeen = getUltimaVista()
+      if (lastSeen) query.set('lastSeen', lastSeen)
+      const response = await fetch(`/api/navigation-summary?${query.toString()}`, { cache: 'no-store' })
+      if (!response.ok) return
+      const summary = await response.json()
+      setNaoLidas(nonNegativeInteger(summary.unreadInbox))
+      setNovasDemandas(Math.max(nonNegativeInteger(summary.newDemands), pendingNewDemandsRef.current))
+      setAlertasHoje(nonNegativeInteger(summary.activeAlerts))
     } catch {
-      setNaoLidas(0)
+      // Os ultimos indicadores validos permanecem visiveis durante indisponibilidade temporaria.
     }
-
-    const todas = getAllAtendimentos()
-      .filter((a) => ['pendente', 'em_andamento', 'aguardando_cliente'].includes(a.status))
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    const ultimaVista = getUltimaVista()
-    let demandasDesdeUltimaVista = 0
-    if (!ultimaVista || todas.length === 0) {
-      demandasDesdeUltimaVista = 0
-    } else {
-      const idx = todas.findIndex((a) => a.id === ultimaVista)
-      demandasDesdeUltimaVista = idx === -1 ? todas.length : idx
-    }
-    setNovasDemandas(Math.max(demandasDesdeUltimaVista, pendingNewDemandsRef.current))
-
-    setAlertasHoje(
-      getOperationalAlerts({
-        atendimentos: getAllAtendimentos(),
-        vouchers: getAllVouchersEmitidos(),
-      }).length,
-    )
   }
 
   if (!user) return null
@@ -233,6 +215,11 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
       </aside>
     </>
   )
+}
+
+function nonNegativeInteger(value: unknown): number {
+  const number = Number(value)
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : 0
 }
 
 function SidebarItem({

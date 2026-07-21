@@ -7,6 +7,7 @@ import { addAtendimento, updateAtendimento, registrarLog } from '@/lib/atendimen
 import { dispararAlertaNovaDemanda } from '@/lib/notificacoes'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { toast } from 'sonner'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import {
   Plane, Hotel as HotelIcon, Car, Package, AlertTriangle, Zap,
   CheckCircle2, Clock, DollarSign, TrendingUp, Percent, Info, FileText,
@@ -244,6 +245,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       if (!primeira) return null
       const data = sugestaoParaHotel(primeira)
       const novo = addHotel(data)
+      await commitPendingRemoteStorage()
       toast.success(`Hotel "${data.nome}" cadastrado automaticamente pela IA.`)
       return novo
     } catch (e: any) {
@@ -284,6 +286,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
             cidade: data.cidade,
             tarifa_unitaria: data.tarifa_sgl || data.tarifa_dbl || data.tarifa_tpl || detHotel.tarifa_unitaria,
           })
+          await commitPendingRemoteStorage()
           toast.success(`Hotel "${data.nome}" cadastrado e vinculado.`)
         }
       }
@@ -351,12 +354,22 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
     }
 
     if (editing) {
-      updateAtendimento(editing.id, payload)
+      if (!updateAtendimento(editing.id, payload)) {
+        toast.error('Nao foi possivel preparar a atualizacao da demanda.')
+        return
+      }
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'editar',
         entidade: 'Atendimento', entidade_id: editing.id,
         descricao: `Editou demanda de ${passageiroNome}`,
       })
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')
+        onClose()
+        return
+      }
       toast.success('Demanda atualizada!')
     } else {
       const nova = addAtendimento(payload)
@@ -366,6 +379,13 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
         entidade: 'Atendimento', entidade_id: nova.id,
         descricao: `Criou demanda ${tipoServico} para ${passageiroNome}`,
       })
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')
+        onClose()
+        return
+      }
       // V9: Alerta sonoro + notificação
       dispararAlertaNovaDemanda(passageiroNome, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
       toast.success(`Demanda ${nova.serial_os || nova.id} criada!`)

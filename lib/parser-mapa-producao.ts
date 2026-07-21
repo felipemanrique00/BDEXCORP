@@ -86,8 +86,8 @@ export interface ResultadoParseMapa {
 
 async function extrairTextoPDF(file: File): Promise<{ paginas: string[][]; total: number }> {
   if (typeof window === 'undefined') throw new Error('Só funciona no navegador')
-  const pdfjsLib = await import('pdfjs-dist/build/pdf.mjs' as any)
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs`
+  const pdfjsLib = await import('pdfjs-dist/build/pdf.mjs')
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.mjs'
 
   const arrayBuffer = await file.arrayBuffer()
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise

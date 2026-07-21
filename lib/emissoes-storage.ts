@@ -2,6 +2,7 @@
 // Storage de Emissoes (atendimentos hoteleiros)
 // ============================================================
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 export interface Emissao {
   id: string
@@ -41,7 +42,7 @@ export function getEmissoesByHotel(hotelId: number): Emissao[] {
 export function addEmissao(data: Omit<Emissao, 'id' | 'created_at'>): Emissao | null {
   const nova: Emissao = {
     ...data,
-    id: `ems-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    id: createEntityId('ems'),
     created_at: new Date().toISOString(),
   }
   const list = load()
@@ -70,7 +71,7 @@ export function importEmissoes(emissoes: Array<Omit<Emissao, 'id' | 'created_at'
   const atuais = load()
   const novas = emissoes.map((emissao) => ({
     ...emissao,
-    id: `ems-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    id: createEntityId('ems'),
     created_at: new Date().toISOString(),
   }))
   save([...atuais, ...novas])

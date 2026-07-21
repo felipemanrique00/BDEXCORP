@@ -7,7 +7,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request) {
-  const guard = guardApiRequest(request, { requireAuth: true, rateLimit: { key: 'assistant-tools:get', limit: 80, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, { requireAuth: true, rateLimit: { key: 'assistant-tools:get', limit: 80, windowMs: 60_000 } })
   if (guard.response) return guard.response
   return NextResponse.json({ ok: true, tools: await getAssistantTools() })
 }

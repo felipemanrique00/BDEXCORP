@@ -58,6 +58,7 @@ import {
 import { getAgentesBBT, getCurrentUser, hasPermission } from '@/lib/auth'
 import { AI_SHORT_NAME, SYSTEM_FULL_NAME } from '@/lib/branding'
 import { getStatusIA, type StatusIA } from '@/lib/ia-parser'
+import { reportClientFailure } from '@/lib/client-observability'
 import {
   calcularEstatisticasAtendimentos,
   getAllAtendimentos,
@@ -72,10 +73,11 @@ import {
 import { useStore } from '@/lib/store'
 import { getAllVouchersEmitidos } from '@/lib/vouchers-emitidos-storage'
 import { formatCurrency, formatDate } from '@/lib/utils'
-import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { commitPendingRemoteStorage, loadJSON, safeSetJSON } from '@/lib/storage-quota'
 import { calcularResumoCRM } from '@/lib/crm'
 import { getOperationalAlerts, type OperationalAlert } from '@/lib/operational-alerts'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
+import { createEntityId } from '@/lib/ids'
 
 // V16: mapa real Leaflet (carrega só no cliente)
 const OperationalMap = dynamic(() => import('@/components/dashboard/operational-map'), {
@@ -176,7 +178,9 @@ export default function DashboardPage() {
   const [iaStatus, setIaStatus] = useState<StatusIA | null>(null)
 
   useEffect(() => {
-    getStatusIA().then(setIaStatus).catch(() => {})
+    getStatusIA().then(setIaStatus).catch((error) => {
+      reportClientFailure('ai_status_load_failed', error, { component: 'dashboard' })
+    })
   }, [])
 
   useEffect(() => {
@@ -320,7 +324,7 @@ export default function DashboardPage() {
       .map((a) => a.funcionario_id || normalizarNome(a.passageiro_nome)),
   ).size
 
-  function handleDespesaRapida(event: FormEvent<HTMLFormElement>) {
+  async function handleDespesaRapida(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!podeFinanceiro) {
       toast.error('Seu perfil não tem permissão para lançar despesas.')
@@ -347,6 +351,13 @@ export default function DashboardPage() {
       observacoes: `Despesa lancada pelo ${SYSTEM_FULL_NAME}.`,
     })
 
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o lancamento no servidor.')
+      return
+    }
+
     setExpenseDraft({
       descricao: '',
       valor: '',
@@ -357,22 +368,28 @@ export default function DashboardPage() {
     toast.success('Despesa adicionada ao financeiro.')
   }
 
-  function alterarStatusDemanda(id: string, status: StatusAtendimento) {
+  async function alterarStatusDemanda(id: string, status: StatusAtendimento) {
     const ok = updateAtendimento(id, { status })
     if (!ok) {
       toast.error('Não foi possível atualizar a demanda.')
+      return
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o status no servidor.')
       return
     }
     setReload((n) => n + 1)
     toast.success('Status da demanda atualizado.')
   }
 
-  function salvarResumoExecutivo() {
+  async function salvarResumoExecutivo() {
     if (typeof window !== 'undefined') {
       const key = 'bbt-resumos-executivos-v12'
       const lista = loadJSON<any[]>(key, [])
       const novo = {
-        id: `re-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: createEntityId('re'),
         created_at: new Date().toISOString(),
         periodo: periodoLabel(periodo),
         totalSpend,
@@ -386,7 +403,16 @@ export default function DashboardPage() {
         recomendacoes: resumoInteligente.recomendacoes,
         riscos: resumoInteligente.riscos,
       }
-      safeSetJSON(key, [novo, ...lista].slice(0, 30))
+      if (!safeSetJSON(key, [novo, ...lista].slice(0, 30))) {
+        toast.error('Nao foi possivel preparar o resumo executivo.')
+        return
+      }
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o resumo no servidor.')
+      return
     }
     toast.success('Resumo salvo. Veja em Relatórios → Resumos executivos.', {
       action: {
@@ -398,13 +424,22 @@ export default function DashboardPage() {
     })
   }
 
-  function salvarNotaDesk() {
+  async function salvarNotaDesk() {
     const texto = deskNote.trim()
     if (!texto) return
     if (typeof window !== 'undefined') {
       const key = 'bbt-travel-desk-v11'
       const current = loadJSON<Array<{ text: string; created_at: string }>>(key, [])
-      safeSetJSON(key, [{ text: texto, created_at: new Date().toISOString() }, ...current].slice(0, 30))
+      if (!safeSetJSON(key, [{ text: texto, created_at: new Date().toISOString() }, ...current].slice(0, 30))) {
+        toast.error('Nao foi possivel preparar a nota.')
+        return
+      }
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a nota no servidor.')
+      return
     }
     setDeskNote('')
     toast.success('Nota enviada para o Travel Desk.')

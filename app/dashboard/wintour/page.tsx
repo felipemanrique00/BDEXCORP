@@ -44,6 +44,7 @@ import { CONFIG_COBRANCA_PADRAO, VOUCHER_PREFIX, type Atendimento, type Empresa,
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { compactarLocalStorage, compactarWintourDados } from '@/lib/storage-quota'
 import { criarSequenciadorCodigoIdentificacao } from '@/lib/funcionario-identidade'
+import { createEntityId } from '@/lib/ids'
 
 type ImportOutcome = { criadas: number; atualizadas: number; ignoradas: number; erros: number; empresas: number; funcionarios: number; hoteis: number; vouchers: number; financeiro: number }
 const PREVIEW_LIMIT = 300
@@ -75,10 +76,7 @@ function hashCurto(value: string): string {
 }
 
 function gerarIdCadastro(prefix: 'emp' | 'func'): string {
-  const sufixo = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  return `${prefix}-${sufixo}`
+  return createEntityId(prefix)
 }
 
 type HotelWintourIndex = {

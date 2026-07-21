@@ -23,6 +23,7 @@ import type {
   StatusAprovacao,
 } from '@/types'
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 import type { Violacao } from '@/lib/policy-engine'
 
 const STORAGE_KEY = 'bbt-aprovacoes'
@@ -72,7 +73,7 @@ export function criarSolicitacao(args: {
   })
   if (niveis.length === 0) return null
 
-  const id = `apv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  const id = createEntityId('apv')
   const passos: PassoAprovacao[] = niveis.map((nivel) => ({ nivel, status: 'pendente' }))
   const solicitacao: SolicitacaoAprovacao = {
     id,

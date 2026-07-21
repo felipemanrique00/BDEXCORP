@@ -2,7 +2,6 @@ export const SYSTEM_STORAGE_META_KEY = 'bbt-system-meta-v1'
 
 export const RESETTABLE_SHARED_STORAGE_KEYS = [
   'bbt-data-v4',
-  'bbt-users-v4',
   'bbt-atendimentos',
   'bbt-vouchers-emitidos',
   'bbt-vouchers-last-numero',

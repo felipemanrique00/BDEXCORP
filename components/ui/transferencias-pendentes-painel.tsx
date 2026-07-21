@@ -9,6 +9,7 @@ import {
   type SolicitacaoTransferencia,
 } from '@/lib/transferencias'
 import { getCurrentUser } from '@/lib/auth'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 export function TransferenciasPendentesPainel() {
   const user = useMemo(
@@ -34,24 +35,36 @@ export function TransferenciasPendentesPainel() {
 
   if (!user) return null
 
-  function handleAceitar(sol: SolicitacaoTransferencia) {
+  async function handleAceitar(sol: SolicitacaoTransferencia) {
     if (aceitarTransferencia(sol.id, user!.id, user!.name)) {
-      toast.success(`✅ Demanda de ${sol.passageiro_nome} agora é sua`)
+      try {
+        await commitPendingRemoteStorage()
+        toast.success(`Demanda de ${sol.passageiro_nome} transferida para você`)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar a transferência.')
+      }
       carregar()
     } else {
       toast.error('Erro ao aceitar transferência')
     }
   }
 
-  function handleConfirmarRecusa() {
+  async function handleConfirmarRecusa() {
     if (!recusarId) return
     if (motivoRecusa.trim().length < 5) {
       toast.error('Justificativa precisa ter pelo menos 5 caracteres')
       return
     }
     if (recusarTransferencia(recusarId, user!.id, user!.name, motivoRecusa.trim())) {
-      toast.success('Transferência recusada')
-      setRecusarId(null); setMotivoRecusa('')
+      try {
+        await commitPendingRemoteStorage()
+        toast.success('Transferência recusada')
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar a recusa.')
+        return
+      }
+      setRecusarId(null)
+      setMotivoRecusa('')
       carregar()
     }
   }

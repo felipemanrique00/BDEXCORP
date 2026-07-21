@@ -16,6 +16,7 @@
   Network,
   Plane,
   ReceiptText,
+  ServerCog,
   Settings,
   Shield,
   ShieldAlert,
@@ -140,6 +141,7 @@ export function buildSidebarMenu({
       id: 'admin',
       label: 'Administração',
       itens: [
+        { href: '/dashboard/plataforma', label: 'Administração SaaS', description: 'Tenants, planos, limites e consumo', icon: ServerCog, hidden: user.platform_admin !== true },
         { href: '/dashboard/usuarios', label: 'Usuários e permissões', description: 'Equipe interna, clientes e escopos', icon: Shield, hidden: isCompanyUser || !podeUsuarios },
         { href: '/dashboard/configuracoes', label: 'Configurações', description: 'Sistema, IA e conexões', icon: Settings, hidden: isCompanyUser },
       ],

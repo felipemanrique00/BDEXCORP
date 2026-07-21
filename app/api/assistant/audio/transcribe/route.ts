@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic'
 const MAX_AUDIO_REQUEST_BYTES = 36 * 1024 * 1024
 
 export async function POST(request: Request) {
-  const guard = guardApiRequest(request, { requireAuth: true, rateLimit: { key: 'assistant-audio-transcribe', limit: 30, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, { requireAuth: true, rateLimit: { key: 'assistant-audio-transcribe', limit: 30, windowMs: 60_000 } })
   if (guard.response) return guard.response
 
   try {

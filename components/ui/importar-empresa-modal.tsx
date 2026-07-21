@@ -20,7 +20,7 @@ import {
 import { parsePDFEmissoes } from '@/lib/emissoes-pdf-parser'
 import { parsePlanilhaEmissoes } from '@/lib/emissoes-parser'
 import { gerarLancamentosDoAtendimento } from '@/lib/financeiro'
-import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { commitPendingRemoteStorage, loadJSON, safeSetJSON } from '@/lib/storage-quota'
 import {
   normalizarNome, normalizarValor, normalizarData, normalizarTipoServico,
   normalizarStatusEmissao,
@@ -312,6 +312,14 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
 
     commitarTransacao(txId, { criadas, atualizadas, ignoradas, erros })
 
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'A importação não foi confirmada no servidor.')
+      setFase('preview')
+      return
+    }
+
     setResultado({ criadas, atualizadas, ignoradas, erros, tx_id: txId })
     setFase('concluido')
     onCompleto?.({ criadas, atualizadas, ignoradas })
@@ -320,6 +328,12 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
   async function desfazerImportacao() {
     if (!resultado?.tx_id || !user) return
     const r = reverterTransacao(resultado.tx_id, user.id, user.name)
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'A reversão não foi confirmada no servidor.')
+      return
+    }
     toast.success(`Reverteu ${r.revertidos} de ${r.total}`)
     onCompleto?.({ criadas: -r.revertidos, atualizadas: 0, ignoradas: 0 })
     onClose()

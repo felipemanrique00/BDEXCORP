@@ -93,7 +93,11 @@ export async function getStatusIA(forceRefresh = false): Promise<StatusIA> {
         _statusCacheAt = Date.now()
         return data
       }
-    } catch {}
+    } catch (error) {
+      console.warn('[ia-parser] Nao foi possivel consultar o provedor configurado.', {
+        errorName: error instanceof Error ? error.name : typeof error,
+      })
+    }
     _statusCache = {
       provedor: 'local',
       modelo: 'regras-locais',

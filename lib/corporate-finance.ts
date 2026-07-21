@@ -11,6 +11,7 @@ import type {
 } from '@/types'
 import type { LancamentoFinanceiro } from '@/lib/financeiro'
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 const STORAGE_KEY = 'bbt-corporate-finance'
 
@@ -33,7 +34,7 @@ function nowIso(): string {
 }
 
 function newId(prefix: string): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  return createEntityId(prefix, '_')
 }
 
 function load(): CorporateFinanceState {
@@ -54,6 +55,46 @@ function save(state: CorporateFinanceState): boolean {
     movimentos: state.movimentos.slice(-10000),
     faturas: state.faturas.slice(-5000),
   })
+}
+
+export interface CorporateCardRegistration {
+  ultimos4: string
+  bandeira: NonNullable<CartaoCorporativo['bandeira']>
+  validade_mes?: number
+  validade_ano?: number
+}
+
+export type CorporateCardValidation =
+  | { valid: true; value: CorporateCardRegistration }
+  | { valid: false; error: string }
+
+export function validateCorporateCardRegistration(
+  data: CorporateCardRegistration,
+  currentYear = new Date().getFullYear(),
+): CorporateCardValidation {
+  const ultimos4 = String(data.ultimos4 || '').replace(/\D/g, '')
+  if (!/^\d{4}$/.test(ultimos4)) {
+    return { valid: false, error: 'Informe exatamente os quatro últimos dígitos do cartão emitido.' }
+  }
+  if (
+    data.validade_mes != null &&
+    (!Number.isInteger(data.validade_mes) || data.validade_mes < 1 || data.validade_mes > 12)
+  ) {
+    return { valid: false, error: 'O mês de validade deve estar entre 1 e 12.' }
+  }
+  if (
+    data.validade_ano != null &&
+    (!Number.isInteger(data.validade_ano) || data.validade_ano < currentYear)
+  ) {
+    return { valid: false, error: 'O ano de validade não pode estar no passado.' }
+  }
+  return {
+    valid: true,
+    value: {
+      ...data,
+      ultimos4,
+    },
+  }
 }
 
 function dataHoje(): string {
@@ -103,7 +144,9 @@ export function garantirCarteiraEmpresa(companyId: string): CarteiraCorporativa 
     created_at: nowIso(),
   }
   state.carteiras.push(carteira)
-  save(state)
+  if (!save(state)) {
+    throw new Error('Não foi possível preparar a carteira corporativa para persistência.')
+  }
   return carteira
 }
 
@@ -133,7 +176,14 @@ export function criarCartaoCorporativo(data: {
   funcionario_id?: string | null
   merchant_lock?: string
   criado_por_user_id?: string
+  ultimos4: string
+  bandeira: NonNullable<CartaoCorporativo['bandeira']>
+  validade_mes?: number
+  validade_ano?: number
 }): CartaoCorporativo | null {
+  const validation = validateCorporateCardRegistration(data)
+  if (!validation.valid) return null
+
   const state = load()
   let carteira = state.carteiras.find((c) => c.company_id === data.company_id)
   if (!carteira) {
@@ -150,14 +200,14 @@ export function criarCartaoCorporativo(data: {
     apelido: data.apelido,
     portador_nome: data.portador_nome,
     funcionario_id: data.funcionario_id || null,
-    ultimos4: String(Math.floor(1000 + Math.random() * 9000)),
-    bandeira: 'Visa',
+    ultimos4: validation.value.ultimos4,
+    bandeira: validation.value.bandeira,
     limite: Math.max(0, Number(data.limite || 0)),
     gasto_mes: 0,
-    status: carteira.cartao_habilitado ? 'ativo' : 'pendente_emissao',
+    status: 'ativo',
     merchant_lock: data.merchant_lock,
-    validade_mes: new Date().getMonth() + 1,
-    validade_ano: new Date().getFullYear() + 3,
+    validade_mes: validation.value.validade_mes,
+    validade_ano: validation.value.validade_ano,
     criado_por_user_id: data.criado_por_user_id,
     created_at: nowIso(),
   }

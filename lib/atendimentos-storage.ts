@@ -7,6 +7,7 @@ import type {
 import { calcularFinanceiro } from '@/types'
 import { ensureAtendimentoSerial, gerarProximoSerialOS, matchesSerialOS } from '@/lib/atendimento-serial'
 import { compactarAtendimento, loadJSON, safeGetRaw, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 const STORAGE_ATENDIMENTOS = 'bbt-atendimentos'
 const STORAGE_LOGS = 'bbt-auditoria'
@@ -121,7 +122,7 @@ export function criarAtendimentoParaLista(data: AtendimentoInput, list: Atendime
   const now = new Date().toISOString()
   return {
     ...data,
-    id: `atd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    id: createEntityId('atd'),
     serial_os: (data as Partial<Atendimento>).serial_os || serialOS || gerarProximoSerialOS(list),
     created_at: now,
     updated_at: now,
@@ -369,7 +370,7 @@ export function getAllLogs(): LogAuditoria[] {
 export function registrarLog(data: Omit<LogAuditoria, 'id' | 'timestamp'>) {
   const log: LogAuditoria = {
     ...data,
-    id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    id: createEntityId('log'),
     timestamp: new Date().toISOString(),
   }
   const list = loadLogs()

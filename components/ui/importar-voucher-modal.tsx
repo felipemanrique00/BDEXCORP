@@ -5,9 +5,9 @@ import { Modal } from '@/components/ui/modal'
 import { toast } from 'sonner'
 import { useStore } from '@/lib/store'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
-import { addAtendimento, registrarLog } from '@/lib/atendimentos-storage'
-import { addVoucher, fileToBase64 } from '@/lib/vouchers-storage'
-import { addVoucherEmitido } from '@/lib/vouchers-emitidos-storage'
+import { addAtendimento, anexarVoucherAtendimento, deleteAtendimento, registrarLog } from '@/lib/atendimentos-storage'
+import { addVoucher, deleteVoucher, type Voucher } from '@/lib/vouchers-storage'
+import { addVoucherEmitido, deleteVoucherEmitido } from '@/lib/vouchers-emitidos-storage'
 import { sincronizarVoucherOperacional } from '@/lib/operational-sync'
 import { parseVoucher, type VoucherParsed } from '@/lib/voucher-parser'
 import { buscarFuncionariosPorNomeInteligente } from '@/lib/funcionario-identidade'
@@ -19,6 +19,8 @@ import {
 import type { Atendimento, DetalhesHotel, Funcionario, Prioridade, VoucherEmitido } from '@/types'
 import { CONFIG_COBRANCA_PADRAO, calcularFinanceiro } from '@/types'
 import { formatCurrency } from '@/lib/utils'
+import { reportClientFailure } from '@/lib/client-observability'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 interface Props {
   open: boolean
@@ -159,6 +161,9 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
     }
 
     setSalvando(true)
+    let demandaCriada: Atendimento | null = null
+    let arquivoCriado: Voucher | null = null
+    let voucherEmitidoCriado: VoucherEmitido | null = null
     try {
       const empresa = empresas.find((e) => e.id === empresaId)
       const cfg = empresa?.config_cobranca || CONFIG_COBRANCA_PADRAO
@@ -207,6 +212,17 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
 
       const nova = addAtendimento(payload)
       if (!nova) throw new Error('Falha ao criar demanda')
+      demandaCriada = nova
+
+      if (file) {
+        arquivoCriado = await addVoucher({
+          file,
+          funcionario_id: funcionarioId,
+          demanda_id: nova.id,
+          descricao: `Voucher ${parsed.voucher_numero || 'sem numero'} · ${parsed.passageiro}`,
+        })
+        anexarVoucherAtendimento(nova.id, arquivoCriado.id)
+      }
 
       const voucherEstruturado: Omit<VoucherEmitido, 'id' | 'numero' | 'created_at' | 'updated_at'> = {
         tipo: 'Hotel',
@@ -246,24 +262,9 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
       }
 
       const voucher = addVoucherEmitido(voucherEstruturado)
+      if (!voucher) throw new Error('Falha ao preparar o voucher estruturado.')
+      voucherEmitidoCriado = voucher
       if (voucher) sincronizarVoucherOperacional(voucher, { agente_user_id: user.id, origem: 'E-mail' })
-
-      // Salvar o arquivo PDF no IndexedDB
-      if (file && funcionarioId) {
-        try {
-          const base64 = await fileToBase64(file)
-          addVoucher({
-            funcionario_id: funcionarioId,
-            nome_arquivo: file.name,
-            tamanho_bytes: file.size,
-            mime_type: file.type || 'application/pdf',
-            descricao: `Voucher ${parsed.voucher_numero || 'sem nº'} · ${parsed.passageiro}`,
-            base64_data: base64,
-          })
-        } catch (e) {
-          console.warn('Não conseguiu salvar PDF no IndexedDB:', e)
-        }
-      }
 
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'importar',
@@ -271,11 +272,27 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
         descricao: `Importou voucher ${parsed.voucher_numero || ''} de ${parsed.passageiro}`,
       })
 
+      await commitPendingRemoteStorage()
+
       toast.success('Demanda, voucher e financeiro sincronizados!')
       onSaved?.(nova)
       onClose()
-    } catch (e: any) {
-      toast.error(e?.message || 'Erro ao salvar')
+    } catch (error) {
+      if (arquivoCriado) {
+        try {
+          await deleteVoucher(arquivoCriado.id)
+        } catch (cleanupError) {
+          reportClientFailure('voucher_import_cleanup_failed', cleanupError, { component: 'voucher-import' })
+        }
+      }
+      if (voucherEmitidoCriado) deleteVoucherEmitido(voucherEmitidoCriado.id)
+      if (demandaCriada) deleteAtendimento(demandaCriada.id)
+      try {
+        await commitPendingRemoteStorage()
+      } catch (cleanupError) {
+        reportClientFailure('voucher_import_compensation_failed', cleanupError, { component: 'voucher-import' })
+      }
+      toast.error(error instanceof Error ? error.message : 'Erro ao salvar')
     } finally {
       setSalvando(false)
     }

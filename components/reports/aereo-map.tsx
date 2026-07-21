@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { reportClientFailure } from '@/lib/client-observability'
 import type { PontoMapaAereo, RotaMapaAereo } from '@/lib/reporting/aereo-executivo'
 
 interface Props {
@@ -29,14 +30,6 @@ export function AereoMap({ pontos, rotas, selected, onSelect, height = 360 }: Pr
 
     ;(async () => {
       try {
-        if (!document.getElementById('leaflet-css')) {
-          const link = document.createElement('link')
-          link.id = 'leaflet-css'
-          link.rel = 'stylesheet'
-          link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'
-          document.head.appendChild(link)
-        }
-
         const L: any = await import('leaflet')
         if (cancelled || !containerRef.current || mapRef.current) return
 
@@ -66,7 +59,9 @@ export function AereoMap({ pontos, rotas, selected, onSelect, height = 360 }: Pr
     return () => {
       cancelled = true
       if (mapRef.current) {
-        try { mapRef.current.remove() } catch {}
+        try { mapRef.current.remove() } catch (error) {
+          reportClientFailure('map_cleanup_failed', error, { component: 'aereo-map' })
+        }
         mapRef.current = null
       }
     }
@@ -77,7 +72,9 @@ export function AereoMap({ pontos, rotas, selected, onSelect, height = 360 }: Pr
     ;(async () => {
       const L: any = await import('leaflet')
       if (layerRef.current) {
-        try { layerRef.current.clearLayers(); layerRef.current.remove() } catch {}
+        try { layerRef.current.clearLayers(); layerRef.current.remove() } catch (error) {
+          reportClientFailure('map_layer_cleanup_failed', error, { component: 'aereo-map' })
+        }
       }
       const layer = L.layerGroup()
       layerRef.current = layer
@@ -145,7 +142,9 @@ export function AereoMap({ pontos, rotas, selected, onSelect, height = 360 }: Pr
         } else {
           mapRef.current.setView(BRAZIL_CENTER, 4)
         }
-      } catch {}
+      } catch (error) {
+        reportClientFailure('map_render_failed', error, { component: 'aereo-map' })
+      }
     })()
   }, [onSelect, pontos, ready, rotas, selected])
 

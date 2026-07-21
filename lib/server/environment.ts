@@ -1,0 +1,138 @@
+import 'server-only'
+
+import { z } from 'zod'
+
+const optionalBooleanValue = z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') return undefined
+  if (value === true || value === 'true') return true
+  if (value === false || value === 'false') return false
+  return value
+}, z.boolean()).optional()
+const positiveInteger = z.coerce.number().int().positive()
+
+const environmentSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  APP_URL: z.string().url().optional(),
+  APP_VERSION: z.string().trim().min(1).optional(),
+  ALLOW_INSECURE_LOCALHOST: optionalBooleanValue.default(false),
+  DATABASE_URL: z.string().min(1).optional(),
+  DATABASE_SSL: optionalBooleanValue.default(false),
+  POSTGRES_POOL_MAX: positiveInteger.max(50).default(10),
+  POSTGRES_CONNECT_TIMEOUT_MS: positiveInteger.max(60_000).default(5_000),
+  POSTGRES_STATEMENT_TIMEOUT_MS: positiveInteger.max(120_000).default(30_000),
+  AUTH_SECRET: z.string().optional(),
+  AUTH_SESSION_HOURS: positiveInteger.max(24 * 30).default(12),
+  AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('bbt_session'),
+  STORAGE_ROOT: z.string().min(1).default('.bbt-storage/files'),
+  MAX_UPLOAD_BYTES: positiveInteger.max(100 * 1024 * 1024).default(15 * 1024 * 1024),
+  SMTP_ENABLED: optionalBooleanValue.default(false),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: positiveInteger.max(65_535).default(587),
+  SMTP_SECURE: optionalBooleanValue.default(false),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  SMTP_FROM: z.string().email().optional(),
+  SMTP_FROM_NAME: z.string().trim().min(1).max(120).default('BBT Corporativo'),
+  PASSWORD_RESET_MINUTES: positiveInteger.max(24 * 60).default(30),
+  WHATSAPP_ENABLED: optionalBooleanValue.default(false),
+  WHATSAPP_PROVIDER: z.enum(['evolution_api']).default('evolution_api'),
+  WHATSAPP_API_BASE_URL: z.string().url().optional(),
+  WHATSAPP_API_KEY: z.string().optional(),
+  WHATSAPP_INSTANCE_ID: z.string().trim().min(1).max(160).optional(),
+  TECH_API_ENABLED: optionalBooleanValue.default(false),
+  TECH_API_BASE_URL: z.string().url().optional(),
+  TECH_API_LOGIN: z.string().optional(),
+  TECH_API_PASSWORD: z.string().optional(),
+  TECH_API_KEY: z.string().optional(),
+  TECH_REPORTS_ENABLED: optionalBooleanValue.default(false),
+  TECH_REPORTS_BASE_URL: z.string().url().optional(),
+  TECH_REPORTS_KEY: z.string().optional(),
+})
+
+export type ServerEnvironment = z.infer<typeof environmentSchema>
+
+let cachedEnvironment: ServerEnvironment | null = null
+
+export function getServerEnvironment(): ServerEnvironment {
+  if (cachedEnvironment) return cachedEnvironment
+
+  const parsed = environmentSchema.safeParse(process.env)
+  if (!parsed.success) {
+    throw new Error(`Configuracao de ambiente invalida: ${parsed.error.issues.map((issue) => issue.path.join('.')).join(', ')}`)
+  }
+
+  validateProductionEnvironment(parsed.data)
+  cachedEnvironment = parsed.data
+  return cachedEnvironment
+}
+
+export function validateServerEnvironment(): void {
+  getServerEnvironment()
+}
+
+export function resetEnvironmentCacheForTests(): void {
+  if (process.env.NODE_ENV === 'test') cachedEnvironment = null
+}
+
+function validateProductionEnvironment(environment: ServerEnvironment): void {
+  if (environment.NODE_ENV !== 'production') return
+
+  const errors: string[] = []
+  if (!environment.DATABASE_URL || !/^postgres(?:ql)?:\/\//i.test(environment.DATABASE_URL)) {
+    errors.push('DATABASE_URL deve apontar para PostgreSQL')
+  }
+  if (!environment.AUTH_SECRET || environment.AUTH_SECRET.length < 32 || /change|default|example|secret/i.test(environment.AUTH_SECRET)) {
+    errors.push('AUTH_SECRET deve ter ao menos 32 caracteres aleatorios e nao pode ser padrao')
+  }
+  const localTestUrlAllowed = Boolean(
+    environment.ALLOW_INSECURE_LOCALHOST &&
+    environment.APP_URL &&
+    isLoopbackHttpUrl(environment.APP_URL),
+  )
+  if (!environment.APP_URL || (!isSecurePublicUrl(environment.APP_URL) && !localTestUrlAllowed)) {
+    errors.push('APP_URL deve ser uma URL HTTPS publica')
+  }
+  if (!environment.APP_VERSION) errors.push('APP_VERSION e obrigatoria em producao')
+  if (environment.SMTP_ENABLED) {
+    if (!environment.SMTP_HOST) errors.push('SMTP_HOST e obrigatorio quando SMTP_ENABLED=true')
+    if (!environment.SMTP_USER) errors.push('SMTP_USER e obrigatorio quando SMTP_ENABLED=true')
+    if (!environment.SMTP_PASSWORD) errors.push('SMTP_PASSWORD e obrigatorio quando SMTP_ENABLED=true')
+    if (!environment.SMTP_FROM) errors.push('SMTP_FROM e obrigatorio quando SMTP_ENABLED=true')
+  }
+  if (environment.WHATSAPP_ENABLED) {
+    if (!environment.WHATSAPP_API_BASE_URL) errors.push('WHATSAPP_API_BASE_URL e obrigatorio quando WHATSAPP_ENABLED=true')
+    if (!environment.WHATSAPP_API_KEY) errors.push('WHATSAPP_API_KEY e obrigatorio quando WHATSAPP_ENABLED=true')
+    if (!environment.WHATSAPP_INSTANCE_ID) errors.push('WHATSAPP_INSTANCE_ID e obrigatorio quando WHATSAPP_ENABLED=true')
+  }
+  if (environment.TECH_API_ENABLED) {
+    if (!environment.TECH_API_BASE_URL) errors.push('TECH_API_BASE_URL e obrigatorio quando TECH_API_ENABLED=true')
+    if (!environment.TECH_API_LOGIN || !environment.TECH_API_PASSWORD || !environment.TECH_API_KEY) {
+      errors.push('Credenciais TECH_API sao obrigatorias quando TECH_API_ENABLED=true')
+    }
+  }
+  if (environment.TECH_REPORTS_ENABLED) {
+    if (!environment.TECH_REPORTS_BASE_URL || !environment.TECH_REPORTS_KEY) {
+      errors.push('TECH_REPORTS_BASE_URL e TECH_REPORTS_KEY sao obrigatorios quando TECH_REPORTS_ENABLED=true')
+    }
+  }
+
+  if (errors.length) throw new Error(`Ambiente de producao bloqueado: ${errors.join('; ')}`)
+}
+
+function isSecurePublicUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && !['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}

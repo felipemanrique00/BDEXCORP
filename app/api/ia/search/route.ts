@@ -26,7 +26,7 @@ const SEARCH_JSON_SCHEMA = {
 }
 
 export async function POST(req: NextRequest) {
-  const guard = guardApiRequest(req, {
+  const guard = await guardApiRequest(req, {
     requireAuth: true,
     rateLimit: { key: 'ia-search:post', limit: 20, windowMs: 60_000 },
   })

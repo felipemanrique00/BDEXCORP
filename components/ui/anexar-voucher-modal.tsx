@@ -4,8 +4,8 @@ import { Modal } from '@/components/ui/modal'
 import { toast } from 'sonner'
 import { Upload, FileText, Download, Trash2, Eye, Paperclip } from 'lucide-react'
 import {
-  fileToBase64, addVoucher, deleteVoucher, downloadVoucher, openVoucherInNewTab,
-  formatBytes, waitForVouchers, type Voucher,
+  addVoucher, deleteVoucher, downloadVoucher, getVouchersByDemanda, openVoucherInNewTab,
+  formatBytes, type Voucher,
 } from '@/lib/vouchers-storage'
 import { anexarVoucherAtendimento, registrarLog, updateAtendimento } from '@/lib/atendimentos-storage'
 import { getCurrentUser } from '@/lib/auth'
@@ -31,19 +31,20 @@ export function AnexarVoucherModal({ open, onClose, atendimento }: Props) {
       return () => { active = false }
     }
 
-    const ids = atendimento.voucher_ids || []
-    void waitForVouchers().then((all) => {
-      if (active) setVouchers(all.filter((voucher) => ids.includes(voucher.id)))
-    })
+    void getVouchersByDemanda(atendimento.id)
+      .then((files) => {
+        if (active) setVouchers(files)
+      })
+      .catch(() => {
+        if (active) setVouchers([])
+      })
 
     return () => { active = false }
   }, [open, atendimento])
 
   async function reload() {
     if (!atendimento) return
-    const ids = atendimento.voucher_ids || []
-    const all = await waitForVouchers()
-    setVouchers(all.filter((v) => ids.includes(v.id)))
+    setVouchers(await getVouchersByDemanda(atendimento.id))
   }
 
   async function handleFile(file: File) {
@@ -65,16 +66,12 @@ export function AnexarVoucherModal({ open, onClose, atendimento }: Props) {
 
     setUploading(true)
     try {
-      const base64 = await fileToBase64(pendingFile)
-      const voucher = addVoucher({
-        funcionario_id: atendimento.funcionario_id || atendimento.id,
-        nome_arquivo: pendingFile.name,
-        tamanho_bytes: pendingFile.size,
-        mime_type: pendingFile.type || 'application/pdf',
+      const voucher = await addVoucher({
+        file: pendingFile,
+        funcionario_id: atendimento.funcionario_id,
+        demanda_id: atendimento.id,
         descricao: descricao || 'Voucher',
-        base64_data: base64,
       })
-      if (!voucher) { toast.error('Erro ao salvar voucher.'); return }
 
       anexarVoucherAtendimento(atendimento.id, voucher.id)
 
@@ -86,22 +83,25 @@ export function AnexarVoucherModal({ open, onClose, atendimento }: Props) {
 
       toast.success('Voucher anexado!')
       setPendingFile(null); setDescricao('')
-      setTimeout(() => reload(), 150)
-    } catch (e) {
-      console.error(e)
-      toast.error('Erro ao processar arquivo.')
+      await reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Erro ao processar arquivo.')
     } finally {
       setUploading(false)
     }
   }
 
-  function removerVoucher(v: Voucher) {
+  async function removerVoucher(v: Voucher) {
     if (!atendimento) return
-    deleteVoucher(v.id)
-    const atualIds = (atendimento.voucher_ids || []).filter((id) => id !== v.id)
-    updateAtendimento(atendimento.id, { voucher_ids: atualIds })
-    toast.success('Voucher removido.')
-    reload()
+    try {
+      await deleteVoucher(v.id)
+      const atualIds = (atendimento.voucher_ids || []).filter((id) => id !== v.id)
+      updateAtendimento(atendimento.id, { voucher_ids: atualIds })
+      toast.success('Voucher removido.')
+      await reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel remover o voucher.')
+    }
   }
 
   if (!atendimento) return null
@@ -118,7 +118,7 @@ export function AnexarVoucherModal({ open, onClose, atendimento }: Props) {
           <label className="block border-2 border-dashed border-bbt-gray-100 dark:border-slate-700 rounded-xl p-6 text-center cursor-pointer hover:border-bbt-accent hover:bg-bbt-accent/5 transition">
             <Upload className="w-8 h-8 mx-auto text-bbt-accent mb-2" />
             <p className="font-medium text-bbt-primary dark:text-white text-sm">Clique para selecionar PDF</p>
-            <p className="text-xs text-slate-500 mt-1">Até 15MB por arquivo · Storage total ~2GB (IndexedDB)</p>
+            <p className="text-xs text-slate-500 mt-1">Até 15MB por arquivo · armazenamento privado da empresa</p>
             <input type="file" accept=".pdf,application/pdf" onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} className="hidden" />
           </label>
         ) : (

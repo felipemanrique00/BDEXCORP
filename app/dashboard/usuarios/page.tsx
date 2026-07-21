@@ -3,9 +3,9 @@ import { useState, useEffect, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import {
-  getCurrentUser, hasPermission, getAllUsers, addUsuario, updateUsuario, deleteUsuario, reativarUsuario,
-  perfilBBTLabel, SUPER_MASTER,
+  getCurrentUser, hasPermission, perfilBBTLabel,
 } from '@/lib/auth'
+import { setCachedUserDirectory } from '@/lib/user-directory-client'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { SearchInput } from '@/components/ui/search-input'
@@ -33,6 +33,8 @@ export default function UsuariosPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editando, setEditando] = useState<User | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [resendingInviteId, setResendingInviteId] = useState<string | null>(null)
 
   useEffect(() => {
     const u = getCurrentUser()
@@ -42,10 +44,23 @@ export default function UsuariosPage() {
       router.push('/dashboard')
       return
     }
-    reload()
+    void reload()
   }, [router])
 
-  function reload() { setUsuarios(getAllUsers()) }
+  async function reload() {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/users', { cache: 'no-store' })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok || !Array.isArray(payload?.users)) throw new Error(payload?.error || 'Falha ao carregar usuarios.')
+      setUsuarios(payload.users)
+      setCachedUserDirectory(payload.users)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao carregar usuarios.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const filtered = useMemo(() => {
     if (!busca.trim()) return usuarios
@@ -59,26 +74,54 @@ export default function UsuariosPage() {
   function abrirEditar(u: User) { setEditando(u); setModalOpen(true) }
 
   function confirmarExclusao(u: User) {
-    if (u.id === SUPER_MASTER.id) {
-      toast.error('O super master não pode ser removido.')
+    if (u.platform_admin) {
+      toast.error('O administrador da plataforma não pode ser removido por esta tela.')
       return
     }
     setConfirmDelete(u)
   }
 
-  function handleDelete() {
+  async function handleDelete() {
     if (!confirmDelete) return
-    if (deleteUsuario(confirmDelete.id)) {
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(confirmDelete.id)}`, { method: 'DELETE' })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(payload?.error || 'Falha ao inativar usuario.')
       toast.success(`Usuário "${confirmDelete.name}" inativado.`)
-      reload()
+      await reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao inativar usuario.')
     }
     setConfirmDelete(null)
   }
 
-  function handleReativar(u: User) {
-    if (reativarUsuario(u.id)) {
+  async function handleReativar(u: User) {
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(u.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: true }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(payload?.error || 'Falha ao reativar usuario.')
       toast.success(`Usuário "${u.name}" reativado.`)
-      reload()
+      await reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao reativar usuario.')
+    }
+  }
+
+  async function handleResendInvite(u: User) {
+    setResendingInviteId(u.id)
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(u.id)}/invite`, { method: 'POST' })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(payload?.error || 'Falha ao reenviar convite.')
+      toast.success(`Convite reenviado para ${u.email}.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao reenviar convite.')
+    } finally {
+      setResendingInviteId(null)
     }
   }
 
@@ -117,13 +160,18 @@ export default function UsuariosPage() {
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 ? (
+            {loading ? (
+              <tr>
+                <td colSpan={5} className="text-center py-12 text-slate-400">Carregando usuários...</td>
+              </tr>
+            ) : filtered.length === 0 ? (
               <tr>
                 <td colSpan={5} className="text-center py-12 text-slate-400">Nenhum usuário encontrado.</td>
               </tr>
             ) : filtered.map((u) => {
-              const isSuperMaster = u.id === SUPER_MASTER.id
+              const isPlatformAdmin = u.platform_admin === true
               const isAtivo = u.ativo !== false
+              const isInvited = u.status === 'invited'
               return (
                 <tr key={u.id} className="border-b border-bbt-gray-100 dark:border-slate-700 last:border-0 hover:bg-bbt-gray-50 dark:hover:bg-slate-900/30 transition">
                   <td className="px-4 py-3">
@@ -134,9 +182,9 @@ export default function UsuariosPage() {
                       <div>
                         <div className="font-medium flex items-center gap-2">
                           {u.name}
-                          {isSuperMaster && <Crown className="w-4 h-4 text-amber-500" aria-label="Super Master" />}
+                           {isPlatformAdmin && <Crown className="w-4 h-4 text-amber-500" aria-label="Administrador da plataforma" />}
                         </div>
-                        {isSuperMaster && <div className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold uppercase">Super Master</div>}
+                         {isPlatformAdmin && <div className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold uppercase">Administrador da plataforma</div>}
                       </div>
                     </div>
                   </td>
@@ -149,7 +197,11 @@ export default function UsuariosPage() {
                     ) : '—'}
                   </td>
                   <td className="px-4 py-3 text-center">
-                    {isAtivo ? (
+                    {isInvited ? (
+                      <span className="bbt-badge bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 text-xs">
+                        <Mail className="w-3 h-3" /> Convite pendente
+                      </span>
+                    ) : isAtivo ? (
                       <span className="bbt-badge bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300 text-xs">
                         <CheckCircle2 className="w-3 h-3" /> Ativo
                       </span>
@@ -164,7 +216,17 @@ export default function UsuariosPage() {
                       <button onClick={() => abrirEditar(u)} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
                         <Edit2 className="w-4 h-4" />
                       </button>
-                      {!isSuperMaster && (
+                      {!isPlatformAdmin && isInvited && (
+                        <button
+                          onClick={() => void handleResendInvite(u)}
+                          disabled={resendingInviteId === u.id}
+                          className="p-2 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-900/20 text-slate-500 hover:text-amber-600 transition disabled:opacity-50"
+                          title="Reenviar convite"
+                        >
+                          <RefreshCcw className={`w-4 h-4 ${resendingInviteId === u.id ? 'animate-spin' : ''}`} />
+                        </button>
+                      )}
+                       {!isPlatformAdmin && !isInvited && (
                         isAtivo ? (
                           <button onClick={() => confirmarExclusao(u)} className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-500 hover:text-red-600 transition" title="Inativar">
                             <Trash2 className="w-4 h-4" />
@@ -186,7 +248,7 @@ export default function UsuariosPage() {
 
       <UsuarioModal
         open={modalOpen}
-        onClose={() => { setModalOpen(false); setEditando(null); reload() }}
+        onClose={() => { setModalOpen(false); setEditando(null); void reload() }}
         editing={editando}
       />
       <ConfirmDialog
@@ -203,7 +265,7 @@ export default function UsuariosPage() {
 }
 
 function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () => void; editing: User | null }) {
-  const isSuperMaster = editing?.id === SUPER_MASTER.id
+  const isPlatformAdmin = editing?.platform_admin === true
   const { empresas, gruposEmpresariais } = useStore()
 
   const [name, setName] = useState('')
@@ -211,10 +273,12 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
   const [perfil, setPerfil] = useState<PerfilBBT>('agente')
   const [password, setPassword] = useState('')
   const [passwordConfirm, setPasswordConfirm] = useState('')
+  const [creationMode, setCreationMode] = useState<'invite' | 'temporary-password'>('invite')
   const [useCustomPermissoes, setUseCustomPermissoes] = useState(false)
   const [permissoes, setPermissoes] = useState<Permissoes>(PERMISSOES_PADRAO_POR_PERFIL.agente)
   const [empresaIds, setEmpresaIds] = useState<string[]>([])
   const [grupoIds, setGrupoIds] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -228,9 +292,11 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
       setGrupoIds(editing.grupo_ids || [])
       setPassword('')
       setPasswordConfirm('')
+      setCreationMode('temporary-password')
     } else {
       setName(''); setEmail(''); setPerfil('agente')
       setPassword(''); setPasswordConfirm('')
+      setCreationMode('invite')
       setUseCustomPermissoes(false)
       setPermissoes(PERMISSOES_PADRAO_POR_PERFIL.agente)
       setEmpresaIds([])
@@ -253,7 +319,7 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
     setGrupoIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
   }
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
 
     if (!name.trim() || !email.trim()) {
@@ -261,64 +327,67 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
       return
     }
 
-    if (!editing) {
+    if (!editing && creationMode === 'temporary-password') {
       // Novo usuário: senha obrigatória
-      if (!password || password.length < 8) {
-        toast.error('Senha precisa ter pelo menos 8 caracteres.')
+      if (!password || password.length < 12) {
+        toast.error('Senha precisa ter pelo menos 12 caracteres.')
         return
       }
       if (password !== passwordConfirm) {
         toast.error('Senhas não conferem.')
         return
       }
-      const novo = addUsuario({
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-        role: 'master',
-        company_id: null,
-        perfil_bbt: perfil,
-        permissoes: useCustomPermissoes ? permissoes : undefined,
-        empresa_ids: empresaIds,
-        grupo_ids: grupoIds,
-        password,
-      })
-      if (!novo) {
-        toast.error('E-mail já cadastrado ou dados inválidos.')
-        return
-      }
-      toast.success(`Usuário "${name}" cadastrado!`)
     } else {
       // Edição
-      if (password && password.length < 8) {
-        toast.error('A nova senha precisa ter pelo menos 8 caracteres.')
+      if (password && password.length < 12) {
+        toast.error('A nova senha precisa ter pelo menos 12 caracteres.')
         return
       }
       if (password && password !== passwordConfirm) {
         toast.error('Senhas não conferem.')
         return
       }
-      const ok = updateUsuario(editing.id, {
-        name: name.trim(),
-        perfil_bbt: perfil,
-        permissoes: useCustomPermissoes ? permissoes : undefined,
-        empresa_ids: empresaIds,
-        grupo_ids: grupoIds,
-        ...(password ? { password } : {}),
-      })
-      if (!ok) { toast.error('Erro ao atualizar.'); return }
-      toast.success(`Usuário "${name}" atualizado!`)
     }
 
-    onClose()
+    setSaving(true)
+    try {
+      const response = await fetch(editing ? `/api/users/${encodeURIComponent(editing.id)}` : '/api/users', {
+        method: editing ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim().toLowerCase(),
+          role: 'master',
+          profile: perfil,
+          permissions: useCustomPermissoes ? permissoes : undefined,
+          companyIds: empresaIds,
+          groupIds: grupoIds,
+          active: editing?.ativo !== false,
+          ...((editing || creationMode === 'temporary-password') && password ? { password } : {}),
+        }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(payload?.error || 'Falha ao salvar usuario.')
+      toast.success(editing
+        ? `Usuário "${name}" atualizado!`
+        : payload?.invited
+          ? `Convite enviado para ${email.trim().toLowerCase()}.`
+          : `Usuário "${name}" cadastrado!`)
+      onClose()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao salvar usuario.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={editing ? (isSuperMaster ? 'Editar Super Master' : 'Editar Usuário') : 'Novo Usuário'} size="lg">
+    <Modal open={open} onClose={onClose} title={editing ? (isPlatformAdmin ? 'Editar administrador da plataforma' : 'Editar Usuário') : 'Novo Usuário'} size="lg">
       <form onSubmit={submit} className="space-y-5">
-        {isSuperMaster && (
+        {isPlatformAdmin && (
           <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg text-xs text-amber-800 dark:text-amber-300">
             <Crown className="w-4 h-4 inline mr-1" />
-            Super Master — acesso total permanente. Senha não pode ser alterada por aqui.
+            Administrador da plataforma — alterações sensíveis são protegidas e auditadas.
           </div>
         )}
 
@@ -354,12 +423,12 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
                 key={p.value}
                 type="button"
                 onClick={() => setPerfil(p.value)}
-                disabled={isSuperMaster}
+                disabled={isPlatformAdmin}
                 className={`p-3 rounded-lg border-2 text-left transition ${
                   perfil === p.value
                     ? 'border-bbt-accent bg-bbt-accent/10 text-bbt-primary dark:text-bbt-accent'
                     : 'border-bbt-gray-100 dark:border-slate-700 text-slate-500 hover:border-bbt-accent/50'
-                } ${isSuperMaster ? 'opacity-50' : ''}`}
+                } ${isPlatformAdmin ? 'opacity-50' : ''}`}
               >
                 <div className="font-semibold text-sm">{p.label}</div>
                 <div className="text-xs opacity-80 mt-0.5">{p.desc}</div>
@@ -375,7 +444,7 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
               type="checkbox"
               checked={useCustomPermissoes}
               onChange={(e) => setUseCustomPermissoes(e.target.checked)}
-              disabled={isSuperMaster}
+              disabled={isPlatformAdmin}
             />
             <Shield className="w-4 h-4 text-bbt-accent" />
             <strong>Personalizar permissões</strong>
@@ -399,7 +468,7 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
           )}
         </div>
 
-        {!isSuperMaster && (
+        {!isPlatformAdmin && (
           <div className="border border-bbt-gray-100 dark:border-slate-700 rounded-lg p-3">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -445,7 +514,34 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
           </div>
         )}
 
-        {!isSuperMaster && (
+        {!isPlatformAdmin && !editing && (
+          <div className="border border-bbt-gray-100 dark:border-slate-700 rounded-lg p-3">
+            <div className="mb-2 text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">Forma de acesso</div>
+            <div className="grid grid-cols-2 rounded-md border border-bbt-gray-100 p-1 dark:border-slate-700">
+              <button
+                type="button"
+                onClick={() => { setCreationMode('invite'); setPassword(''); setPasswordConfirm('') }}
+                className={`flex items-center justify-center gap-2 rounded px-3 py-2 text-sm font-medium ${creationMode === 'invite' ? 'bg-bbt-primary text-white' : 'text-slate-600 dark:text-slate-300'}`}
+              >
+                <Mail className="h-4 w-4" /> Enviar convite
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreationMode('temporary-password')}
+                className={`flex items-center justify-center gap-2 rounded px-3 py-2 text-sm font-medium ${creationMode === 'temporary-password' ? 'bg-bbt-primary text-white' : 'text-slate-600 dark:text-slate-300'}`}
+              >
+                <Key className="h-4 w-4" /> Senha temporaria
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              {creationMode === 'invite'
+                ? 'O usuario recebera um link de uso unico para definir a propria senha.'
+                : 'O usuario devera alterar a senha temporaria no primeiro acesso.'}
+            </p>
+          </div>
+        )}
+
+        {!isPlatformAdmin && (editing || creationMode === 'temporary-password') && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5">
@@ -456,9 +552,9 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="bbt-input"
-                placeholder={editing ? 'Nova senha (opcional)' : 'Mínimo 8 caracteres'}
-                minLength={8}
-                required={!editing}
+                placeholder={editing ? 'Nova senha (opcional)' : 'Mínimo 12 caracteres'}
+                minLength={12}
+                required={!editing && creationMode === 'temporary-password'}
               />
             </div>
             <div>
@@ -470,7 +566,7 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
                 value={passwordConfirm}
                 onChange={(e) => setPasswordConfirm(e.target.value)}
                 className="bbt-input"
-                required={!editing || !!password}
+                required={(!editing && creationMode === 'temporary-password') || !!password}
               />
             </div>
           </div>
@@ -478,7 +574,9 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
 
         <div className="flex justify-end gap-2 pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
           <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
-          <button type="submit" className="bbt-button-primary">{editing ? 'Salvar' : 'Cadastrar'}</button>
+          <button type="submit" disabled={saving} className="bbt-button-primary">
+            {saving ? 'Salvando...' : editing ? 'Salvar' : creationMode === 'invite' ? 'Enviar convite' : 'Cadastrar'}
+          </button>
         </div>
       </form>
     </Modal>

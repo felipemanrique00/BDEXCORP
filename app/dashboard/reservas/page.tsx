@@ -31,6 +31,7 @@ import {
   updateAtendimento,
 } from '@/lib/atendimentos-storage'
 import { encontrarFuncionarioPorCodigo } from '@/lib/funcionario-identidade'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import {
   addSupplierReservation,
   capabilityLabel,
@@ -389,6 +390,8 @@ export default function ReservasPage() {
         return
       }
 
+      await commitPendingRemoteStorage()
+
       let techQuote: any = null
       if (form.action === 'cotacao' || form.action === 'status') {
         const techResponse = await fetch('/api/travel/quotes', {
@@ -415,7 +418,7 @@ export default function ReservasPage() {
           techQuote = payload.quote
           toast.success(`Cotação Tech preparada com ${techQuote.options?.length || 0} opção(ões).`)
         } else if (payload?.code === 'TECH_NOT_CONFIGURED') {
-          toast.message('Tech Travel ainda não está configurada. Deixei o fluxo salvo para executar quando as credenciais forem inseridas.')
+          toast.warning('A demanda foi salva, mas a cotacao Tech Travel nao foi executada porque a integracao nao esta configurada.')
         } else {
           toast.error(payload?.error || 'Tech Travel não retornou cotação agora.')
         }
@@ -450,14 +453,16 @@ export default function ReservasPage() {
       })
 
       if (reserva) {
-        updateAtendimento(atendimento.id, {
+        if (!updateAtendimento(atendimento.id, {
           observacoes_internas: [
             atendimento.observacoes_internas,
             `Reserva/cotação fornecedor: ${reserva.id}.`,
             techQuote?.id ? `Cotação Tech: ${techQuote.id}.` : '',
           ].filter(Boolean).join('\n'),
-        })
+        })) throw new Error('Nao foi possivel vincular o registro operacional a demanda.')
       }
+
+      await commitPendingRemoteStorage()
 
       toast.success(
         demandaVinculada

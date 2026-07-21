@@ -12,6 +12,7 @@ export interface ServerLoginResult {
   user: User | null
   reachable: boolean
   error?: string
+  code?: string
 }
 
 const UNAVAILABLE_SESSION: ServerSessionState = {
@@ -38,12 +39,12 @@ export async function fetchServerSession(): Promise<ServerSessionState> {
   }
 }
 
-export async function authenticateWithServer(email: string, password: string): Promise<ServerLoginResult> {
+export async function authenticateWithServer(email: string, password: string, tenant?: string): Promise<ServerLoginResult> {
   try {
     const response = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, tenant: tenant?.trim().toLowerCase() || undefined }),
     })
     const payload = await response.json().catch(() => null)
     if (!response.ok || !payload?.user) {
@@ -51,6 +52,7 @@ export async function authenticateWithServer(email: string, password: string): P
         user: null,
         reachable: true,
         error: typeof payload?.error === 'string' ? payload.error : undefined,
+        code: typeof payload?.code === 'string' ? payload.code : undefined,
       }
     }
     return { user: payload.user as User, reachable: true }

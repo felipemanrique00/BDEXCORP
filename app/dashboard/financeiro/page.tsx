@@ -31,6 +31,7 @@ import {
 import type { CartaoCorporativo } from '@/types'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
 import { PageHero } from '@/components/ui/page-hero'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 type Aba = 'resumo' | 'receber' | 'pagar' | 'carteira' | 'cartoes' | 'faturas'
 
@@ -43,13 +44,15 @@ export default function FinanceiroPage() {
   const [reload, setReload] = useState(0)
   const [pagamento, setPagamento] = useState<LancamentoFinanceiro | null>(null)
   const [aporteValor, setAporteValor] = useState(0)
-  const [pixPagamento, setPixPagamento] = useState({ valor: 0, descricao: 'Pagamento corporativo via Pix' })
+  const [pixPagamento, setPixPagamento] = useState({ valor: 0, descricao: 'Débito externo conciliado' })
   const [cartaoForm, setCartaoForm] = useState({
     tipo: 'virtual' as CartaoCorporativo['tipo'],
     apelido: 'Cartao viagem',
     portador_nome: '',
     limite: 1000,
     merchant_lock: '',
+    ultimos4: '',
+    bandeira: 'Visa' as NonNullable<CartaoCorporativo['bandeira']>,
   })
   const mesAtual = todayISODate().slice(0, 7)
   const [periodoFatura, setPeriodoFatura] = useState({
@@ -115,8 +118,14 @@ export default function FinanceiroPage() {
 
   function refresh() { setReload((n) => n + 1) }
 
-  function gerarRetroativos() {
+  async function gerarRetroativos() {
     const r = sincronizarTudoOperacional()
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a sincronizacao no servidor.')
+      return
+    }
     toast.success(`${r.atendimentosFinanceiro} atendimento(s), ${r.vouchersCriados + r.vouchersAtualizados} voucher(s) e financeiro sincronizados.`)
     refresh()
   }
@@ -129,24 +138,30 @@ export default function FinanceiroPage() {
     return empresaSelecionadaId
   }
 
-  function ativarCarteira() {
+  async function ativarCarteira() {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
     const wallet = garantirCarteiraEmpresa(empresaId)
     atualizarCarteiraEmpresa(wallet.id, {
       status: 'ativa',
-      pix_habilitado: true,
-      cartao_habilitado: true,
-      limite_credito: wallet.limite_credito || 50000,
-      limite_pix_diario: wallet.limite_pix_diario || 20000,
-      limite_cartao_mensal: wallet.limite_cartao_mensal || 50000,
-      provedor: wallet.provedor || 'pendente',
+      pix_habilitado: false,
+      cartao_habilitado: false,
+      limite_credito: wallet.limite_credito || 0,
+      limite_pix_diario: wallet.limite_pix_diario || 0,
+      limite_cartao_mensal: wallet.limite_cartao_mensal || 0,
+      provedor: 'pendente',
     })
-    toast.success('Carteira corporativa habilitada para controle interno.')
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o controle financeiro no servidor.')
+      return
+    }
+    toast.success('Controle interno da empresa habilitado. Nenhuma conta bancária foi criada.')
     refresh()
   }
 
-  function registrarAporte() {
+  async function registrarAporte() {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
     if (aporteValor <= 0) {
@@ -156,45 +171,57 @@ export default function FinanceiroPage() {
     registrarMovimentoCarteira({
       company_id: empresaId,
       tipo: 'credito',
-      origem: 'pix',
+      origem: 'manual',
       valor: aporteValor,
-      descricao: 'Aporte Pix/carteira corporativa registrado no financeiro',
+      descricao: 'Crédito externo conciliado no controle interno',
     })
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o credito no servidor.')
+      return
+    }
     setAporteValor(0)
-    toast.success('Aporte registrado na carteira.')
+    toast.success('Crédito conciliado registrado no controle interno.')
     refresh()
   }
 
-  function registrarPixPagamento() {
+  async function registrarPixPagamento() {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
     if (pixPagamento.valor <= 0) {
-      toast.error('Informe um valor de Pix valido.')
+      toast.error('Informe um valor de débito válido.')
       return
     }
     const wallet = carteiraSelecionada || garantirCarteiraEmpresa(empresaId)
     const saldoOperacional = Number(wallet.saldo_disponivel || 0) + Number(wallet.limite_credito || 0)
     if (saldoOperacional < pixPagamento.valor) {
-      toast.error('Saldo/limite insuficiente para registrar este Pix.')
+      toast.error('Saldo/limite interno insuficiente para registrar este débito.')
       return
     }
     const movimento = registrarMovimentoCarteira({
       company_id: empresaId,
       tipo: 'debito',
-      origem: 'pix',
+      origem: 'manual',
       valor: pixPagamento.valor,
-      descricao: pixPagamento.descricao || 'Pagamento corporativo via Pix',
+      descricao: pixPagamento.descricao || 'Débito externo conciliado',
     })
     if (!movimento) {
-      toast.error('Nao foi possivel registrar o Pix.')
+      toast.error('Não foi possível registrar o débito conciliado.')
       return
     }
-    setPixPagamento({ valor: 0, descricao: 'Pagamento corporativo via Pix' })
-    toast.success('Pix corporativo registrado na carteira.')
+    setPixPagamento({ valor: 0, descricao: 'Débito externo conciliado' })
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o debito no servidor.')
+      return
+    }
+    toast.success('Débito já realizado registrado no controle interno.')
     refresh()
   }
 
-  function criarCartao(tipo?: CartaoCorporativo['tipo']) {
+  async function criarCartao(tipo?: CartaoCorporativo['tipo']) {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
     const card = criarCartaoCorporativo({
@@ -205,16 +232,24 @@ export default function FinanceiroPage() {
       limite: cartaoForm.limite,
       merchant_lock: cartaoForm.merchant_lock || undefined,
       criado_por_user_id: user?.id,
+      ultimos4: cartaoForm.ultimos4,
+      bandeira: cartaoForm.bandeira,
     })
     if (!card) {
-      toast.error('Nao foi possivel criar o cartao.')
+      toast.error('Informe os quatro últimos dígitos de um cartão já emitido.')
       return
     }
-    toast.success(card.status === 'ativo' ? 'Cartao criado.' : 'Cartao registrado como pendente de emissao no provedor.')
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o cartao no servidor.')
+      return
+    }
+    toast.success('Cartão já emitido registrado no controle interno.')
     refresh()
   }
 
-  function gerarFatura() {
+  async function gerarFatura() {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
     const fatura = gerarFaturaEmpresa({
@@ -228,14 +263,26 @@ export default function FinanceiroPage() {
       toast.error('Nao foi possivel gerar a fatura.')
       return
     }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a fatura no servidor.')
+      return
+    }
     toast.success(`Fatura ${fatura.numero} gerada/atualizada.`)
     refresh()
   }
 
-  function quitarFatura(id: string) {
+  async function quitarFatura(id: string) {
     const fatura = marcarFaturaPaga(id)
     if (!fatura) {
       toast.error('Nao foi possivel quitar a fatura.')
+      return
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a quitacao no servidor.')
       return
     }
     toast.success(`Fatura ${fatura.numero} marcada como paga.`)
@@ -330,15 +377,15 @@ export default function FinanceiroPage() {
               <div>
                 <h3 className="font-semibold flex items-center gap-2">
                   <Wallet className="w-5 h-5 text-bbt-accent" />
-                  Carteira Digital Corporativa, Pix e Cartoes
+                  Controle interno de saldos, cartões e faturas
                 </h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Controle saldos, limites, pagamentos Pix, cartoes fisicos/virtuais ilimitados e faturas por empresa.
+                  Concilie créditos e débitos já realizados, cadastre cartões emitidos e acompanhe faturas por empresa.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button type="button" onClick={() => setAba('carteira')} className="bbt-button-primary">
-                  <Wallet className="w-4 h-4" /> Abrir carteira/Pix
+                  <Wallet className="w-4 h-4" /> Abrir controle interno
                 </button>
                 <button type="button" onClick={() => setAba('cartoes')} className="bbt-button-outline">
                   <CreditCard className="w-4 h-4" /> Cartoes fisicos/virtuais
@@ -443,17 +490,17 @@ export default function FinanceiroPage() {
           <div className="bbt-card p-4 space-y-4">
             <div>
               <Wallet className="w-6 h-6 text-bbt-accent mb-2" />
-              <h3 className="font-semibold">Carteira Digital Corporativa</h3>
+              <h3 className="font-semibold">Controle financeiro interno</h3>
               <p className="text-sm text-slate-500 mt-1">
-                Controle interno de saldo, Pix, limite de credito e pagamentos corporativos. A execucao real depende de provedor financeiro conectado por API.
+                Registro contábil auxiliar de saldos e limites. Esta área não movimenta conta bancária nem envia pagamentos.
               </p>
             </div>
             <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
             <button onClick={ativarCarteira} className="bbt-button-primary w-full">
-              <CheckCircle2 className="w-4 h-4" /> Habilitar carteira da empresa
+              <CheckCircle2 className="w-4 h-4" /> Habilitar controle da empresa
             </button>
             <div className="border-t border-bbt-gray-100 dark:border-slate-700 pt-3">
-              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Aporte Pix / saldo</label>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Crédito externo já conciliado</label>
               <div className="flex gap-2">
                 <input type="number" min="0" step="0.01" value={aporteValor} onChange={(e) => setAporteValor(Number(e.target.value || 0))} className="bbt-input" />
                 <button onClick={registrarAporte} className="bbt-button-accent">
@@ -462,12 +509,12 @@ export default function FinanceiroPage() {
               </div>
             </div>
             <div className="border-t border-bbt-gray-100 dark:border-slate-700 pt-3">
-              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Pagamento Pix corporativo</label>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Débito externo já realizado</label>
               <input
                 value={pixPagamento.descricao}
                 onChange={(e) => setPixPagamento({ ...pixPagamento, descricao: e.target.value })}
                 className="bbt-input mb-2"
-                placeholder="Descricao do pagamento"
+                placeholder="Descrição e referência da transação"
               />
               <div className="flex gap-2">
                 <input
@@ -482,7 +529,7 @@ export default function FinanceiroPage() {
                   <Send className="w-4 h-4" />
                 </button>
               </div>
-              <p className="mt-2 text-[11px] text-slate-500">Registra debito Pix na carteira e atualiza saldo operacional.</p>
+              <p className="mt-2 text-[11px] text-slate-500">Somente conciliação interna. O sistema não envia Pix nem movimenta uma conta bancária.</p>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -522,9 +569,22 @@ export default function FinanceiroPage() {
         <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
           <div className="bbt-card p-4 space-y-3">
             <CreditCard className="w-6 h-6 text-bbt-accent" />
-            <h3 className="font-semibold">Cartoes fisicos e virtuais</h3>
-            <p className="text-sm text-slate-500">Crie cartoes ilimitados no controle interno. Quando o conector financeiro estiver ativo, esses registros viram chamadas de emissao na API.</p>
+            <h3 className="font-semibold">Cadastro de cartões emitidos</h3>
+            <p className="text-sm text-slate-500">Registre somente cartões reais já emitidos pelo provedor financeiro. Esta tela não solicita emissão bancária.</p>
             <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Bandeira</label>
+              <select value={cartaoForm.bandeira} onChange={(e) => setCartaoForm({ ...cartaoForm, bandeira: e.target.value as NonNullable<CartaoCorporativo['bandeira']> })} className="bbt-input">
+                <option value="Visa">Visa</option>
+                <option value="Mastercard">Mastercard</option>
+                <option value="Elo">Elo</option>
+                <option value="Outra">Outra</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Quatro últimos dígitos</label>
+              <input inputMode="numeric" maxLength={4} value={cartaoForm.ultimos4} onChange={(e) => setCartaoForm({ ...cartaoForm, ultimos4: e.target.value.replace(/\D/g, '').slice(0, 4) })} className="bbt-input" placeholder="0000" />
+            </div>
             <div>
               <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Tipo</label>
               <select value={cartaoForm.tipo} onChange={(e) => setCartaoForm({ ...cartaoForm, tipo: e.target.value as CartaoCorporativo['tipo'] })} className="bbt-input">
@@ -549,13 +609,11 @@ export default function FinanceiroPage() {
               <input value={cartaoForm.merchant_lock} onChange={(e) => setCartaoForm({ ...cartaoForm, merchant_lock: e.target.value })} className="bbt-input" placeholder="Ex: hotel, aéreo, Tech Travel" />
             </div>
             <button onClick={() => criarCartao()} className="bbt-button-primary w-full">
-              <Plus className="w-4 h-4" /> Criar cartao
+              <Plus className="w-4 h-4" /> Registrar cartão
             </button>
-            {!carteiraSelecionada?.cartao_habilitado && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200">
-                Para o cartao nascer ativo, habilite a carteira da empresa na aba Carteira. Sem isso, ele fica como pendente de emissao.
-              </div>
-            )}
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+              A emissão, o bloqueio e a movimentação financeira continuam no provedor do cartão até existir uma integração bancária homologada.
+            </div>
           </div>
           <div className="bbt-card overflow-hidden">
             <table className="w-full text-sm">
@@ -690,9 +748,15 @@ function PagamentoForm({ lancamento, userId, userName, onSucesso }: any) {
   const [data, setData] = useState(todayISODate())
   const [forma, setForma] = useState<FormaPagamento>('PIX')
 
-  function submit() {
+  async function submit() {
     if (valor <= 0) { toast.error('Valor inválido'); return }
     if (pagarLancamento(lancamento.id, valor, data, forma, userId, userName)) {
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o pagamento no servidor.')
+        return
+      }
       toast.success('Lançamento atualizado')
       onSucesso()
     } else { toast.error('Erro') }

@@ -53,10 +53,10 @@ function loadFila(): ItemImportacao[] {
   return loadJSON<ItemImportacao[]>(STORAGE_FILA, [])
 }
 
-function saveFila(arr: ItemImportacao[]) {
-  if (typeof window === 'undefined') return
+function saveFila(arr: ItemImportacao[]): boolean {
+  if (typeof window === 'undefined') return false
   // Mantém só os últimos 5000 itens
-  safeSetJSON(STORAGE_FILA, arr.slice(-500))
+  return safeSetJSON(STORAGE_FILA, arr.slice(-500))
 }
 
 // ============================================================
@@ -156,7 +156,9 @@ export function adicionarItemFila(item: Omit<ItemImportacao, 'id' | 'created_at'
   }
   const all = loadFila()
   all.push(novo)
-  saveFila(all)
+  if (!saveFila(all)) {
+    throw new Error('Não foi possível preparar o item da importação para persistência.')
+  }
   return novo
 }
 
@@ -172,8 +174,7 @@ export function atualizarItemFila(id: string, patch: Partial<ItemImportacao>): b
   const i = all.findIndex((x) => x.id === id)
   if (i < 0) return false
   all[i] = { ...all[i], ...patch }
-  saveFila(all)
-  return true
+  return saveFila(all)
 }
 
 export function aprovarItemFila(
@@ -215,7 +216,7 @@ export function contarFila(): { total: number; pendente: number; duvida: number;
   }
 }
 
-export function limparFilaResolvidos() {
+export function limparFilaResolvidos(): boolean {
   const all = loadFila()
-  saveFila(all.filter((i) => i.status === 'pendente' || i.status === 'duvida'))
+  return saveFila(all.filter((i) => i.status === 'pendente' || i.status === 'duvida'))
 }

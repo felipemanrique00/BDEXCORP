@@ -306,9 +306,9 @@ function SolicitanteForm({
 
     setSalvando(true)
 
-    if (criarAcesso && password.length < 8) {
+    if (criarAcesso && password.length < 12) {
       setSalvando(false)
-      return toast.error('Senha de pelo menos 8 caracteres é obrigatória para criar ou redefinir o acesso.')
+      return toast.error('Senha de pelo menos 12 caracteres é obrigatória para criar ou redefinir o acesso.')
     }
 
     const payload = {
@@ -344,7 +344,6 @@ function SolicitanteForm({
         throw new Error(result?.error || 'Falha ao salvar solicitante.')
       }
 
-      if (Array.isArray(result.users)) safeSetJSON('bbt-users-v4', result.users)
       if (Array.isArray(result.solicitantes)) safeSetJSON('bbt-solicitantes-empresa', result.solicitantes)
 
       toast.success(
@@ -451,8 +450,8 @@ function SolicitanteForm({
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Mínimo 8 caracteres — pode ser trocada depois"
-                minLength={8}
+                placeholder="Mínimo 12 caracteres — deve ser trocada no primeiro acesso"
+                minLength={12}
                 autoComplete="new-password"
                 className="bbt-input"
               />

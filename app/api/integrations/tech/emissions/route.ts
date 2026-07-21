@@ -11,7 +11,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function POST(request: Request) {
-  const guard = guardApiRequest(request, {
+  const guard = await guardApiRequest(request, {
     requireAuth: true,
     roles: ['master'],
     permission: 'importar_planilhas',

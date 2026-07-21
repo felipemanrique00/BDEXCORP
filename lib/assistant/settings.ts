@@ -119,7 +119,10 @@ export async function saveAssistantSettings(patch: Partial<AssistantSetting>, up
 
 function mergeAssistantSettings(saved?: Partial<AssistantSetting> | null): AssistantSetting {
   if (!saved) return DEFAULT_ASSISTANT_SETTINGS
-  const provider = saved.provider === 'mock' || !saved.provider ? DEFAULT_ASSISTANT_SETTINGS.provider : saved.provider
+  const providerValue = String(saved.provider || '')
+  const provider = providerValue === 'mock' || !providerValue
+    ? DEFAULT_ASSISTANT_SETTINGS.provider
+    : saved.provider || DEFAULT_ASSISTANT_SETTINGS.provider
   const model = !saved.model || saved.model === 'mock-secure-assistant' ? DEFAULT_ASSISTANT_SETTINGS.model : saved.model
   const whatsapp = (saved.whatsapp || {}) as Partial<AssistantSetting['whatsapp']>
   const voice = (saved.voice || {}) as Partial<AssistantSetting['voice']>
@@ -131,14 +134,14 @@ function mergeAssistantSettings(saved?: Partial<AssistantSetting> | null): Assis
     whatsapp: {
       ...DEFAULT_ASSISTANT_SETTINGS.whatsapp,
       ...whatsapp,
-      mode: whatsapp.mode === 'mock' || !whatsapp.mode ? DEFAULT_ASSISTANT_SETTINGS.whatsapp.mode : whatsapp.mode,
-      provider: whatsapp.provider === 'mock' || !whatsapp.provider ? DEFAULT_ASSISTANT_SETTINGS.whatsapp.provider : whatsapp.provider,
+      mode: String(whatsapp.mode || '') === 'mock' || !whatsapp.mode ? DEFAULT_ASSISTANT_SETTINGS.whatsapp.mode : whatsapp.mode,
+      provider: String(whatsapp.provider || '') === 'mock' || !whatsapp.provider ? DEFAULT_ASSISTANT_SETTINGS.whatsapp.provider : whatsapp.provider,
     },
     voice: {
       ...DEFAULT_ASSISTANT_SETTINGS.voice,
       ...voice,
-      transcriptionProvider: voice.transcriptionProvider === 'mock' || !voice.transcriptionProvider ? DEFAULT_ASSISTANT_SETTINGS.voice.transcriptionProvider : voice.transcriptionProvider,
-      voiceProvider: voice.voiceProvider === 'mock' || !voice.voiceProvider ? DEFAULT_ASSISTANT_SETTINGS.voice.voiceProvider : voice.voiceProvider,
+      transcriptionProvider: String(voice.transcriptionProvider || '') === 'mock' || !voice.transcriptionProvider ? DEFAULT_ASSISTANT_SETTINGS.voice.transcriptionProvider : voice.transcriptionProvider,
+      voiceProvider: String(voice.voiceProvider || '') === 'mock' || !voice.voiceProvider ? DEFAULT_ASSISTANT_SETTINGS.voice.voiceProvider : voice.voiceProvider,
     },
     permissions: { ...DEFAULT_ASSISTANT_SETTINGS.permissions, ...(saved.permissions || {}) },
     serviceHours: { ...DEFAULT_ASSISTANT_SETTINGS.serviceHours, ...(saved.serviceHours || {}) },

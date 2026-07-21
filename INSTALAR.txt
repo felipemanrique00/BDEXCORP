@@ -1,121 +1,43 @@
-════════════════════════════════════════════════════════════════
-  BBT CORPORATIVO V10 — Vouchers + IA Real + Voucher Imprimível
-════════════════════════════════════════════════════════════════
+BDEX - BBT CORPORATIVO
+INSTALACAO CONTROLADA
 
-🆕 PRINCIPAIS NOVIDADES DA V10
+Nao execute este sistema com dados reais sem PostgreSQL, HTTPS, backup e restore validados.
 
-✅ SISTEMA COMPLETO DE VOUCHERS EMITIDOS
-   - Cadastro de voucher com numeração sequencial (H-26262, A-...)
-   - 4 tipos: Hotel, Aéreo, Carro, Pacote
-   - 4 status: rascunho, emitido, confirmado, cancelado
-   - Layout de impressão fiel ao seu voucher BBT (Strassen Hotel)
-   - Vincula automaticamente a uma demanda (1 clique pra preencher tudo)
-   - Compartilhamento por WhatsApp, Email, Cópia de link
-   - Lista com filtros (tipo, status, empresa, busca)
-   - Estatísticas: total faturado, por tipo, por status
+DESENVOLVIMENTO
 
-✅ IA CLAUDE INTEGRADA (REAL)
-   - Chat conversacional em português: /dashboard/ia-chat
-   - Análise de mensagens (texto + imagens) na Caixa de Entrada
-   - Configurável via .env.local (ANTHROPIC_API_KEY)
-   - Sem chave: usa parser local (sistema funciona normal)
-   - Com chave: precisão muito maior em emails/prints/áudios
+1. Instale Node.js 22 LTS e PostgreSQL 16.
+2. Abra o terminal nesta pasta.
+3. Execute: npm ci
+4. Copie .env.example para .env.local.
+5. Preencha DATABASE_URL, AUTH_SECRET, APP_URL e APP_VERSION.
+6. Execute: npm run db:migrate
+7. Preencha BOOTSTRAP_TENANT_NAME, BOOTSTRAP_TENANT_SLUG,
+   BOOTSTRAP_ADMIN_NAME, BOOTSTRAP_ADMIN_EMAIL,
+   BOOTSTRAP_ADMIN_PASSWORD, BOOTSTRAP_PLAN_KEY e BOOTSTRAP_PLAN_NAME.
+8. Execute: npm run db:bootstrap
+9. Remova BOOTSTRAP_ADMIN_PASSWORD do arquivo depois do bootstrap.
+10. Execute: npm run dev
 
-✅ INTEGRAÇÃO VOUCHER + DEMANDA
-   - Botão "Gerar Voucher" no modal de demanda → preenche tudo
-   - Botão de voucher em cada card de demanda na lista
-   - Botão de voucher na caixa de entrada após criar demanda
+PRODUCAO EM LINUX
 
-✅ CONFIGURAÇÕES MELHORADAS
-   - Card de Notificações (som + browser, com botão de testar)
-   - Card de IA (mostra se está configurada, com instruções)
+1. Leia docs/DEPLOYMENT-SERVER.md e docs/SECURITY.md.
+2. Instale Docker Engine e Docker Compose v2.
+3. Crie .env.production a partir de .env.example.
+4. Gere segredos novos e restrinja o arquivo a chmod 600.
+5. Aponte DNS para o servidor e libere apenas SSH, HTTP e HTTPS.
+6. Execute: ENV_FILE=.env.production ./scripts/release.sh
+7. Execute o bootstrap de uso unico conforme docs/DEPLOYMENT-SERVER.md.
+8. Valide login, persistencia, upload, backup e restore antes de liberar usuarios.
 
-✅ DEBUG VISÍVEL NA IMPORTAÇÃO
-   - Quando o tipo não é detectado, mostra preview do PDF
-   - Console logs detalhados pra debug rápido
+VALIDACAO LOCAL
 
-════════════════════════════════════════════════════════════════
-  COMO INSTALAR
-════════════════════════════════════════════════════════════════
+npm run validate
 
-PASSO 1 - Extrair o ZIP
+VALIDACOES QUE EXIGEM INFRAESTRUTURA
 
-PASSO 2 - Abrir terminal na pasta:
+npm run test:integration
+npm run test:e2e
+npm run test:load
+docker compose --env-file .env.production -f docker-compose.production.yml config
 
-    cd bbt-v9
-    npm install
-    npm run dev
-
-PASSO 3 - Navegador: http://localhost:3000
-
-PASSO 4 - Login: use o e-mail administrativo e a senha configurada em BBT_SUPER_MASTER_PASSWORD.
-
-════════════════════════════════════════════════════════════════
-  ATIVAR A IA CLAUDE (OPCIONAL MAS RECOMENDADO)
-════════════════════════════════════════════════════════════════
-
-Sem chave, o sistema funciona normalmente com parser local.
-Com chave, a IA reconhece prints, áudios e emails com altíssima precisão.
-
-PASSO 1 - Pegue uma chave em https://console.anthropic.com
-          (cadastro grátis, custo ~R$ 0,03 por análise)
-
-PASSO 2 - Crie um arquivo .env.local na raiz do projeto:
-
-    ANTHROPIC_API_KEY=sk-ant-sua-chave-aqui
-
-PASSO 3 - Reinicie o servidor:
-
-    Ctrl+C
-    npm run dev
-
-PASSO 4 - Acesse /dashboard/configuracoes
-          O card "Inteligência Artificial" deve estar VERDE
-
-PASSO 5 - Acesse /dashboard/ia-chat e converse com o assistente
-
-════════════════════════════════════════════════════════════════
-  ROTEIRO DE PRIMEIRO USO V10
-════════════════════════════════════════════════════════════════
-
-1️⃣ Login
-
-2️⃣ Configurações > Backup > "Exportar backup completo"
-   (segurança antes de testar)
-
-3️⃣ Importar dados (se ainda não tiver):
-   - Planilha de hotéis primeiro
-   - Mapa de Produção PDF (cria empresas + demandas + funcionários)
-   - Planilha de funcionários
-
-4️⃣ Caixa de Entrada — testar IA
-   - Cole o email do Outlook (formato tabular Andressa/Rebic)
-   - Clique "Analisar com IA" (se chave configurada) ou
-     o parser local detecta automaticamente
-   - Confirme os campos e crie a demanda
-
-5️⃣ Vá em Demandas > clique no ícone FileText do card
-   ou
-   Vouchers > Novo Voucher
-   ou
-   Caixa de Entrada > após criar demanda > "Gerar Voucher"
-
-6️⃣ Imprima o voucher (Ctrl+P) - formato A4 idêntico ao seu modelo BBT
-
-════════════════════════════════════════════════════════════════
-  PRÓXIMOS PASSOS (NUVEM)
-════════════════════════════════════════════════════════════════
-
-Pra ter WhatsApp/email automático 24/7, leia PLANO-NUVEM.md.
-Resumo: migração pra Vercel + Supabase + Z-API, custo ~R$ 150-400/mês.
-
-════════════════════════════════════════════════════════════════
-  LOGIN
-════════════════════════════════════════════════════════════════
-
-Email: conta administrativa configurada no sistema
-Senha: valor privado de BBT_SUPER_MASTER_PASSWORD no servidor
-
-════════════════════════════════════════════════════════════════
-                       BBT V10 — 29/04/2026
-════════════════════════════════════════════════════════════════
+Nao existe usuario ou senha padrao. Nao adicione empresas, funcionarios ou reservas ficticias em producao.

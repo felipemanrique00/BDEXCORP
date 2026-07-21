@@ -11,6 +11,16 @@ $paths = Initialize-BbtRuntime
 Assert-BbtProductionBuild
 $node = Get-BbtNodePath
 $next = Get-BbtNextCliPath
+$databaseUrl = Get-BbtEnvValue -Name 'DATABASE_URL'
+$migrationDatabaseUrl = Get-BbtEnvValue -Name 'MIGRATION_DATABASE_URL'
+$databaseAppRole = Get-BbtEnvValue -Name 'DATABASE_APP_ROLE'
+$databaseAppPassword = Get-BbtEnvValue -Name 'DATABASE_APP_PASSWORD'
+$authSecret = Get-BbtEnvValue -Name 'AUTH_SECRET'
+$storageRoot = Get-BbtEnvValue -Name 'STORAGE_ROOT'
+$storagePath = if ($storageRoot) {
+    if ([System.IO.Path]::IsPathRooted($storageRoot)) { [System.IO.Path]::GetFullPath($storageRoot) }
+    else { [System.IO.Path]::GetFullPath((Join-Path $paths.ProjectRoot $storageRoot)) }
+} else { $null }
 
 $checks = @(
     [pscustomobject]@{ name = 'access-mode'; ok = [string]$config.access_mode -eq 'INTERNET_RESTRITO' },
@@ -18,7 +28,12 @@ $checks = @(
     [pscustomobject]@{ name = 'node'; ok = Test-Path -LiteralPath $node },
     [pscustomobject]@{ name = 'next-cli'; ok = Test-Path -LiteralPath $next },
     [pscustomobject]@{ name = 'production-build'; ok = Test-Path -LiteralPath (Join-Path $paths.ProjectRoot '.next\BUILD_ID') },
-    [pscustomobject]@{ name = 'data-file'; ok = Test-Path -LiteralPath $paths.DataFile },
+    [pscustomobject]@{ name = 'database-url'; ok = [bool]($databaseUrl -and $databaseUrl -match '^postgres(?:ql)?://') },
+    [pscustomobject]@{ name = 'migration-database-url'; ok = [bool]($migrationDatabaseUrl -and $migrationDatabaseUrl -match '^postgres(?:ql)?://') },
+    [pscustomobject]@{ name = 'database-app-role'; ok = [bool]($databaseAppRole -and $databaseAppRole -match '^[a-z_][a-z0-9_]{0,62}$') },
+    [pscustomobject]@{ name = 'database-app-password'; ok = [bool]($databaseAppPassword -and $databaseAppPassword.Length -ge 20) },
+    [pscustomobject]@{ name = 'auth-secret'; ok = [bool]($authSecret -and $authSecret.Length -ge 32) },
+    [pscustomobject]@{ name = 'file-storage'; ok = [bool]($storagePath -and (Test-Path -LiteralPath $storagePath -PathType Container)) },
     [pscustomobject]@{ name = 'runtime-ignored'; ok = (Get-Content -LiteralPath (Join-Path $paths.ProjectRoot '.gitignore') -Raw) -match '(?m)^\.server-runtime/$' },
     [pscustomobject]@{ name = 'backups-ignored'; ok = (Get-Content -LiteralPath (Join-Path $paths.ProjectRoot '.gitignore') -Raw) -match '(?m)^\.server-backups/$' }
 )

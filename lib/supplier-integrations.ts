@@ -1,4 +1,5 @@
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { createEntityId } from '@/lib/ids'
 
 export type SupplierService =
   | 'aereo'
@@ -140,7 +141,7 @@ const DEFAULT_SUPPLIERS: SupplierIntegration[] = [
     nome: 'Tech Travel / TTravel Connect',
     tipo: 'consolidadora',
     servicos: ['aereo', 'hotelaria', 'locacao', 'pacotes', 'lazer', 'transfer', 'seguro', 'outros'],
-    capacidades: ['pesquisa', 'cotacao', 'reserva', 'emissao', 'cancelamento', 'remarcacao', 'voucher', 'importacao', 'status', 'faturamento'],
+    capacidades: ['importacao', 'status'],
     modo: 'api',
     status: 'pendente_configuracao',
     auth_type: 'api_key',
@@ -150,7 +151,7 @@ const DEFAULT_SUPPLIERS: SupplierIntegration[] = [
     env_base_url: 'TECH_API_BASE_URL',
     env_token: 'TECH_API_KEY',
     observacoes:
-      'Conector principal do BBT. A Tech/TTravel concentra aéreo, hotelaria, locação, pedidos, políticas, centros de custo, OS, emissão, cancelamento e todos os fornecedores habilitados na conta da agência.',
+      'Importação de emissões e consulta de status disponíveis após configuração. Cotação, reserva, emissão e cancelamento permanecem bloqueados até homologação das credenciais transacionais pela Tech Travel.',
   }),
 ]
 
@@ -168,7 +169,7 @@ function nowIso(): string {
 }
 
 function novoId(prefix: string): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  return createEntityId(prefix, '_')
 }
 
 function normalizedRef(value?: string | null): string {
@@ -240,6 +241,25 @@ function mergeDefaults(stored: SupplierIntegration[]): SupplierIntegration[] {
     if (!byId.has(item.id)) {
       byId.set(item.id, item)
       changed = true
+    } else if (item.id === TECH_SUPPLIER_ID) {
+      const current = byId.get(item.id)!
+      const allowedCapabilities = new Set(item.capacidades)
+      const capabilities = current.capacidades.filter((capability) => allowedCapabilities.has(capability))
+      const normalizedCapabilities = capabilities.length > 0 ? capabilities : item.capacidades
+      if (
+        current.status !== 'pendente_configuracao' ||
+        normalizedCapabilities.length !== current.capacidades.length ||
+        normalizedCapabilities.some((capability, index) => capability !== current.capacidades[index])
+      ) {
+        byId.set(item.id, {
+          ...current,
+          capacidades: normalizedCapabilities,
+          status: 'pendente_configuracao',
+          observacoes: item.observacoes,
+          updated_at: nowIso(),
+        })
+        changed = true
+      }
     }
   }
   const list = Array.from(byId.values()).sort((a, b) => b.prioridade - a.prioridade || a.nome.localeCompare(b.nome))
@@ -339,13 +359,13 @@ export function logSupplierAction(data: Omit<SupplierActionLog, 'id' | 'created_
 export function testarSupplierConnector(supplier: SupplierIntegration): SupplierActionLog {
   const hasApi = Boolean(supplier.api_base_url || supplier.env_base_url)
   const hasPortal = Boolean(supplier.portal_url)
-  const ok = supplier.modo !== 'api' ? hasPortal : hasApi
-  const status = ok ? 'sucesso' : 'pendente'
-  const message = ok
+  const configured = supplier.modo !== 'api' ? hasPortal : hasApi
+  const status = configured ? 'pendente' : 'falha'
+  const message = configured
     ? supplier.modo === 'api'
-      ? 'Conector API pronto para credenciais/endpoint configurado.'
-      : 'Conector portal assistido pronto para abrir fluxo operacional.'
-    : 'Falta endpoint/token ou URL do portal para concluir a conexao.'
+      ? 'Configuracao presente. A conexao deve ser validada pelo adaptador oficial do fornecedor.'
+      : 'URL do portal registrada. Nenhuma autenticacao externa foi executada.'
+    : 'Falta endpoint ou URL do portal para validar a configuracao.'
   return logSupplierAction({
     supplier_id: supplier.id,
     supplier_name: supplier.nome,

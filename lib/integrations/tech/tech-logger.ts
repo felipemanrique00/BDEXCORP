@@ -1,6 +1,7 @@
 import { getStorageEntries, setStorageEntries } from '@/lib/server-db'
 import { maskSensitive } from '@/lib/integrations/tech/tech-errors'
 import type { IntegrationLogEntry } from '@/lib/integrations/types'
+import { createEntityId } from '@/lib/ids'
 
 export const TECH_LOG_STORAGE_KEY = 'bbt-tech-integration-logs-v1'
 
@@ -9,7 +10,7 @@ export async function logTechIntegration(
 ): Promise<IntegrationLogEntry> {
   const log: IntegrationLogEntry = {
     ...entry,
-    id: `tech_log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: createEntityId('tech_log', '_'),
     provider: 'tech-ttravel',
     metadata: entry.metadata ? maskSensitive(entry.metadata) : undefined,
     createdAt: new Date().toISOString(),

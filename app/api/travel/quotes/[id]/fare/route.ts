@@ -10,7 +10,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  const guard = guardApiRequest(request, { requireAuth: true, roles: ['master'], rateLimit: { key: 'travel-fare:post', limit: 60, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, { requireAuth: true, roles: ['master'], rateLimit: { key: 'travel-fare:post', limit: 60, windowMs: 60_000 } })
   if (guard.response) return guard.response
   const input = await readJsonBodyResult<any>(request, 512 * 1024, {})
   if (!input.ok) return NextResponse.json({ ok: false, error: input.error }, { status: input.status })

@@ -49,9 +49,9 @@ function loadAlertas(): AlertaInconsistencia[] {
   return loadJSON<AlertaInconsistencia[]>(STORAGE_ALERTAS, [])
 }
 
-function saveAlertas(arr: AlertaInconsistencia[]) {
-  if (typeof window === 'undefined') return
-  safeSetJSON(STORAGE_ALERTAS, arr.slice(-1000))
+function saveAlertas(arr: AlertaInconsistencia[]): boolean {
+  if (typeof window === 'undefined') return false
+  return safeSetJSON(STORAGE_ALERTAS, arr.slice(-1000))
 }
 
 function loadResolvidos(): Set<string> {
@@ -63,9 +63,9 @@ function loadResolvidos(): Set<string> {
   }
 }
 
-function saveResolvidos(s: Set<string>) {
-  if (typeof window === 'undefined') return
-  safeSetJSON(STORAGE_ALERTAS_RESOLVIDOS, Array.from(s).slice(-5000))
+function saveResolvidos(s: Set<string>): boolean {
+  if (typeof window === 'undefined') return false
+  return safeSetJSON(STORAGE_ALERTAS_RESOLVIDOS, Array.from(s).slice(-5000))
 }
 
 function gerarHashAlerta(tipo: TipoAlerta, entidades: Array<{ tipo: string; id: string }>): string {
@@ -344,7 +344,9 @@ export function executarReconciliacao(opts: {
   const resolvidos = loadResolvidos()
   // Filtra alertas resolvidos (cuja chave já foi marcada antes)
   const ativos = todos.filter((a) => !resolvidos.has(a.id))
-  saveAlertas(ativos)
+  if (!saveAlertas(ativos)) {
+    throw new Error('Não foi possível preparar os alertas da reconciliação para persistência.')
+  }
   return ativos
 }
 
@@ -362,18 +364,17 @@ export function resolverAlerta(alertaId: string, userId: string, userName: strin
   alerta.resolvido = true
   alerta.resolvido_em = new Date().toISOString()
   alerta.resolvido_por = userName
-  saveAlertas(all.filter((a) => a.id !== alertaId))
+  if (!saveAlertas(all.filter((a) => a.id !== alertaId))) return false
   // Marcar como resolvido permanentemente
   const set = loadResolvidos()
   set.add(alertaId)
-  saveResolvidos(set)
-  return true
+  return saveResolvidos(set)
 }
 
-export function reabrirAlerta(alertaId: string) {
+export function reabrirAlerta(alertaId: string): boolean {
   const set = loadResolvidos()
   set.delete(alertaId)
-  saveResolvidos(set)
+  return saveResolvidos(set)
 }
 
 export function contarAlertasPorSeveridade(): Record<SeveridadeAlerta, number> {

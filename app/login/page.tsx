@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import {
   AlertCircle,
   Building2,
@@ -17,10 +18,9 @@ import { toast } from 'sonner'
 
 import { AI_NAME, SYSTEM_NAME } from '@/lib/branding'
 import { BBTLogo } from '@/components/branding/bbt-logo'
-import { getCurrentUser, isLoggedIn, login, setCurrentUser } from '@/lib/auth'
+import { setCurrentUser } from '@/lib/auth'
 import { authenticateWithServer, fetchServerSession } from '@/lib/client-session'
-import { hydrateApplicationData } from '@/lib/client-data-hydration'
-import { compactarLocalStorage } from '@/lib/storage-quota'
+import { clearLocalSharedStorageForSessionChange } from '@/lib/storage-quota'
 
 const heroImage =
   'https://images.unsplash.com/photo-1436491865332-7a61a109cc05?auto=format&fit=crop&w=1800&q=85'
@@ -35,6 +35,8 @@ export default function LoginPage() {
   const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [workspace, setWorkspace] = useState('')
+  const [workspaceRequired, setWorkspaceRequired] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [showPass, setShowPass] = useState(false)
@@ -42,17 +44,12 @@ export default function LoginPage() {
   useEffect(() => {
     let alive = true
     async function prepararLogin() {
-      compactarLocalStorage()
-      await hydrateApplicationData()
       const session = await fetchServerSession()
       if (!alive) return
       if (session.user) {
         setCurrentUser(session.user)
-        router.push(defaultRoute(session.user))
+        router.push(session.user.must_change_password ? '/alterar-senha' : defaultRoute(session.user))
         return
-      }
-      if (session.reachable && !session.requireSession && isLoggedIn()) {
-        router.push(defaultRoute(getCurrentUser()))
       }
     }
     prepararLogin()
@@ -66,25 +63,24 @@ export default function LoginPage() {
     setError('')
     setLoading(true)
 
-    const serverLogin = await authenticateWithServer(email.trim(), password)
-    let user = serverLogin.user
-    if (!user) {
-      const session = await fetchServerSession()
-      if (session.reachable && !session.requireSession) {
-        user = login(email.trim(), password)
-      }
-    }
+    const serverLogin = await authenticateWithServer(email.trim(), password, workspace)
+    const user = serverLogin.user
 
     if (!user) {
-      setError('E-mail ou senha incorretos.')
+      if (serverLogin.code === 'WORKSPACE_REQUIRED') {
+        setWorkspaceRequired(true)
+        setError('Informe o identificador do ambiente da sua organizacao.')
+      } else {
+        setError(serverLogin.reachable ? 'E-mail, senha ou ambiente incorretos.' : 'Servico de autenticacao indisponivel.')
+      }
       setLoading(false)
       return
     }
 
+    clearLocalSharedStorageForSessionChange()
     setCurrentUser(user)
     toast.success(`Bem-vindo, ${user.name.split(' ')[0]}!`)
-    await hydrateApplicationData(true)
-    router.push(defaultRoute(user))
+    router.push(user.must_change_password ? '/alterar-senha' : defaultRoute(user))
   }
 
   return (
@@ -145,13 +141,14 @@ export default function LoginPage() {
 
               <form onSubmit={handleSubmit} className="space-y-5">
                 <div>
-                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  <label htmlFor="login-email" className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-500">
                     E-mail
                   </label>
                   <div className="relative">
                     <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-slate-400" />
                     <input
-                      type="text"
+                      id="login-email"
+                      type="email"
                       value={email}
                       onChange={(event) => setEmail(event.target.value)}
                       placeholder="seu@email.com"
@@ -162,13 +159,38 @@ export default function LoginPage() {
                   </div>
                 </div>
 
+                {workspaceRequired && (
+                  <div>
+                    <label htmlFor="login-workspace" className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      Ambiente da organizacao
+                    </label>
+                    <div className="relative">
+                      <Building2 className="pointer-events-none absolute left-3.5 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-slate-400" />
+                      <input
+                        id="login-workspace"
+                        type="text"
+                        value={workspace}
+                        onChange={(event) => setWorkspace(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                        placeholder="identificador-da-organizacao"
+                        required
+                        autoComplete="organization"
+                        className="bbt-input !h-12 !pl-11"
+                      />
+                    </div>
+                  </div>
+                )}
+
                 <div>
-                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-500">
-                    Senha
-                  </label>
+                  <div className="mb-1.5 flex items-center justify-between gap-3">
+                    <label htmlFor="login-password" className="block text-xs font-semibold uppercase tracking-wider text-slate-500">Senha</label>
+                    <Link href="/esqueci-senha" className="text-xs font-semibold text-bbt-violet hover:underline dark:text-cyan-300">
+                      Esqueci minha senha
+                    </Link>
+                  </div>
                   <div className="relative">
                     <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-slate-400" />
                     <input
+                      id="login-password"
                       type={showPass ? 'text' : 'password'}
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}

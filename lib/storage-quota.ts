@@ -4,6 +4,7 @@ import {
   SHARED_STORAGE_KEYS,
   SYSTEM_STORAGE_META_KEY,
   isSharedStorageKey,
+  type SharedStorageKey,
 } from '@/lib/storage-keys'
 import {
   combineStorageSyncValues,
@@ -17,6 +18,7 @@ import {
   normalizeStorageClearMetadata,
   wasStorageKeyCleared,
 } from '@/lib/storage-clear-metadata'
+import { reportClientFailure } from '@/lib/client-observability'
 
 type JsonValue = any
 
@@ -28,8 +30,9 @@ const REMOTE_HYDRATE_TIMEOUT_MS = 3500
 const LOCAL_COMPACTION_MIN_INTERVAL_MS = 60_000
 const LOCAL_CACHE_ENTRY_LIMIT_CHARS = 512 * 1024
 
-let remoteHydrated = false
-let remoteHydratePromise: Promise<boolean> | null = null
+const hydratedRemoteKeys = new Set<SharedStorageKey>()
+const remoteHydratePromises = new Map<string, Promise<boolean>>()
+let scopedStorageInitialized = false
 let syncTimer: number | null = null
 let remoteRetryDelayMs = 5_000
 let pendingRemoteEntries: RemoteEntries = {}
@@ -112,7 +115,9 @@ export function safeRemove(key: string): void {
   delete memoryFallbackEntries[key]
   try {
     localStorage.removeItem(key)
-  } catch {}
+  } catch (error) {
+    reportClientFailure('local_storage_remove_failed', error, { operation: key })
+  }
   queueRemoteDelete(key)
 }
 
@@ -174,17 +179,28 @@ export function safeSetRaw(key: string, value: string): boolean {
   }
 }
 
-export async function hydrateServerStorage(force = false): Promise<boolean> {
+export async function hydrateServerStorage(
+  force = false,
+  requestedKeys?: readonly SharedStorageKey[],
+): Promise<boolean> {
   if (typeof window === 'undefined') return false
-  if (remoteHydrated && !force) return true
-  if (remoteHydratePromise && !force) return remoteHydratePromise
+  const normalizedKeys = normalizeHydrationKeys(requestedKeys)
+  const keysToFetch = force
+    ? normalizedKeys
+    : normalizedKeys.filter((key) => !hydratedRemoteKeys.has(key))
+  if (!keysToFetch.length) return true
+
+  const requestKey = keysToFetch.slice().sort().join(',')
+  const inFlight = remoteHydratePromises.get(requestKey)
+  if (inFlight) return inFlight
 
   const hydrationGeneration = storageMutationGeneration
-  remoteHydratePromise = (async () => {
+  const hydrationPromise = (async () => {
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), REMOTE_HYDRATE_TIMEOUT_MS)
     try {
-      const response = await fetch(STORAGE_API, {
+      const query = encodeURIComponent(keysToFetch.join(','))
+      const response = await fetch(`${STORAGE_API}?keys=${query}`, {
         method: 'GET',
         cache: 'no-store',
         signal: controller.signal,
@@ -192,7 +208,6 @@ export async function hydrateServerStorage(force = false): Promise<boolean> {
       if (!response.ok) return false
       const payload = await response.json()
       if (!payload?.enabled || !payload?.entries || typeof payload.entries !== 'object') {
-        remoteHydrated = true
         return false
       }
       if (hydrationGeneration !== storageMutationGeneration) return false
@@ -203,7 +218,12 @@ export async function hydrateServerStorage(force = false): Promise<boolean> {
       const localMetadata = rawToValue(safeGetRaw(SYSTEM_STORAGE_META_KEY) || 'null')
       const fullResetIsNewer = isFullStorageResetNewer(remoteMetadata, localMetadata)
 
-      if (scoped || fullResetIsNewer) clearSharedLocalStorage()
+      if (fullResetIsNewer || (scoped && !scopedStorageInitialized)) {
+        clearSharedLocalStorage()
+      } else if (scoped) {
+        keysToFetch.forEach(removeLocalOnly)
+      }
+      if (scoped) scopedStorageInitialized = true
       if (fullResetIsNewer) await clearBrowserOnlySystemData()
 
       for (const key of SHARED_STORAGE_KEYS) {
@@ -227,21 +247,25 @@ export async function hydrateServerStorage(force = false): Promise<boolean> {
         if (!scoped && mergedRaw !== remoteRaw) pendingRemoteEntries[key] = mergedValue
       }
       if (!scoped) {
-        seedMissingRemoteKeys(remoteEntries, remoteMetadata)
+        seedMissingRemoteKeys(remoteEntries, remoteMetadata, keysToFetch)
         if (Object.keys(pendingRemoteEntries).length) scheduleRemoteFlush()
       }
 
-      remoteHydrated = true
+      keysToFetch.forEach((key) => hydratedRemoteKeys.add(key))
       return true
-    } catch {
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        console.warn('[storage] Falha ao carregar dados compartilhados.', error)
+      }
       return false
     } finally {
       window.clearTimeout(timeout)
-      remoteHydratePromise = null
+      remoteHydratePromises.delete(requestKey)
     }
   })()
 
-  return remoteHydratePromise
+  remoteHydratePromises.set(requestKey, hydrationPromise)
+  return hydrationPromise
 }
 
 export async function syncLocalStorageToServer(): Promise<boolean> {
@@ -264,7 +288,8 @@ export async function syncLocalStorageToServer(): Promise<boolean> {
     await applyRemoteClearMetadata(payload?.metadata)
     for (const key of normalizeRejectedKeys(payload?.rejectedKeys)) removeLocalOnly(key)
     return true
-  } catch {
+  } catch (error) {
+    reportClientFailure('shared_storage_full_sync_failed', error)
     return false
   }
 }
@@ -276,6 +301,12 @@ export async function flushPendingRemoteStorage(): Promise<boolean> {
     syncTimer = null
   }
   return flushRemoteStorage()
+}
+
+export async function commitPendingRemoteStorage(): Promise<void> {
+  if (!await flushPendingRemoteStorage()) {
+    throw new Error('Nao foi possivel confirmar a gravacao no servidor. Verifique a conexao e tente novamente.')
+  }
 }
 
 export function clearLocalSharedStorageForSessionChange(): void {
@@ -307,8 +338,9 @@ function resetClientStorageSyncState(): void {
   syncTimer = null
   pendingRemoteEntries = {}
   pendingRemoteDeletes = new Set()
-  remoteHydrated = false
-  remoteHydratePromise = null
+  hydratedRemoteKeys.clear()
+  remoteHydratePromises.clear()
+  scopedStorageInitialized = false
   remoteRetryDelayMs = 5_000
 }
 
@@ -461,7 +493,8 @@ async function flushRemoteStorage(): Promise<boolean> {
     }
     remoteRetryDelayMs = 5_000
     return true
-  } catch {
+  } catch (error) {
+    reportClientFailure('shared_storage_flush_failed', error)
     for (const [key, value] of Object.entries(entries)) {
       pendingRemoteEntries[key] = Object.prototype.hasOwnProperty.call(pendingRemoteEntries, key)
         ? combineStorageSyncValues(key, value, pendingRemoteEntries[key])
@@ -476,10 +509,13 @@ async function flushRemoteStorage(): Promise<boolean> {
   }
 }
 
-function seedMissingRemoteKeys(remoteEntries: RemoteEntries, remoteMetadata: unknown): void {
+function seedMissingRemoteKeys(
+  remoteEntries: RemoteEntries,
+  remoteMetadata: unknown,
+  requestedKeys: readonly SharedStorageKey[],
+): void {
   const missing: RemoteEntries = {}
-  for (const key of SHARED_STORAGE_KEYS) {
-    if (key === SYSTEM_STORAGE_META_KEY) continue
+  for (const key of requestedKeys) {
     if (Object.prototype.hasOwnProperty.call(remoteEntries, key)) continue
     if (wasStorageKeyCleared(remoteMetadata, key)) {
       removeLocalOnly(key)
@@ -521,16 +557,23 @@ function writeLocalOnly(key: string, rawValue: string): boolean {
 function shouldKeepSharedValueInMemory(
   key: string,
   rawValue: string,
-  remoteAvailable = remoteHydrated,
+  remoteAvailable = isSharedStorageKey(key) && hydratedRemoteKeys.has(key),
 ): boolean {
   return remoteAvailable && isSharedStorageKey(key) && rawValue.length > LOCAL_CACHE_ENTRY_LIMIT_CHARS
+}
+
+function normalizeHydrationKeys(requestedKeys?: readonly SharedStorageKey[]): SharedStorageKey[] {
+  const source = requestedKeys || SHARED_STORAGE_KEYS
+  return Array.from(new Set(source.filter((key) => key !== SYSTEM_STORAGE_META_KEY)))
 }
 
 function keepValueInMemory(key: string, rawValue: string): void {
   memoryFallbackEntries[key] = rawValue
   try {
     localStorage.removeItem(key)
-  } catch {}
+  } catch (error) {
+    reportClientFailure('local_storage_cache_remove_failed', error, { operation: key })
+  }
 }
 
 function clearSharedLocalStorage(): void {
@@ -538,7 +581,9 @@ function clearSharedLocalStorage(): void {
     delete memoryFallbackEntries[key]
     try {
       localStorage.removeItem(key)
-    } catch {}
+    } catch (error) {
+      reportClientFailure('local_storage_reset_remove_failed', error, { operation: key })
+    }
   }
 }
 
@@ -546,7 +591,9 @@ function removeLocalOnly(key: string): void {
   delete memoryFallbackEntries[key]
   try {
     localStorage.removeItem(key)
-  } catch {}
+  } catch (error) {
+    reportClientFailure('local_storage_remove_only_failed', error, { operation: key })
+  }
 }
 
 async function clearBrowserOnlySystemData(): Promise<void> {
@@ -556,7 +603,9 @@ async function clearBrowserOnlySystemData(): Promise<void> {
     Object.keys(localStorage)
       .filter((key) => key.startsWith('bbt-filtro-'))
       .forEach(removeLocalOnly)
-  } catch {}
+  } catch (error) {
+    reportClientFailure('local_storage_filter_cleanup_failed', error)
+  }
 
   const { clearAllVoucherFiles } = await import('@/lib/vouchers-storage')
   await clearAllVoucherFiles()
@@ -610,7 +659,9 @@ function compactarArrayKey(key: string, maxItems: number, mapper?: (item: any) =
     const compacted = parsed.slice(-maxItems).map((item) => mapper ? mapper(item) : item)
     const serialized = JSON.stringify(compacted)
     if (serialized !== raw) localStorage.setItem(key, serialized)
-  } catch {}
+  } catch (error) {
+    reportClientFailure('local_storage_compaction_failed', error, { operation: key })
+  }
 }
 
 function compactarUniqueArrayKey(
@@ -633,7 +684,9 @@ function compactarUniqueArrayKey(
     const compacted = order === 'newest-first' ? unique.slice(0, maxItems) : unique.slice(-maxItems)
     const serialized = JSON.stringify(compacted)
     if (serialized !== raw) localStorage.setItem(key, serialized)
-  } catch {}
+  } catch (error) {
+    reportClientFailure('local_storage_deduplication_failed', error, { operation: key })
+  }
 }
 
 function stableJson(value: any): string {
@@ -671,7 +724,9 @@ function compactarBbtData(): void {
     }
     const serialized = JSON.stringify(parsed)
     if (serialized !== raw) localStorage.setItem('bbt-data-v4', serialized)
-  } catch {}
+  } catch (error) {
+    reportClientFailure('local_store_compaction_failed', error, { operation: 'bbt-data-v4' })
+  }
 }
 
 function limitarTexto(value: any, max: number): string {

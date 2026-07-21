@@ -2,7 +2,6 @@
 
 import {
   applyFullStorageResetLocally,
-  prepareSharedStorageForSystemReset,
 } from '@/lib/storage-quota'
 import { SYSTEM_STORAGE_META_KEY } from '@/lib/storage-keys'
 
@@ -19,13 +18,11 @@ export interface SystemResetResult {
   clearedKeys: number
 }
 
-export async function resetAllSystemData(confirmation: string): Promise<SystemResetResult> {
-  prepareSharedStorageForSystemReset()
-
+export async function resetAllSystemData(confirmation: string, password: string): Promise<SystemResetResult> {
   const response = await fetch('/api/system/reset', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirmation }),
+    body: JSON.stringify({ confirmation, password }),
   })
   const payload = await response.json().catch(() => null) as SystemResetResponse | null
   if (!response.ok || !payload?.ok) {

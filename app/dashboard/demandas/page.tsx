@@ -25,6 +25,7 @@ import { SearchInput } from '@/components/ui/search-input'
 import { NovaDemandaModal } from '@/components/ui/nova-demanda-modal'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
 import { marcarUltimaVista } from '@/lib/notificacoes'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 type Aba = 'fila' | 'minhas' | 'alertas' | 'operacao' | 'balanceamento' | 'kanban' | 'status'
 
@@ -181,9 +182,15 @@ export default function DemandasPage() {
 
   function refresh() { setReload((n) => n + 1) }
 
-  function handlePegar(a: Atendimento) {
+  async function handlePegar(a: Atendimento) {
     if (!user) return
     if (pegarDemanda(a, user.id, user.name)) {
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a atribuicao no servidor.')
+        return
+      }
       toast.success(`Demanda "${a.passageiro_nome}" agora é sua`)
       refresh()
     } else {
@@ -191,30 +198,48 @@ export default function DemandasPage() {
     }
   }
 
-  function handleRepassar(a: Atendimento, novoAgenteId: string) {
+  async function handleRepassar(a: Atendimento, novoAgenteId: string) {
     if (!user) return
     const ag = agentes.find((x) => x.id === novoAgenteId)
     if (!ag) return
     if (executarRepasse(a, ag.id, ag.name, user.id, user.name, repasseModal ? 'Repasse manual' : 'Redistribuição')) {
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o repasse no servidor.')
+        return
+      }
       toast.success(`Repassado para ${ag.name}`)
       setRepasseModal(null)
       refresh()
     }
   }
 
-  function handleAplicarSugestao(sug: any) {
+  async function handleAplicarSugestao(sug: any) {
     if (!user) return
     const ag = agentes.find((x) => x.id === sug.agente_sugerido)
     if (!ag) return
     if (executarRepasse(sug.atendimento, ag.id, ag.name, user.id, user.name, sug.motivo)) {
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o repasse no servidor.')
+        return
+      }
       toast.success(`Demanda "${sug.atendimento.passageiro_nome}" → ${ag.name}`)
       refresh()
     }
   }
 
-  function handleAlterarStatus(a: Atendimento, status: StatusAtendimento) {
+  async function handleAlterarStatus(a: Atendimento, status: StatusAtendimento) {
     if (a.status === status) return
     if (updateAtendimento(a.id, { status })) {
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o status no servidor.')
+        return
+      }
       toast.success(`Status alterado para ${STATUS_LABEL[status]}`)
       refresh()
     } else {
@@ -222,13 +247,19 @@ export default function DemandasPage() {
     }
   }
 
-  function aplicarTodasSugestoes() {
+  async function aplicarTodasSugestoes() {
     if (!user) return
     let ok = 0
     for (const sug of analise.sugestoes.slice(0, 20)) {
       const ag = agentes.find((x) => x.id === sug.agente_sugerido)
       if (!ag) continue
       if (executarRepasse(sug.atendimento, ag.id, ag.name, user.id, user.name, sug.motivo)) ok++
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar as redistribuicoes no servidor.')
+      return
     }
     toast.success(`${ok} demandas redistribuídas`)
     refresh()

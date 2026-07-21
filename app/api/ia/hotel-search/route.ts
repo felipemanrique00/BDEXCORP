@@ -72,7 +72,7 @@ const HOTEL_SEARCH_JSON_SCHEMA = {
 }
 
 export async function POST(req: NextRequest) {
-  const guard = guardApiRequest(req, {
+  const guard = await guardApiRequest(req, {
     requireAuth: true,
     rateLimit: { key: 'ia-hotel-search', limit: 20, windowMs: 60_000 },
   })
@@ -107,16 +107,10 @@ export async function POST(req: NextRequest) {
     if (openAIKey) {
       return buscarHoteisComOpenAI({ query, cidade, uf, knownHotels: body.knownHotels || [] })
     }
-    const suggestions = fallbackHotels(cidade || query, uf)
     return NextResponse.json({
-      source: 'local-fallback',
-      query: query || `${cidade}-${uf}`,
-      summary:
-        'Busca local ativada porque GEMINI_API_KEY nao esta configurada. Cadastrei sugestoes-base e deixei fonte/telefone para conferencia operacional.',
-      suggestions,
-      citations: [],
-      search_queries: [],
-    })
+      error: 'Nenhum provedor real de pesquisa de hoteis esta configurado.',
+      code: 'HOTEL_SEARCH_NOT_CONFIGURED',
+    }, { status: 503 })
   }
 
   try {
@@ -213,17 +207,8 @@ async function buscarHoteisComOpenAI({
       search_queries: [],
     })
   } catch (e: any) {
-    const suggestions = fallbackHotels(cidade || query, uf)
     const friendly = classifyAIError(e, 'openai')
-    return NextResponse.json({
-      source: 'local-fallback',
-      query: query || `${cidade}-${uf}`,
-      summary: `${friendly.message} Mantive a operacao funcionando com sugestoes locais para conferencia.`,
-      suggestions,
-      citations: [],
-      search_queries: [],
-      ai_error: friendly.kind,
-    })
+    return NextResponse.json({ error: friendly.message, code: friendly.kind }, { status: 502 })
   }
 }
 
@@ -333,53 +318,6 @@ function normalizarSugestoes(raw: any[], cidade: string, uf: string): HotelAISug
     }))
 }
 
-function fallbackHotels(cidadeRaw: string, ufRaw: string): HotelAISuggestion[] {
-  const cidade = cidadeRaw || 'Campo Grande'
-  const uf = ufRaw || inferirUF(cidade) || 'MS'
-  const normalized = normalizar(cidade)
-  const presets: Record<string, string[]> = {
-    'campo grande': [
-      'Deville Prime Campo Grande',
-      'Novotel Campo Grande',
-      'ibis Campo Grande',
-      'Hotel Metropolitan Campo Grande',
-      'Bristol Exceler Campo Grande',
-      'Jandaia Hotel Campo Grande',
-    ],
-    goiania: ['Quality Hotel Goiania', 'Castros Park Hotel', 'Oitis Hotel', 'ibis Styles Goiania Marista'],
-    brasilia: ['Transamerica Fit Brasilia', 'Cullinan Hplus Premium', 'Mercure Brasilia Lider', 'ibis Styles Brasilia Aeroporto'],
-  }
-  const names = presets[normalized] || [
-    `Hotel corporativo ${cidade}`,
-    `ibis ${cidade}`,
-    `Comfort Hotel ${cidade}`,
-    `Nobile ${cidade}`,
-  ]
-  return names.map((nome) => ({
-    nome,
-    cidade: titleCase(cidade),
-    uf,
-    categoria: undefined,
-    observacoes: 'Sugestao gerada no modo local. Confirme telefone, disponibilidade e tarifa antes de emitir.',
-    telefone: null,
-    faturado: false,
-    info_faturamento: null,
-    bebedouro: null,
-    valor_agua: null,
-    cafe_manha: null,
-    estacionamento: null,
-    tarifa_sgl: null,
-    tarifa_dbl: null,
-    tarifa_tpl: null,
-    formas_pagamento: ['CC', 'PX'],
-    endereco: null,
-    site: null,
-    fonte_url: `https://www.google.com/search?q=${encodeURIComponent(`${nome} ${cidade} telefone`)}`,
-    fonte_titulo: 'Busca Google para conferencia',
-    confianca: 'baixa',
-  }))
-}
-
 function extrairJSON(texto: string): string {
   const limpo = texto.replace(/```json|```/g, '').trim()
   const inicio = limpo.indexOf('{')
@@ -399,38 +337,7 @@ function extrairCidade(texto: string): string {
   ).trim()
 }
 
-function inferirUF(cidade: string): string {
-  const map: Record<string, string> = {
-    'campo grande': 'MS',
-    goiania: 'GO',
-    trindade: 'GO',
-    brasilia: 'DF',
-    'sao paulo': 'SP',
-    'rio de janeiro': 'RJ',
-    recife: 'PE',
-  }
-  return map[normalizar(cidade)] || ''
-}
-
 function numeroOuNull(value: any): number | null {
   const n = Number(value)
   return Number.isFinite(n) && n > 0 ? n : null
-}
-
-function normalizar(texto: string): string {
-  return texto
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-}
-
-function titleCase(texto: string): string {
-  return texto
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-    .join(' ')
 }

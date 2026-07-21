@@ -3,7 +3,7 @@
   "access_mode": "INTERNET_RESTRITO",
   "host": "127.0.0.1",
   "port": 3004,
-  "health_path": "/api/health",
+  "health_path": "/api/ready",
   "server_task_name": "BBT-Corporativo-Servidor",
   "backup_task_name": "BBT-Corporativo-Backup",
   "startup_timeout_seconds": 60,

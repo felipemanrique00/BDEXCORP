@@ -42,7 +42,6 @@ export function publicTechError(error: unknown): { ok: false; error: string; cod
       ok: false,
       error: error.message,
       code: error.code,
-      details: safeDetails(error.details),
     }
   }
   return {
@@ -50,11 +49,6 @@ export function publicTechError(error: unknown): { ok: false; error: string; cod
     error: error instanceof Error ? error.message : 'Falha na integração Tech Travel.',
     code: 'TECH_UNKNOWN_ERROR',
   }
-}
-
-function safeDetails(details: unknown): unknown {
-  if (!details || typeof details !== 'object') return details
-  return maskSensitive(details)
 }
 
 export function maskSensitive<T>(value: T): T {

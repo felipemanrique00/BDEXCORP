@@ -19,6 +19,7 @@ import {
   RefreshCw, Link2,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 const CORES: Record<SeveridadeAlerta, { bg: string; text: string; border: string; icon: any; label: string }> = {
   critico: { bg: 'bg-red-50 dark:bg-red-900/20', text: 'text-red-700 dark:text-red-300', border: 'border-red-300 dark:border-red-700', icon: ShieldAlert, label: 'Crítico' },
@@ -39,29 +40,35 @@ export default function ReconciliacaoPage() {
   const [executando, setExecutando] = useState(false)
   const autoRunDone = useRef(false)
 
-  const rodarReconciliacao = useCallback((notify: boolean) => {
+  const rodarReconciliacao = useCallback(async (notify: boolean) => {
     setExecutando(true)
-    const atendimentosAtuais = getAllAtendimentos()
-    const lista = executarReconciliacao({ atendimentos: atendimentosAtuais, empresas, funcionarios })
-    const sugestoes = Object.fromEntries(
-      lista.flatMap((alerta) => {
-        if (alerta.tipo !== 'passageiro_sem_funcionario') return []
-        const sugerido = alerta.entidades.find((entidade) => entidade.tipo === 'Funcionario')
-        return sugerido ? [[alerta.id, sugerido.id]] : []
-      }),
-    )
-    setAtendimentos(atendimentosAtuais)
-    setAlertas(lista)
-    setVinculos((atuais) => ({ ...sugestoes, ...atuais }))
-    setContagem(contarAlertasPorSeveridade())
-    setExecutando(false)
-    if (notify) toast.success(`Análise concluída: ${lista.length} alerta(s)`)
+    try {
+      const atendimentosAtuais = getAllAtendimentos()
+      const lista = executarReconciliacao({ atendimentos: atendimentosAtuais, empresas, funcionarios })
+      await commitPendingRemoteStorage()
+      const sugestoes = Object.fromEntries(
+        lista.flatMap((alerta) => {
+          if (alerta.tipo !== 'passageiro_sem_funcionario') return []
+          const sugerido = alerta.entidades.find((entidade) => entidade.tipo === 'Funcionario')
+          return sugerido ? [[alerta.id, sugerido.id]] : []
+        }),
+      )
+      setAtendimentos(atendimentosAtuais)
+      setAlertas(lista)
+      setVinculos((atuais) => ({ ...sugestoes, ...atuais }))
+      setContagem(contarAlertasPorSeveridade())
+      if (notify) toast.success(`Análise concluída: ${lista.length} alerta(s)`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível executar a reconciliação.')
+    } finally {
+      setExecutando(false)
+    }
   }, [empresas, funcionarios])
 
   useEffect(() => {
     if (autoRunDone.current) return
     autoRunDone.current = true
-    rodarReconciliacao(false)
+    void rodarReconciliacao(false)
   }, [rodarReconciliacao])
 
   const filtrados = useMemo(() => {
@@ -88,15 +95,24 @@ export default function ReconciliacaoPage() {
     return indice
   }, [funcionarios])
 
-  function handleResolver(a: AlertaInconsistencia) {
+  async function handleResolver(a: AlertaInconsistencia) {
     if (!user) return
-    resolverAlerta(a.id, user.id, user.name)
+    if (!resolverAlerta(a.id, user.id, user.name)) {
+      toast.error('Não foi possível preparar a resolução do alerta.')
+      return
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar a resolução.')
+      return
+    }
     setAlertas((prev) => prev.filter((x) => x.id !== a.id))
     setContagem(contarAlertasPorSeveridade())
     toast.success('Alerta marcado como resolvido')
   }
 
-  function handleVincularFuncionario(a: AlertaInconsistencia) {
+  async function handleVincularFuncionario(a: AlertaInconsistencia) {
     if (!user) return
     const funcionarioId = vinculos[a.id]
       || a.entidades.find((entidade) => entidade.tipo === 'Funcionario')?.id
@@ -131,7 +147,16 @@ export default function ReconciliacaoPage() {
     ]).filter((alias) => normalizarNomePessoa(alias).normalizados[0] !== nomeCadastrado)
     updateFuncionario(funcionario.id, { aliases_nome: aliases })
 
-    resolverAlerta(a.id, user.id, user.name)
+    if (!resolverAlerta(a.id, user.id, user.name)) {
+      toast.error('O vínculo foi preparado, mas o alerta não pôde ser atualizado.')
+      return
+    }
+    try {
+      await commitPendingRemoteStorage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar o vínculo no servidor.')
+      return
+    }
     setAtendimentos((atuais) => atuais.map((item) => (
       ids.includes(item.id)
         ? { ...item, funcionario_id: funcionario.id }
