@@ -1,0 +1,16 @@
+.git
+.github
+.next
+node_modules
+coverage
+.analysis
+.bbt-storage
+.server-backups
+.server-runtime
+tmp
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+docs/finais/*.html

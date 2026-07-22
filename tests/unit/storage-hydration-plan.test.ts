@@ -1,0 +1,60 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  storageKeysForDashboardPath,
+  storageKeysForReportPath,
+} from '@/lib/storage-hydration-plan'
+import { RESETTABLE_SHARED_STORAGE_KEYS } from '@/lib/storage-keys'
+
+describe('storage hydration plan', () => {
+  it('loads only registration data on company pages', () => {
+    const result = storageKeysForDashboardPath('/dashboard/empresas')
+
+    expect(result).toContain('bbt-data-v4')
+    expect(result).toContain('bbt-solicitantes-empresa')
+    expect(result).not.toContain('bbt-atendimentos')
+    expect(result).not.toContain('bbt-financeiro')
+  })
+
+  it('loads demand and voucher data for the operation queue', () => {
+    const result = storageKeysForDashboardPath('/dashboard/demandas')
+
+    expect(result).toEqual(expect.arrayContaining([
+      'bbt-data-v4',
+      'bbt-atendimentos',
+      'bbt-transferencias',
+      'bbt-vouchers-emitidos',
+    ]))
+    expect(result).not.toContain('bbt-corporate-finance')
+  })
+
+  it('loads every report dependency without assistant history', () => {
+    const result = storageKeysForReportPath('/relatorios/grupo')
+
+    expect(result).toEqual(expect.arrayContaining([
+      'bbt-data-v4',
+      'bbt-atendimentos',
+      'bbt-vouchers-emitidos',
+      'bbt-financeiro',
+      'bbt-corporate-finance',
+      'bbt-emissoes',
+      'bbt-wintour-imports-v1',
+    ]))
+    expect(result).not.toContain('bbt-assistant-conversations-v1')
+  })
+
+  it('loads the complete resettable dataset only for system settings', () => {
+    const result = storageKeysForDashboardPath('/dashboard/configuracoes/')
+
+    expect(new Set(result)).toEqual(new Set(RESETTABLE_SHARED_STORAGE_KEYS))
+  })
+
+  it('loads assistant data only in assistant modules', () => {
+    const regular = storageKeysForDashboardPath('/dashboard/usuarios')
+    const assistant = storageKeysForDashboardPath('/dashboard/ia-chat')
+
+    expect(regular).not.toContain('bbt-assistant-conversations-v1')
+    expect(assistant).toContain('bbt-assistant-conversations-v1')
+    expect(assistant).toContain('bbt-atendimentos')
+  })
+})

@@ -1,0 +1,43 @@
+BDEX - BBT CORPORATIVO
+INSTALACAO CONTROLADA
+
+Nao execute este sistema com dados reais sem PostgreSQL, HTTPS, backup e restore validados.
+
+DESENVOLVIMENTO
+
+1. Instale Node.js 22 LTS e PostgreSQL 16.
+2. Abra o terminal nesta pasta.
+3. Execute: npm ci
+4. Copie .env.example para .env.local.
+5. Preencha DATABASE_URL, AUTH_SECRET, APP_URL e APP_VERSION.
+6. Execute: npm run db:migrate
+7. Preencha BOOTSTRAP_TENANT_NAME, BOOTSTRAP_TENANT_SLUG,
+   BOOTSTRAP_ADMIN_NAME, BOOTSTRAP_ADMIN_EMAIL,
+   BOOTSTRAP_ADMIN_PASSWORD, BOOTSTRAP_PLAN_KEY e BOOTSTRAP_PLAN_NAME.
+8. Execute: npm run db:bootstrap
+9. Remova BOOTSTRAP_ADMIN_PASSWORD do arquivo depois do bootstrap.
+10. Execute: npm run dev
+
+PRODUCAO EM LINUX
+
+1. Leia docs/DEPLOYMENT-SERVER.md e docs/SECURITY.md.
+2. Instale Docker Engine e Docker Compose v2.
+3. Crie .env.production a partir de .env.example.
+4. Gere segredos novos e restrinja o arquivo a chmod 600.
+5. Aponte DNS para o servidor e libere apenas SSH, HTTP e HTTPS.
+6. Execute: ENV_FILE=.env.production ./scripts/release.sh
+7. Execute o bootstrap de uso unico conforme docs/DEPLOYMENT-SERVER.md.
+8. Valide login, persistencia, upload, backup e restore antes de liberar usuarios.
+
+VALIDACAO LOCAL
+
+npm run validate
+
+VALIDACOES QUE EXIGEM INFRAESTRUTURA
+
+npm run test:integration
+npm run test:e2e
+npm run test:load
+docker compose --env-file .env.production -f docker-compose.production.yml config
+
+Nao existe usuario ou senha padrao. Nao adicione empresas, funcionarios ou reservas ficticias em producao.

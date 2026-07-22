@@ -1,0 +1,19 @@
+[Unit]
+Description=BBT Corporativo
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/bbt-corporate
+Environment=NODE_ENV=production
+Environment=PORT=3004
+EnvironmentFile=/var/www/bbt-corporate/.env.production
+ExecStart=/usr/bin/npm run start -- -p 3004
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,66 @@
+{
+  "name": "BBT Corporativo",
+  "short_name": "BBT Corporativo",
+  "description": "Plataforma corporativa de viagens, vouchers, financeiro e IA operacional.",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "portrait-primary",
+  "background_color": "#20265A",
+  "theme_color": "#20265A",
+  "lang": "pt-BR",
+  "categories": ["business", "productivity", "travel"],
+  "launch_handler": { "client_mode": "navigate-existing" },
+  "icons": [
+    {
+      "src": "/brand/bbt-corporativo-mark.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/brand/bbt-corporativo-mark-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/brand/bbt-corporativo-mark-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Demandas",
+      "short_name": "Demandas",
+      "description": "Acessar fila de demandas e vouchers",
+      "url": "/dashboard/demandas",
+      "icons": [{ "src": "/brand/bbt-corporativo-mark.png", "sizes": "256x256", "type": "image/png" }]
+    },
+    {
+      "name": "Portal Empresa",
+      "short_name": "Portal",
+      "description": "Portal corporativo do solicitante",
+      "url": "/dashboard/portal-empresa",
+      "icons": [{ "src": "/brand/bbt-corporativo-mark.png", "sizes": "256x256", "type": "image/png" }]
+    },
+    {
+      "name": "Centro de Risco",
+      "short_name": "Risco",
+      "description": "Viajantes em campo e duty of care",
+      "url": "/dashboard/risco",
+      "icons": [{ "src": "/brand/bbt-corporativo-mark.png", "sizes": "256x256", "type": "image/png" }]
+    },
+    {
+      "name": "Assistente IA",
+      "short_name": "IA",
+      "description": "WhatsApp, voz, vouchers e auditoria",
+      "url": "/dashboard/assistente",
+      "icons": [{ "src": "/brand/bbt-corporativo-mark.png", "sizes": "256x256", "type": "image/png" }]
+    }
+  ],
+  "prefer_related_applications": false
+}

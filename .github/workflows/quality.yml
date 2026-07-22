@@ -1,0 +1,204 @@
+name: Quality and production image
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16.8-alpine3.21
+        env:
+          POSTGRES_DB: bbt_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bbt_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CI: 'true'
+      APP_URL: http://127.0.0.1:3000
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      APP_VERSION: ci-${{ github.sha }}
+      ALLOW_INSECURE_LOCALHOST: 'true'
+      DATABASE_URL: postgresql://bbt_ci_app:CI-App-Database-Password!2026@127.0.0.1:5432/bbt_test
+      MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bbt_test
+      DATABASE_APP_ROLE: bbt_ci_app
+      DATABASE_APP_PASSWORD: CI-App-Database-Password!2026
+      TEST_DATABASE_URL: postgresql://bbt_ci_app:CI-App-Database-Password!2026@127.0.0.1:5432/bbt_test
+      DATABASE_SSL: 'false'
+      AUTH_SECRET: ci-only-auth-secret-with-more-than-thirty-two-bytes
+      SMTP_ENABLED: 'false'
+      TECH_API_ENABLED: 'false'
+      TECH_REPORTS_ENABLED: 'false'
+      WHATSAPP_ENABLED: 'false'
+      BOOTSTRAP_TENANT_NAME: BBT CI
+      BOOTSTRAP_TENANT_SLUG: bbt-ci
+      BOOTSTRAP_ADMIN_NAME: Administrador CI
+      BOOTSTRAP_ADMIN_EMAIL: admin-ci@bbt.invalid
+      BOOTSTRAP_ADMIN_PASSWORD: CI-Only-Password!2026
+      BOOTSTRAP_PLATFORM_ADMIN: 'true'
+      BOOTSTRAP_PLAN_KEY: ci
+      BOOTSTRAP_PLAN_NAME: CI
+      BOOTSTRAP_ENTITLEMENTS: '{}'
+      E2E_ADMIN_EMAIL: admin-ci@bbt.invalid
+      E2E_ADMIN_PASSWORD: CI-Only-Password!2026
+      LOAD_TENANT: bbt-ci
+      LOAD_REQUESTS: '30'
+      LOAD_CONCURRENCY: '5'
+      LOAD_MAX_P95_MS: '3000'
+      LOAD_REPORT_PATH: load-test-report.json
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - run: npm ci
+      - run: npm run security:scan
+      - run: npm audit --omit=dev --audit-level=high
+      - run: sh -n scripts/backup.sh scripts/restore.sh scripts/release.sh scripts/rollback.sh
+      - run: npm run db:validate-migrations
+      - run: npm run inventory:check
+      - run: npm run db:migrate
+      - run: npm run db:bootstrap
+      - run: npm run db:status
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Start application
+        run: |
+          npm start > /tmp/bbt-app.log 2>&1 &
+          echo $! > /tmp/bbt-app.pid
+      - name: Wait for readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            curl --fail --silent http://127.0.0.1:3000/api/ready && exit 0
+            sleep 2
+          done
+          cat /tmp/bbt-app.log
+          exit 1
+      - run: npm run test:e2e
+      - run: npm run test:load
+      - name: Upload browser evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-evidence
+          path: |
+            playwright-report
+            test-results
+            load-test-report.json
+            /tmp/bbt-app.log
+          if-no-files-found: ignore
+
+  production-image:
+    runs-on: ubuntu-24.04
+    needs: quality
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16.8-alpine3.21
+        env:
+          POSTGRES_DB: bbt_image_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bbt_image_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      IMAGE_NAME: bbt-corporativo:${{ github.sha }}
+      IMAGE_DATABASE_URL: postgresql://bbt_image_app:CI-Image-Database-Password!2026@127.0.0.1:5432/bbt_image_test
+      IMAGE_MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bbt_image_test
+      IMAGE_DATABASE_APP_ROLE: bbt_image_app
+      IMAGE_DATABASE_APP_PASSWORD: CI-Image-Database-Password!2026
+      IMAGE_AUTH_SECRET: ci-image-auth-secret-with-more-than-thirty-two-bytes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: bbt-corporativo:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Validate image runtime
+        run: |
+          test "$(docker image inspect "$IMAGE_NAME" --format '{{.Config.User}}')" = "nextjs"
+          docker run --rm --network host \
+            -e DATABASE_URL="$IMAGE_DATABASE_URL" -e MIGRATION_DATABASE_URL="$IMAGE_MIGRATION_DATABASE_URL" \
+            -e DATABASE_APP_ROLE="$IMAGE_DATABASE_APP_ROLE" -e DATABASE_APP_PASSWORD="$IMAGE_DATABASE_APP_PASSWORD" \
+            -e DATABASE_SSL=false \
+            "$IMAGE_NAME" node scripts/migrate.mjs up
+          docker run --rm --network host \
+            -e DATABASE_URL="$IMAGE_DATABASE_URL" -e DATABASE_SSL=false \
+            -e BOOTSTRAP_TENANT_NAME='BBT Image CI' -e BOOTSTRAP_TENANT_SLUG=bbt-image-ci \
+            -e BOOTSTRAP_ADMIN_NAME='Administrador Image CI' -e BOOTSTRAP_ADMIN_EMAIL=admin-image-ci@bbt.invalid \
+            -e BOOTSTRAP_ADMIN_PASSWORD='CI-Image-Password!2026' -e BOOTSTRAP_PLATFORM_ADMIN=true \
+            -e BOOTSTRAP_PLAN_KEY=image-ci -e BOOTSTRAP_PLAN_NAME='Image CI' \
+            "$IMAGE_NAME" node scripts/bootstrap.mjs
+          mkdir -p "$RUNNER_TEMP/bbt-backup/source-files" "$RUNNER_TEMP/bbt-backup/backups" "$RUNNER_TEMP/bbt-backup/restored-files"
+          printf 'backup-evidence\n' > "$RUNNER_TEMP/bbt-backup/source-files/evidence.txt"
+          docker run --rm --network host \
+            -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=bbt_image_test -e PGUSER=postgres -e PGPASSWORD=postgres \
+            -e BACKUP_ROOT=/backups -e STORAGE_ROOT=/source-files -e BACKUP_RETENTION_DAYS=14 \
+            -v "$PWD/scripts:/opt/bbt/scripts:ro" \
+            -v "$RUNNER_TEMP/bbt-backup/source-files:/source-files:ro" \
+            -v "$RUNNER_TEMP/bbt-backup/backups:/backups" \
+            postgres:16.8-alpine3.21 /bin/sh /opt/bbt/scripts/backup.sh
+          BACKUP_SOURCE="$(find "$RUNNER_TEMP/bbt-backup/backups" -mindepth 1 -maxdepth 1 -type d -name '????????T??????Z' -print -quit)"
+          test -n "$BACKUP_SOURCE"
+          docker run --rm --network host \
+            -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=bbt_image_test -e PGUSER=postgres -e PGPASSWORD=postgres \
+            -e RESTORE_SOURCE=/backup -e RESTORE_DATABASE=bbt_restore_validation \
+            -e RESTORE_STORAGE_ROOT=/restored-files -e ALLOW_PRODUCTION_RESTORE=NO \
+            -v "$PWD/scripts:/opt/bbt/scripts:ro" \
+            -v "$BACKUP_SOURCE:/backup:ro" \
+            -v "$RUNNER_TEMP/bbt-backup/restored-files:/restored-files" \
+            postgres:16.8-alpine3.21 /bin/sh /opt/bbt/scripts/restore.sh
+          cmp "$RUNNER_TEMP/bbt-backup/source-files/evidence.txt" "$RUNNER_TEMP/bbt-backup/restored-files/evidence.txt"
+          docker volume create bbt_image_files >/dev/null
+          docker run -d --name bbt-image-smoke --network host --read-only \
+            --tmpfs /tmp:rw,size=256m --mount type=volume,src=bbt_image_files,dst=/var/lib/bbt/files \
+            -e NODE_ENV=production -e APP_URL=http://127.0.0.1:3000 -e APP_VERSION="image-${{ github.sha }}" \
+            -e ALLOW_INSECURE_LOCALHOST=true -e DATABASE_URL="$IMAGE_DATABASE_URL" -e DATABASE_SSL=false \
+            -e AUTH_SECRET="$IMAGE_AUTH_SECRET" -e STORAGE_ROOT=/var/lib/bbt/files \
+            "$IMAGE_NAME"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/api/ready; then
+              docker inspect bbt-image-smoke --format '{{json .State.Health.Status}}'
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs bbt-image-smoke
+          exit 1
+      - name: Clean image smoke resources
+        if: always()
+        run: |
+          docker rm -f bbt-image-smoke >/dev/null 2>&1 || true
+          docker volume rm bbt_image_files >/dev/null 2>&1 || true

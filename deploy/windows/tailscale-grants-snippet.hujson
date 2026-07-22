@@ -1,0 +1,22 @@
+// Mescle estas secoes na politica existente do tailnet. Nao substitua uma
+// politica em uso sem revisar outras regras. Troque os e-mails de exemplo.
+{
+  "groups": {
+    "group:bbt-usuarios": [
+      "gestor1@empresa.com.br",
+      "gestor2@empresa.com.br"
+    ]
+  },
+
+  "tagOwners": {
+    "tag:bbt-servidor": ["autogroup:admin"]
+  },
+
+  "grants": [
+    {
+      "src": ["group:bbt-usuarios"],
+      "dst": ["tag:bbt-servidor"],
+      "ip": ["tcp:443"]
+    }
+  ]
+}
