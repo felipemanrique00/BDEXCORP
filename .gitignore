@@ -19,3 +19,7 @@ build/
 *.tsbuildinfo
 public/vendor/pdf.worker.min.mjs
 .vscode/settings.json
+.env.production
+
+.env*
+*.env
