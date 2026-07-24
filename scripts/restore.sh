@@ -54,7 +54,12 @@ cleanup_failed_restore() {
 }
 trap cleanup_failed_restore EXIT INT TERM
 
-if psql -X -d postgres -v database_name="$RESTORE_DATABASE" -Atqc "select 1 from pg_database where datname = :'database_name'" | grep -q 1; then
+database_exists="$(
+  psql -X -d postgres -At -v database_name="$RESTORE_DATABASE" <<'SQL'
+select 1 from pg_database where datname = :'database_name';
+SQL
+)"
+if [ "$database_exists" = "1" ]; then
   table_count="$(psql -X -d "$RESTORE_DATABASE" -Atqc "select count(*) from pg_tables where schemaname = 'public'")"
   [ "$table_count" = "0" ] || { echo "O banco de destino nao esta vazio." >&2; exit 1; }
 else
