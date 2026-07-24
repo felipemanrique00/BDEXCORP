@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#20265A">
+  <title>BBT Corporativo - Offline</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #f4f6fa; color: #172033; }
+    header { background: #20265a; color: white; padding: calc(20px + env(safe-area-inset-top)) 20px 20px; border-bottom: 4px solid #21bfc5; }
+    header img { width: 42px; height: 42px; object-fit: contain; }
+    header div { display: flex; align-items: center; gap: 12px; max-width: 760px; margin: 0 auto; }
+    header strong { display: block; font-size: 18px; }
+    header span { display: block; margin-top: 2px; color: #cbd5e1; font-size: 13px; }
+    main { width: min(100% - 32px, 760px); margin: 24px auto; padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+    .state { display: flex; align-items: flex-start; gap: 12px; border: 1px solid #f5d590; background: #fff9e8; padding: 14px; border-radius: 6px; }
+    .state strong { display: block; color: #6b4b00; }
+    .state p { margin: 4px 0 0; color: #765f2b; font-size: 13px; line-height: 1.5; }
+    .status-dot { width: 10px; height: 10px; margin-top: 5px; flex: 0 0 auto; border-radius: 50%; background: #d8a128; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 22px 0 12px; }
+    h1 { margin: 0; color: #20265a; font-size: 22px; }
+    button { min-height: 40px; border: 0; border-radius: 6px; background: #20265a; color: white; padding: 0 16px; font-weight: 700; cursor: pointer; }
+    #trips { display: grid; gap: 12px; }
+    article { border: 1px solid #d9e0ea; border-radius: 6px; background: white; padding: 16px; box-shadow: 0 1px 2px rgba(32,38,90,.05); }
+    article small { color: #647084; font-weight: 600; text-transform: uppercase; }
+    article h2 { margin: 7px 0 4px; color: #20265a; font-size: 18px; overflow-wrap: anywhere; }
+    article p { margin: 0; color: #647084; font-size: 14px; }
+    article footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #eef1f5; font-size: 12px; color: #647084; }
+    .empty { border: 1px dashed #cbd5e1; border-radius: 6px; background: white; padding: 40px 20px; text-align: center; color: #647084; }
+    #saved { margin: 10px 0 0; color: #647084; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <img src="/brand/bbt-corporativo-mark-white.webp" alt="">
+      <p><strong>BBT Corporativo</strong><span>Portal do viajante offline</span></p>
+    </div>
+  </header>
+  <main>
+    <section class="state" role="status">
+      <span class="status-dot"></span>
+      <div>
+        <strong>Sem conexao com o servidor</strong>
+        <p>Somente as viagens disponibilizadas offline neste dispositivo podem ser exibidas.</p>
+      </div>
+    </section>
+    <div class="toolbar">
+      <h1>Proximas viagens</h1>
+      <button type="button" id="retry">Tentar novamente</button>
+    </div>
+    <p id="saved"></p>
+    <section id="trips" aria-live="polite">
+      <div class="empty">Carregando copia offline...</div>
+    </section>
+  </main>
+  <script>
+    const DB_NAME = 'bbt-traveler-offline-v1'
+    const STORE_NAME = 'snapshots'
+    const SESSION_KEY = 'bbt-session-user-v1'
+    document.getElementById('retry').addEventListener('click', () => location.reload())
+
+    function sessionOwnerKey() {
+      try {
+        const user = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null')
+        if (!user || !user.tenant_id || !user.id) return null
+        return `${String(user.tenant_id).trim()}:${String(user.id).trim()}`
+      } catch {
+        return null
+      }
+    }
+
+    function readSnapshot() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, 1)
+        request.onerror = () => reject(request.error)
+        request.onupgradeneeded = () => {
+          if (!request.result.objectStoreNames.contains(STORE_NAME)) {
+            request.result.createObjectStore(STORE_NAME)
+          }
+        }
+        request.onsuccess = () => {
+          const database = request.result
+          const read = database.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get('current')
+          read.onsuccess = () => { database.close(); resolve(read.result || null) }
+          read.onerror = () => { database.close(); reject(read.error) }
+        }
+      })
+    }
+
+    function text(tag, value, className) {
+      const element = document.createElement(tag)
+      element.textContent = value
+      if (className) element.className = className
+      return element
+    }
+
+    function date(value) {
+      if (!value) return 'Data a confirmar'
+      const parsed = new Date(`${String(value).slice(0, 10)}T12:00:00`)
+      return Number.isNaN(parsed.getTime())
+        ? String(value)
+        : new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' }).format(parsed)
+    }
+
+    function render(snapshot) {
+      const container = document.getElementById('trips')
+      container.replaceChildren()
+      const ownerKey = sessionOwnerKey()
+      if (!snapshot || !ownerKey || snapshot.ownerKey !== ownerKey) {
+        container.append(text('div', 'Nenhuma copia offline autorizada para esta sessao.', 'empty'))
+        return
+      }
+      const trips = Array.isArray(snapshot.overview && snapshot.overview.upcomingTrips)
+        ? snapshot.overview.upcomingTrips
+        : []
+      document.getElementById('saved').textContent = snapshot.savedAt
+        ? `Copia salva em ${new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(snapshot.savedAt))}.`
+        : ''
+      if (!trips.length) {
+        container.append(text('div', 'Nenhuma proxima viagem na copia offline.', 'empty'))
+        return
+      }
+      trips.forEach((trip) => {
+        const card = document.createElement('article')
+        card.append(text('small', String(trip.companyName || 'Empresa')))
+        card.append(text('h2', String(trip.destination || trip.serviceType || 'Viagem corporativa')))
+        const period = trip.startDate && trip.endDate && trip.startDate !== trip.endDate
+          ? `${date(trip.startDate)} a ${date(trip.endDate)}`
+          : date(trip.startDate || trip.endDate)
+        card.append(text('p', period))
+        const footer = document.createElement('footer')
+        footer.append(text('span', `${Array.isArray(trip.reservations) ? trip.reservations.length : 0} reserva(s)`))
+        footer.append(text('span', `${Array.isArray(trip.vouchers) ? trip.vouchers.length : 0} voucher(s)`))
+        card.append(footer)
+        container.append(card)
+      })
+    }
+
+    if (!('indexedDB' in window)) {
+      render(null)
+    } else {
+      readSnapshot().then(render).catch(() => render(null))
+    }
+  </script>
+</body>
+</html>

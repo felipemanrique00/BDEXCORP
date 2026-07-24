@@ -6,8 +6,7 @@ import { useStore } from '@/lib/store'
 import { AI_NAME, AI_SHORT_NAME } from '@/lib/branding'
 import { getStatusIA, type StatusIA } from '@/lib/ia-parser'
 import { reportClientFailure } from '@/lib/client-observability'
-import { getCurrentUser, hasPermission } from '@/lib/auth'
-import { addAtendimento } from '@/lib/atendimentos-storage'
+import { getCurrentUser } from '@/lib/auth'
 import {
   buildSystemContext,
   responderChatSistema,
@@ -15,7 +14,7 @@ import {
   type SystemAIResponse,
 } from '@/lib/ia-system-actions'
 import { AI_CONTEXT_EVENTS, type AIPageContext } from '@/components/ai/ai-assistant-fab'
-import { avaliarPerguntaIA, getIAConfig } from '@/lib/ia-config-storage'
+import { avaliarPerguntaIA, getIAConfig, loadIAConfig } from '@/lib/ia-config-storage'
 import { aiErrorUserMessage } from '@/lib/ai-friendly-errors'
 import {
   Bot,
@@ -36,6 +35,9 @@ import {
 import { toast } from 'sonner'
 import type { AssistantSetting } from '@/lib/assistant/types'
 import { getAssistantSettingsClient } from '@/lib/assistant-settings-client'
+import { prepareAiActionProposalClient } from '@/lib/ai-action-client'
+import type { AiActionProposal } from '@/lib/ai-actions'
+import { AiActionProposalCard } from '@/components/ai/ai-action-proposal-card'
 
 interface QuickMsg {
   id: string
@@ -54,9 +56,8 @@ const SUGESTOES = [
 ]
 
 export function QuickAIPopup() {
-  const { empresas, funcionarios, hoteis, politicas, addHotel } = useStore()
+  const { empresas, funcionarios, hoteis, politicas } = useStore()
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeCadastrarHoteis = user?.role === 'master' && hasPermission(user, 'cadastrar_hoteis')
   const [open, setOpen] = useState(false)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -84,6 +85,9 @@ export function QuickAIPopup() {
   useEffect(() => {
     getStatusIA().then(setStatus).catch((error) => {
       reportClientFailure('ai_status_load_failed', error, { component: 'quick-ai-popup' })
+    })
+    loadIAConfig().catch((error) => {
+      reportClientFailure('ai_config_load_failed', error, { component: 'quick-ai-popup' })
     })
     getAssistantSettingsClient().then((settings) => {
       if (settings) setAssistantSettings(settings)
@@ -160,8 +164,10 @@ export function QuickAIPopup() {
 
       const ctx = buildSystemContext({ empresas, funcionarios, hoteis, politicas })
       const acao = await responderComIASistema(textoParaAcao, ctx, {
-        addHotel: iaConfig.permitirCadastrarHoteis && podeCadastrarHoteis && !iaConfig.exigirConfirmacaoExecucao ? addHotel : undefined,
-        createAtendimento: iaConfig.permitirCriarDemandas && !iaConfig.exigirConfirmacaoExecucao ? addAtendimento : undefined,
+        prepareAction:
+          iaConfig.permitirCadastrarHoteis || iaConfig.permitirCriarDemandas
+            ? prepareAiActionProposalClient
+            : undefined,
         currentUser: user ? { id: user.id, name: user.name } : undefined,
         politicas,
         allowInternet: iaConfig.permitirInternet,
@@ -423,7 +429,29 @@ export function QuickAIPopup() {
               )}
               <MessageContent content={msg.content} />
             </div>
-            {msg.response && <RespostaExtras response={msg.response} />}
+            {msg.response && (
+              <RespostaExtras
+                response={msg.response}
+                onProposalChange={(next) => {
+                  setMsgs((current) =>
+                    current.map((item) => {
+                      if (!item.response?.actionProposals?.some((proposal) => proposal.id === next.id)) {
+                        return item
+                      }
+                      return {
+                        ...item,
+                        response: {
+                          ...item.response,
+                          actionProposals: item.response.actionProposals.map((proposal) =>
+                            proposal.id === next.id ? next : proposal,
+                          ),
+                        },
+                      }
+                    }),
+                  )
+                }}
+              />
+            )}
           </div>
         ))}
 
@@ -518,12 +546,31 @@ function renderInlineMarkdown(line: string) {
   })
 }
 
-function RespostaExtras({ response }: { response: SystemAIResponse }) {
-  const hasExtras = Boolean(response.links?.length || response.cards?.length || response.sources?.length)
+function RespostaExtras({
+  response,
+  onProposalChange,
+}: {
+  response: SystemAIResponse
+  onProposalChange: (proposal: AiActionProposal) => void
+}) {
+  const hasExtras = Boolean(
+    response.actionProposals?.length
+    || response.links?.length
+    || response.cards?.length
+    || response.sources?.length,
+  )
   if (!hasExtras) return null
 
   return (
     <div className="mt-2 space-y-2 text-left">
+      {response.actionProposals?.map((proposal) => (
+        <AiActionProposalCard
+          key={proposal.id}
+          proposal={proposal}
+          compact
+          onChange={onProposalChange}
+        />
+      ))}
       {response.links?.length ? (
         <div className="flex flex-wrap gap-2">
           {response.links.map((link) => {

@@ -14,12 +14,9 @@ build/
 .bbt-storage/
 .server-backups/
 .server-runtime/
+.runtime/
 .DS_Store
 *.log
 *.tsbuildinfo
 public/vendor/pdf.worker.min.mjs
 .vscode/settings.json
-.env.production
-
-.env*
-*.env

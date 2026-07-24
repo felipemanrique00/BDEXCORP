@@ -1,6 +1,6 @@
 import 'server-only'
 
-import { queryDatabase } from '@/lib/server/database'
+import { queryDatabase, withTenantTransaction } from '@/lib/server/database'
 import { logError } from '@/lib/server/logger'
 import { getRequestContext } from '@/lib/server/request-context'
 
@@ -26,24 +26,23 @@ export async function writeAuditEvent(event: AuditEvent): Promise<void> {
   const requestId = event.requestId === undefined ? context?.requestId || null : event.requestId
 
   try {
-    await queryDatabase(
-      `insert into audit_logs (
-         tenant_id, actor_user_id, request_id, action, entity_type, entity_id,
-         result, ip_address, user_agent, metadata
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9, $10::jsonb)`,
-      [
-        tenantId,
-        actorUserId,
-        isUuid(requestId) ? requestId : null,
-        event.action,
-        event.entityType || null,
-        event.entityId || null,
-        event.result,
-        normalizeIp(event.ipAddress),
-        truncate(event.userAgent, 512),
-        JSON.stringify(sanitizeMetadata(event.metadata || {})),
-      ],
-    )
+    const values = [
+      tenantId,
+      actorUserId,
+      isUuid(requestId) ? requestId : null,
+      event.action,
+      event.entityType || null,
+      event.entityId || null,
+      event.result,
+      normalizeIp(event.ipAddress),
+      truncate(event.userAgent, 512),
+      JSON.stringify(sanitizeMetadata(event.metadata || {})),
+    ]
+    if (tenantId) {
+      await withTenantTransaction(tenantId, (client) => client.query(AUDIT_INSERT_SQL, values))
+    } else {
+      await queryDatabase(AUDIT_INSERT_SQL, values)
+    }
   } catch (error) {
     logError('audit_log_write_failed', error, {
       errorCode: 'AUDIT_WRITE_FAILED',
@@ -55,8 +54,13 @@ export async function writeAuditEvent(event: AuditEvent): Promise<void> {
   }
 }
 
+const AUDIT_INSERT_SQL = `insert into audit_logs (
+  tenant_id, actor_user_id, request_id, action, entity_type, entity_id,
+  result, ip_address, user_agent, metadata
+) values ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9, $10::jsonb)`
+
 function isCriticalAuditAction(action: string): boolean {
-  return /^(auth\.|platform\.|system\.reset|user\.|finance\.|reservation\.|emission\.)/.test(action)
+  return /^(auth\.|platform\.|system\.reset|user\.|finance\.|reservation\.|emission\.|policy\.|approval\.|workflow\.|travel\.lifecycle\.)/.test(action)
 }
 
 function sanitizeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {

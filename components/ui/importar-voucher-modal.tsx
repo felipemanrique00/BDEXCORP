@@ -1,14 +1,26 @@
 'use client'
 import { todayISODate } from '@/lib/date'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Modal } from '@/components/ui/modal'
 import { toast } from 'sonner'
 import { useStore } from '@/lib/store'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
-import { addAtendimento, anexarVoucherAtendimento, deleteAtendimento, registrarLog } from '@/lib/atendimentos-storage'
+import {
+  criarAtendimentoParaLista,
+  getAllAtendimentos,
+  registrarLog,
+} from '@/lib/atendimentos-storage'
+import { persistNewDemandWithCompatibility } from '@/lib/demand-persistence-client'
 import { addVoucher, deleteVoucher, type Voucher } from '@/lib/vouchers-storage'
-import { addVoucherEmitido, deleteVoucherEmitido } from '@/lib/vouchers-emitidos-storage'
-import { sincronizarVoucherOperacional } from '@/lib/operational-sync'
+import {
+  createVoucherOnServer,
+  removeVoucherOnServer,
+  updateVoucherOnServer,
+} from '@/lib/voucher-persistence-client'
+import {
+  createFinancialDemandSyncKey,
+  syncFinancialEntriesFromDemandsOnServer,
+} from '@/lib/finance-persistence-client'
 import { parseVoucher, type VoucherParsed } from '@/lib/voucher-parser'
 import { buscarFuncionariosPorNomeInteligente } from '@/lib/funcionario-identidade'
 import {
@@ -21,6 +33,7 @@ import { CONFIG_COBRANCA_PADRAO, calcularFinanceiro } from '@/types'
 import { formatCurrency } from '@/lib/utils'
 import { reportClientFailure } from '@/lib/client-observability'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 interface Props {
   open: boolean
@@ -47,14 +60,28 @@ function diffDays(d1: string, d2: string): number {
 
 export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
   const { empresas, funcionarios, hoteis } = useStore()
+  const { includesCompany } = useCorporateCompanyScope()
+  const empresasNoContexto = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'criar_demandas')),
+    [empresas, includesCompany],
+  )
+  const empresaIdsNoContexto = useMemo(
+    () => new Set(empresasNoContexto.map((empresa) => empresa.id)),
+    [empresasNoContexto],
+  )
+  const funcionariosNoContexto = useMemo(
+    () => funcionarios.filter((funcionario) => empresaIdsNoContexto.has(funcionario.company_id)),
+    [empresaIdsNoContexto, funcionarios],
+  )
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeVerFinanceiro = hasPermission(user, 'ver_financeiro')
 
   const [file, setFile] = useState<File | null>(null)
   const [parsed, setParsed] = useState<VoucherParsed | null>(null)
   const [loading, setLoading] = useState(false)
 
   const [empresaId, setEmpresaId] = useState('')
+  const podeVerFinanceiro = hasPermission(user, 'ver_financeiro')
+    && includesCompany(empresaId, 'ver_financeiro')
   const [funcionarioId, setFuncionarioId] = useState<string | null>(null)
   const [sugestoesFunc, setSugestoesFunc] = useState<FuncMatch[]>([])
   const [hotelId, setHotelId] = useState<number | ''>('')
@@ -75,6 +102,13 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
     }
   }, [open])
 
+  useEffect(() => {
+    if (empresaId && !empresaIdsNoContexto.has(empresaId)) {
+      setEmpresaId('')
+      setFuncionarioId(null)
+    }
+  }, [empresaId, empresaIdsNoContexto])
+
   async function handleFile(f: File) {
     setFile(f)
     setLoading(true)
@@ -86,7 +120,7 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
       let empresaDetectadaId = empresaId || ''
       if (r.empresa_nome) {
         const en = r.empresa_nome.toLowerCase()
-        const emp = empresas.find((e) =>
+        const emp = empresasNoContexto.find((e) =>
           e.nome.toLowerCase().includes(en) || en.includes(e.nome.toLowerCase().split(' ')[0])
         )
         if (emp) {
@@ -97,7 +131,7 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
 
       // Match funcionário
       if (r.passageiro) {
-        const matches = encontrarFuncionariosVinculaveis(r.passageiro, funcionarios, empresaDetectadaId || undefined)
+        const matches = encontrarFuncionariosVinculaveis(r.passageiro, funcionariosNoContexto, empresaDetectadaId || undefined)
         setSugestoesFunc(matches)
         const [melhor, segundo] = matches
         if (melhor && melhor.score >= 84 && (!segundo || melhor.score - segundo.score >= 8)) {
@@ -143,7 +177,7 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
       const custo = tarifa * noites
       setValorCusto(custo)
 
-      const empresa = empresas.find((e) => e.id === empresaId)
+      const empresa = empresasNoContexto.find((e) => e.id === empresaId)
       const cfg = empresa?.config_cobranca || CONFIG_COBRANCA_PADRAO
       if (cfg.aplicar_markup && cfg.markup_padrao_pct > 0) {
         setValorVenda(custo * (1 + cfg.markup_padrao_pct / 100))
@@ -151,7 +185,7 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
         setValorVenda(custo)
       }
     }
-  }, [hotelId, parsed, empresaId, empresas, hoteis])
+  }, [hotelId, parsed, empresaId, empresasNoContexto, hoteis])
 
   async function salvarComoDemanda() {
     if (!user) { toast.error('Faça login.'); return }
@@ -165,7 +199,8 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
     let arquivoCriado: Voucher | null = null
     let voucherEmitidoCriado: VoucherEmitido | null = null
     try {
-      const empresa = empresas.find((e) => e.id === empresaId)
+      const empresa = empresasNoContexto.find((e) => e.id === empresaId)
+      if (!empresa) throw new Error('Empresa fora do escopo autorizado.')
       const cfg = empresa?.config_cobranca || CONFIG_COBRANCA_PADRAO
       const hotel = hotelId ? hoteis.find((x) => x.id === hotelId) : null
 
@@ -210,24 +245,21 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
         finalizado_em: parsed.data_emissao || todayISODate(),
       }
 
-      const nova = addAtendimento(payload)
-      if (!nova) throw new Error('Falha ao criar demanda')
-      demandaCriada = nova
+      const preparada = criarAtendimentoParaLista(payload, getAllAtendimentos())
 
       if (file) {
         arquivoCriado = await addVoucher({
           file,
           funcionario_id: funcionarioId,
-          demanda_id: nova.id,
+          demanda_id: preparada.id,
           descricao: `Voucher ${parsed.voucher_numero || 'sem numero'} · ${parsed.passageiro}`,
         })
-        anexarVoucherAtendimento(nova.id, arquivoCriado.id)
       }
 
       const voucherEstruturado: Omit<VoucherEmitido, 'id' | 'numero' | 'created_at' | 'updated_at'> = {
         tipo: 'Hotel',
         status: 'emitido',
-        atendimento_id: nova.id,
+        atendimento_id: preparada.id,
         empresa_id: empresaId,
         funcionario_id: funcionarioId,
         passageiro_nome: parsed.passageiro,
@@ -251,7 +283,7 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
         total: valorVenda || valorCusto || 0,
         observacoes: payload.observacoes,
         observacoes_internas: [
-          `demanda_origem=${nova.id}`,
+          `demanda_origem=${preparada.id}`,
           file ? `arquivo=${file.name}` : '',
         ].filter(Boolean).join(' | '),
         origem_voucher: 'pdf',
@@ -261,10 +293,42 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
         emitido_por_user_name: user.name,
       }
 
-      const voucher = addVoucherEmitido(voucherEstruturado)
-      if (!voucher) throw new Error('Falha ao preparar o voucher estruturado.')
+      const voucher = await createVoucherOnServer(voucherEstruturado)
       voucherEmitidoCriado = voucher
-      if (voucher) sincronizarVoucherOperacional(voucher, { agente_user_id: user.id, origem: 'E-mail' })
+      preparada.voucher_ids = [
+        ...(arquivoCriado ? [arquivoCriado.id] : []),
+        voucher.id,
+      ]
+      const persistida = await persistNewDemandWithCompatibility(preparada)
+      const nova = persistida.demand
+      demandaCriada = nova
+      try {
+        voucherEmitidoCriado = await updateVoucherOnServer(
+          voucher.id,
+          { atendimento_id: nova.id },
+          voucher.version,
+        )
+      } catch (linkError) {
+        reportClientFailure('voucher_import_link_failed', linkError, {
+          component: 'voucher-import',
+          entityId: voucher.id,
+          relatedEntityId: nova.id,
+        })
+        toast.warning('A demanda foi criada. O vínculo inverso do voucher será reconciliado depois.')
+      }
+      await syncFinancialEntriesFromDemandsOnServer(
+        [nova.id],
+        createFinancialDemandSyncKey(
+          'voucher-import',
+          [nova.id],
+          [
+            nova.updated_at || '',
+            nova.status,
+            nova.valor_venda || nova.valor_final || nova.valor_cotacao || 0,
+            nova.valor_custo || 0,
+          ].join('|'),
+        ),
+      )
 
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'importar',
@@ -278,15 +342,23 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
       onSaved?.(nova)
       onClose()
     } catch (error) {
-      if (arquivoCriado) {
+      if (!demandaCriada && arquivoCriado) {
         try {
           await deleteVoucher(arquivoCriado.id)
         } catch (cleanupError) {
           reportClientFailure('voucher_import_cleanup_failed', cleanupError, { component: 'voucher-import' })
         }
       }
-      if (voucherEmitidoCriado) deleteVoucherEmitido(voucherEmitidoCriado.id)
-      if (demandaCriada) deleteAtendimento(demandaCriada.id)
+      if (!demandaCriada && voucherEmitidoCriado) {
+        try {
+          await removeVoucherOnServer(voucherEmitidoCriado.id)
+        } catch (cleanupError) {
+          reportClientFailure('voucher_import_relational_cleanup_failed', cleanupError, {
+            component: 'voucher-import',
+            entityId: voucherEmitidoCriado.id,
+          })
+        }
+      }
       try {
         await commitPendingRemoteStorage()
       } catch (cleanupError) {
@@ -302,9 +374,9 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
     valor_cotacao: valorVenda,
     valor_custo: valorCusto,
     valor_venda: valorVenda,
-    taxa_ativa: empresas.find((e) => e.id === empresaId)?.config_cobranca?.aplicar_taxa,
-    taxa_percentual: empresas.find((e) => e.id === empresaId)?.config_cobranca?.taxa_padrao_pct,
-    markup_desabilitado: !empresas.find((e) => e.id === empresaId)?.config_cobranca?.aplicar_markup,
+    taxa_ativa: empresasNoContexto.find((e) => e.id === empresaId)?.config_cobranca?.aplicar_taxa,
+    taxa_percentual: empresasNoContexto.find((e) => e.id === empresaId)?.config_cobranca?.taxa_padrao_pct,
+    markup_desabilitado: !empresasNoContexto.find((e) => e.id === empresaId)?.config_cobranca?.aplicar_markup,
   })
 
   return (
@@ -369,7 +441,7 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
             <Campo label="Empresa *">
               <select value={empresaId} onChange={(e) => setEmpresaId(e.target.value)} className="bbt-input">
                 <option value="">Selecione...</option>
-                {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+                {empresasNoContexto.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
               </select>
             </Campo>
             <Campo label="Hotel (catálogo)">

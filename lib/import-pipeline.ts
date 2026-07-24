@@ -122,13 +122,95 @@ export function resolverFuncionario(
 // FASE 5: DETECÇÃO DE CONFLITO/DUPLICIDADE
 // ============================================================
 
+export interface IndiceDuplicatasAtendimento {
+  porVenda: Map<string, Atendimento>
+  porEmpresaVenda: Map<string, Atendimento>
+  porPessoaDataEmpresa: Map<string, Atendimento>
+}
+
+function chaveVenda(vendaNumero: string): string {
+  return vendaNumero.trim().toUpperCase()
+}
+
+function chaveEmpresaVenda(empresaId: string, vendaNumero: string): string {
+  return `${empresaId}\u001f${chaveVenda(vendaNumero)}`
+}
+
+function chavePessoaDataEmpresa(empresaId: string, passageiro: string, data: string): string {
+  return `${empresaId}\u001f${data}\u001f${chavedeNome(passageiro)}`
+}
+
+export function criarIndiceDuplicatas(
+  atendimentos: Atendimento[],
+): IndiceDuplicatasAtendimento {
+  const indice: IndiceDuplicatasAtendimento = {
+    porVenda: new Map(),
+    porEmpresaVenda: new Map(),
+    porPessoaDataEmpresa: new Map(),
+  }
+  atendimentos.forEach((atendimento) => indexarAtendimentoDuplicado(indice, atendimento, false))
+  return indice
+}
+
+export function indexarAtendimentoDuplicado(
+  indice: IndiceDuplicatasAtendimento,
+  atendimento: Atendimento,
+  sobrescrever = true,
+): void {
+  const set = (map: Map<string, Atendimento>, key: string) => {
+    if (sobrescrever || !map.has(key)) map.set(key, atendimento)
+  }
+  if (atendimento.venda_numero) {
+    set(indice.porVenda, chaveVenda(atendimento.venda_numero))
+    if (atendimento.empresa_id) {
+      set(
+        indice.porEmpresaVenda,
+        chaveEmpresaVenda(atendimento.empresa_id, atendimento.venda_numero),
+      )
+    }
+  }
+  if (atendimento.empresa_id && atendimento.passageiro_nome && atendimento.data_atendimento) {
+    set(
+      indice.porPessoaDataEmpresa,
+      chavePessoaDataEmpresa(
+        atendimento.empresa_id,
+        atendimento.passageiro_nome,
+        atendimento.data_atendimento,
+      ),
+    )
+  }
+}
+
+export function detectarDuplicataNoIndice(
+  indice: IndiceDuplicatasAtendimento,
+  candidato: { venda_numero?: string; passageiro?: string; data?: string; empresa_id?: string },
+): Atendimento | null {
+  if (candidato.venda_numero) {
+    const porVenda = candidato.empresa_id
+      ? indice.porEmpresaVenda.get(chaveEmpresaVenda(candidato.empresa_id, candidato.venda_numero))
+      : indice.porVenda.get(chaveVenda(candidato.venda_numero))
+    if (porVenda) return porVenda
+  }
+  if (candidato.passageiro && candidato.data && candidato.empresa_id) {
+    return indice.porPessoaDataEmpresa.get(
+      chavePessoaDataEmpresa(candidato.empresa_id, candidato.passageiro, candidato.data),
+    ) || null
+  }
+  return null
+}
+
 export function detectarDuplicata(
   atendimentos: Atendimento[],
   candidato: { venda_numero?: string; passageiro?: string; data?: string; empresa_id?: string }
 ): Atendimento | null {
   // 1. Match exato por venda_numero (mais forte)
   if (candidato.venda_numero) {
-    const a = atendimentos.find((x) => x.venda_numero === candidato.venda_numero)
+    const venda = chaveVenda(candidato.venda_numero)
+    const a = atendimentos.find((x) =>
+      Boolean(x.venda_numero)
+      && chaveVenda(x.venda_numero!) === venda
+      && (!candidato.empresa_id || x.empresa_id === candidato.empresa_id)
+    )
     if (a) return a
   }
   // 2. Match por passageiro + data + empresa

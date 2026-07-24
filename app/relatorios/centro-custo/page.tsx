@@ -5,8 +5,8 @@ import { useSearchParams } from 'next/navigation'
 import { Suspense, useMemo } from 'react'
 import { useStore } from '@/lib/store'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
-import { canEditGlobal, canViewCompany, canViewGroup, getEmpresasPermitidas } from '@/lib/auth'
-import { getEmpresasDoGrupo } from '@/lib/grupos'
+import { canAccessCompanyPermission, canEditGlobal, getEmpresasPermitidas } from '@/lib/auth'
+import { getEmpresasDoGrupo, resolverEscopoGrupoUsuario } from '@/lib/grupos'
 import { CorporateReport } from '../_components/corporate-report'
 import { ReportToolbar } from '../_components/report-toolbar'
 import { useReportRuntime } from '../_components/use-report-runtime'
@@ -36,6 +36,7 @@ function RelatorioCentroCustoInner() {
   const empresasEscopo = useMemo(() => {
     if (empresaId) return empresa ? [empresa] : []
     const permitidas = getEmpresasPermitidas(user, empresas, gruposEmpresariais)
+      .filter((item) => canAccessCompanyPermission(user, item.id, 'ver_relatorios', empresas, gruposEmpresariais))
     if (grupoId) return getEmpresasDoGrupo(grupoId, permitidas, gruposEmpresariais)
     return permitidas
   }, [empresa, empresaId, empresas, grupoId, gruposEmpresariais, user])
@@ -62,13 +63,14 @@ function RelatorioCentroCustoInner() {
   function imprimir() { window.print() }
 
   if (!ready) return <div className="p-8 text-center text-sm text-slate-500">Carregando relatório...</div>
-  if (empresaId && !canViewCompany(user, empresaId, empresas, gruposEmpresariais)) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
-  if (grupoId && !canViewGroup(user, grupo)) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
+  if (empresaId && !canAccessCompanyPermission(user, empresaId, 'ver_relatorios', empresas, gruposEmpresariais)) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
+  if (grupoId && !resolverEscopoGrupoUsuario(user, grupo, empresas, 'ver_relatorios').podeAcessar) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
 
   return (
     <>
       <ReportToolbar onPrint={imprimir} />
       <CorporateReport
+        canExport={empresasEscopo.length > 0 && empresasEscopo.every((item) => canAccessCompanyPermission(user, item.id, 'exportar_relatorios', empresas, gruposEmpresariais))}
         title={visao === 'agencia' ? 'Relatório Interno por Centro de Custo' : 'Relatório por Centro de Custo'}
         eyebrow={visao === 'agencia' ? 'Visão da agência' : 'Visão da empresa'}
         visao={visao}

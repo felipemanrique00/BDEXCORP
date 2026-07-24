@@ -1,6 +1,6 @@
 'use client'
 import { todayISODate } from '@/lib/date'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { toast } from 'sonner'
@@ -16,16 +16,33 @@ import {
   criarAtendimentoParaLista,
   getAllAtendimentos,
   persistirAtendimentos,
+  persistirAtendimentosRecebidosDoServidor,
   registrarLog,
 } from '@/lib/atendimentos-storage'
+import {
+  createDemandImportBatchKey,
+  DemandClientError,
+  importDemandBatchesOnServer,
+} from '@/lib/demands-client'
+import {
+  createFinancialDemandSyncKey,
+  syncFinancialEntriesFromDemandsOnServer,
+} from '@/lib/finance-persistence-client'
+import { gerarLancamentosDosAtendimentos } from '@/lib/financeiro'
+import {
+  createVoucherBatchKey,
+  upsertVoucherBatchOnServer,
+} from '@/lib/voucher-persistence-client'
+import { voucherFromImportedEmission } from '@/lib/emissions/imported-emission-voucher'
 import { getCurrentUser, hasPermission, getAgentesBBT } from '@/lib/auth'
 import { formatCurrency } from '@/lib/utils'
 import { encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
-import { safeGetRaw, safeSetJSON } from '@/lib/storage-quota'
-import type { Atendimento, Empresa } from '@/types'
+import { normalizeExternalCompanyName } from '@/lib/integrations/company-mapping'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import type { Atendimento, Empresa, VoucherEmitido } from '@/types'
 import type { TechEmissionRecord, TechEmissionsReport } from '@/lib/integrations/tech/tech-emissions-types'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
-const TECH_COMPANY_MAPPING_KEY = 'bbt-tech-emission-company-mapping-v1'
 const SKIP_TECH_CLIENT = '__skip__'
 
 interface LinhaUnif {
@@ -67,7 +84,14 @@ type ResumoUnif = {
 export default function ImportarEmissoesPage() {
   const router = useRouter()
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const { empresas, funcionarios, updateEmpresa } = useStore()
+  const { empresas, funcionarios } = useStore()
+  const { includesCompany } = useCorporateCompanyScope()
+  const empresasPermitidasImportacao = useMemo(
+    () => empresas.filter((empresa) => (
+      includesCompany(empresa.id, 'importar_planilhas') && includesCompany(empresa.id, 'criar_demandas')
+    )),
+    [empresas, includesCompany],
+  )
 
   const [file, setFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
@@ -80,7 +104,7 @@ export default function ImportarEmissoesPage() {
   const [techCompanyMappings, setTechCompanyMappings] = useState<Record<string, string>>({})
 
   // check permissão
-  if (user && !hasPermission(user, 'importar_planilhas')) {
+  if (user && (!hasPermission(user, 'importar_planilhas') || empresasPermitidasImportacao.length === 0)) {
     return <div className="p-8 text-center text-red-600">Você não tem permissão para importar planilhas.</div>
   }
 
@@ -155,22 +179,22 @@ export default function ImportarEmissoesPage() {
       }
 
       const report = payload.report as TechEmissionsReport
-      const savedMappings = loadTechCompanyMappings()
+      const savedMappings = await loadTechCompanyMappings()
       const mappings: Record<string, string> = {}
       for (const clientName of Object.keys(report.byClient)) {
-        const centrallyMapped = empresas.filter((empresa) =>
+        const centrallyMapped = empresasPermitidasImportacao.filter((empresa) =>
           (empresa.tech_travel_client_names || []).some((alias) => normalizeCompanyName(alias) === normalizeCompanyName(clientName)),
         )
         if (centrallyMapped.length === 1) {
           mappings[clientName] = centrallyMapped[0].id
           continue
         }
-        const savedCompanyId = savedMappings[clientName]
-        if (savedCompanyId && empresas.some((empresa) => empresa.id === savedCompanyId)) {
+        const savedCompanyId = savedMappings[normalizeExternalCompanyName(clientName)]
+        if (savedCompanyId && empresasPermitidasImportacao.some((empresa) => empresa.id === savedCompanyId)) {
           mappings[clientName] = savedCompanyId
           continue
         }
-        const exactMatches = empresas.filter((empresa) => normalizeCompanyName(empresa.nome) === normalizeCompanyName(clientName))
+        const exactMatches = empresasPermitidasImportacao.filter((empresa) => normalizeCompanyName(empresa.nome) === normalizeCompanyName(clientName))
         if (exactMatches.length === 1) mappings[clientName] = exactMatches[0].id
       }
       setTechCompanyMappings(mappings)
@@ -197,22 +221,27 @@ export default function ImportarEmissoesPage() {
     }
   }
 
-  function atualizarMapeamentoTech(clientName: string, companyId: string) {
-    setTechCompanyMappings((current) => {
-      const next = { ...current, [clientName]: companyId }
-      saveTechCompanyMappings(next)
-      return next
-    })
-    if (!companyId || companyId === SKIP_TECH_CLIENT) return
-
-    const normalizedClient = normalizeCompanyName(clientName)
-    for (const empresa of empresas) {
-      const currentAliases = empresa.tech_travel_client_names || []
-      const aliasesWithoutClient = currentAliases.filter((alias) => normalizeCompanyName(alias) !== normalizedClient)
-      const nextAliases = empresa.id === companyId ? [...aliasesWithoutClient, clientName] : aliasesWithoutClient
-      if (!sameStringList(currentAliases, nextAliases)) {
-        updateEmpresa(empresa.id, { tech_travel_client_names: nextAliases })
+  async function atualizarMapeamentoTech(clientName: string, companyId: string) {
+    try {
+      const response = await fetch('/api/integrations/tech/emission-company-mappings', {
+        method: !companyId || companyId === SKIP_TECH_CLIENT ? 'DELETE' : 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          externalName: clientName,
+          ...(!companyId || companyId === SKIP_TECH_CLIENT ? {} : { companyId }),
+        }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || 'Nao foi possivel salvar o mapeamento da empresa.')
       }
+      setTechCompanyMappings((current) => ({
+        ...current,
+        [clientName]: companyId,
+      }))
+    } catch (error) {
+      console.error('[tech-company-mapping]', error)
+      toast.error(error instanceof Error ? error.message : 'Falha ao salvar o mapeamento da empresa.')
     }
   }
 
@@ -223,7 +252,7 @@ export default function ImportarEmissoesPage() {
    * - Agente (pelo código emissor)
    * E cria/atualiza o Atendimento
    */
-  function importar() {
+  async function importar() {
     if (!resumo || !user) return
     if (resumo.formato === 'tech') {
       const unresolved = Object.keys(resumo.por_cliente).filter((clientName) => !techCompanyMappings[clientName])
@@ -245,6 +274,9 @@ export default function ImportarEmissoesPage() {
       if (techId) byTechExternalId.set(techId, atendimento)
     }
     const agentes = getAgentesBBT()
+    const demandasAlteradas = new Map<string, Atendimento>()
+    const vouchersParaSalvar = new Map<string, VoucherEmitido>()
+    let demandasPersistidasRelacionalmente = false
 
     let criadas = 0, atualizadas = 0, ignoradas = 0
 
@@ -301,14 +333,14 @@ export default function ImportarEmissoesPage() {
         if (!linha.passageiro || !linha.venda_numero) { ignoradas++; continue }
         if (linha.empresa_id === SKIP_TECH_CLIENT) { ignoradas++; continue }
 
-        let empresa = linha.empresa_id ? empresas.find((item) => item.id === linha.empresa_id) : undefined
+        let empresa = linha.empresa_id ? empresasPermitidasImportacao.find((item) => item.id === linha.empresa_id) : undefined
         if (!empresa && linha.cod_cliente) {
-          empresa = empresas.find((e) =>
+          empresa = empresasPermitidasImportacao.find((e) =>
             (e.codigo_cliente || '').toLowerCase() === linha.cod_cliente!.toLowerCase()
           )
         }
         if (!empresa && linha.empresa_nome) {
-          empresa = findCompanyByExternalName(empresas, linha.empresa_nome)
+          empresa = findCompanyByExternalName(empresasPermitidasImportacao, linha.empresa_nome)
         }
         if (!empresa) { ignoradas++; continue }
 
@@ -410,10 +442,12 @@ export default function ImportarEmissoesPage() {
           } : undefined,
         }
 
+        let atendimentoSalvo: Atendimento | null = null
         if (existente) {
           const atualizado = atualizarAtendimentoNaLista(proximaLista, existente.id, payload, indexById)
           if (atualizado) {
             atualizadas++
+            atendimentoSalvo = atualizado
             byCompanyAndSale.set(emissionSaleKey(empresa.id, linha.venda_numero), atualizado)
             if (linha.tech) byTechExternalId.set(linha.tech.externalId, atualizado)
           } else {
@@ -425,12 +459,92 @@ export default function ImportarEmissoesPage() {
           indexById.set(nova.id, proximaLista.length - 1)
           byCompanyAndSale.set(emissionSaleKey(empresa.id, linha.venda_numero), nova)
           if (linha.tech) byTechExternalId.set(linha.tech.externalId, nova)
+          atendimentoSalvo = nova
           criadas++
+        }
+
+        if (atendimentoSalvo) {
+          const voucher = voucherFromImportedEmission(
+            linha,
+            atendimentoSalvo,
+            matchedFuncionarioId || atendimentoSalvo.funcionario_id || null,
+            resumo.formato,
+            { id: user.id, name: user.name },
+          )
+          const voucherIds = new Set([...(atendimentoSalvo.voucher_ids || []), voucher.id])
+          atendimentoSalvo.voucher_ids = [...voucherIds]
+          vouchersParaSalvar.set(voucher.id, voucher)
+          demandasAlteradas.set(atendimentoSalvo.id, atendimentoSalvo)
         }
       }
 
-      if ((criadas > 0 || atualizadas > 0) && !persistirAtendimentos(proximaLista)) {
-        throw new Error('Não foi possível persistir as emissões sem risco de perda de dados.')
+      if (demandasAlteradas.size > 0) {
+        const demandasDoLote = Array.from(demandasAlteradas.values())
+        try {
+          const importacao = await importDemandBatchesOnServer(
+            demandasDoLote,
+            resumo.formato === 'tech' ? 'tech_travel' : 'emissions',
+            createDemandImportBatchKey(
+              resumo.formato === 'tech' ? 'tech_travel' : 'emissions',
+              demandasDoLote,
+            ),
+          )
+          const retornadas = new Map(importacao.demands.map((demanda) => [demanda.id, demanda]))
+          const listaSincronizada = proximaLista.map((demanda) => retornadas.get(demanda.id) || demanda)
+          if (!persistirAtendimentosRecebidosDoServidor(listaSincronizada)) {
+            toast.warning('As emissoes foram salvas no servidor, mas o cache local sera renovado ao recarregar.')
+          }
+          criadas = importacao.inserted
+          atualizadas = importacao.updated
+          ignoradas += importacao.skipped
+          demandasPersistidasRelacionalmente = true
+        } catch (error) {
+          if (!(error instanceof DemandClientError) || error.code !== 'DEMAND_RELATIONAL_WRITE_DISABLED') {
+            throw error
+          }
+          if (!persistirAtendimentos(proximaLista)) {
+            throw new Error('Não foi possível persistir as emissões no modo legado.')
+          }
+          await commitPendingRemoteStorage()
+        }
+      }
+
+      const demandasDoLote = Array.from(demandasAlteradas.values())
+      if (demandasDoLote.length > 0) {
+        if (demandasPersistidasRelacionalmente) {
+          const ids = demandasDoLote.map((demanda) => demanda.id)
+          const stateFingerprint = demandasDoLote
+            .map((demanda) => [
+              demanda.id,
+              demanda.updated_at || '',
+              demanda.status,
+              demanda.valor_venda || demanda.valor_final || demanda.valor_cotacao || 0,
+              demanda.valor_custo || 0,
+            ].join('|'))
+            .sort()
+            .join('\n')
+          await syncFinancialEntriesFromDemandsOnServer(
+            ids,
+            createFinancialDemandSyncKey(
+              resumo.formato === 'tech' ? 'tech-travel' : 'emissions',
+              ids,
+              stateFingerprint,
+            ),
+          )
+
+          const vouchersDoLote = [...vouchersParaSalvar.values()]
+          if (vouchersDoLote.length > 0) {
+            await upsertVoucherBatchOnServer(
+              vouchersDoLote,
+              createVoucherBatchKey(
+                resumo.formato === 'tech' ? 'tech-travel-emissions' : 'emissions',
+                vouchersDoLote,
+              ),
+            )
+          }
+        } else {
+          gerarLancamentosDosAtendimentos(demandasDoLote)
+        }
       }
 
       registrarLog({
@@ -639,7 +753,7 @@ export default function ImportarEmissoesPage() {
                       className="bbt-input w-full"
                     >
                       <option value="">Selecione a empresa correta</option>
-                      {empresas.filter((empresa) => empresa.ativa).map((empresa) => <option key={empresa.id} value={empresa.id}>{empresa.nome}</option>)}
+                      {empresasPermitidasImportacao.filter((empresa) => empresa.ativa).map((empresa) => <option key={empresa.id} value={empresa.id}>{empresa.nome}</option>)}
                       <option value={SKIP_TECH_CLIENT}>Não importar este cliente</option>
                     </select>
                   </label>
@@ -818,10 +932,6 @@ function normalizeCompanyName(value: string): string {
     .toUpperCase()
 }
 
-function sameStringList(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index])
-}
-
 function findCompanyByExternalName(companies: Empresa[], externalName: string): Empresa | undefined {
   const normalized = normalizeCompanyName(externalName)
   if (!normalized) return undefined
@@ -845,22 +955,22 @@ function findCompanyByExternalName(companies: Empresa[], externalName: string): 
   return undefined
 }
 
-function loadTechCompanyMappings(): Record<string, string> {
-  if (typeof window === 'undefined') return {}
-  try {
-    const parsed = JSON.parse(safeGetRaw(TECH_COMPANY_MAPPING_KEY) || '{}')
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
+async function loadTechCompanyMappings(): Promise<Record<string, string>> {
+  const response = await fetch('/api/integrations/tech/emission-company-mappings', {
+    method: 'GET',
+    cache: 'no-store',
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok || !Array.isArray(payload?.mappings)) {
+    throw new Error(payload?.error || 'Nao foi possivel carregar os mapeamentos da Tech Travel.')
   }
-}
-
-function saveTechCompanyMappings(mappings: Record<string, string>): void {
-  if (typeof window === 'undefined') return
-  const safeMappings = Object.fromEntries(Object.entries(mappings).filter(([clientName, companyId]) => clientName && companyId))
-  if (!safeSetJSON(TECH_COMPANY_MAPPING_KEY, safeMappings)) {
-    // O mapeamento continua válido na sessão atual mesmo sem persistência local.
+  const mappings: Record<string, string> = {}
+  for (const mapping of payload.mappings) {
+    const normalized = normalizeExternalCompanyName(String(mapping?.normalizedExternalName || mapping?.externalName || ''))
+    const companyId = String(mapping?.companyId || '').trim()
+    if (normalized && companyId) mappings[normalized] = companyId
   }
+  return mappings
 }
 
 function buildTechMetadata(emission: TechEmissionRecord): Record<string, string | number | boolean | null | undefined> {

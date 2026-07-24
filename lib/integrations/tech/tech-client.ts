@@ -51,8 +51,8 @@ export async function techRequest<T = unknown>(
     }
     if (!options.skipPayloadAssertion) assertTechPayloadOk(data)
     return { data: data as T, endpoint: url, durationMs: Date.now() - startedAt }
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'AbortError') {
       throw new TechIntegrationError('Tempo limite excedido ao chamar a Tech Travel.', {
         status: 504,
         code: 'TECH_TIMEOUT',
@@ -60,10 +60,13 @@ export async function techRequest<T = unknown>(
       })
     }
     if (error instanceof TechIntegrationError) throw error
-    throw new TechIntegrationError(error?.message || 'Falha ao chamar a Tech Travel.', {
-      code: 'TECH_FETCH_ERROR',
-      details: { endpoint, request: maskSensitive(options.body) },
-    })
+    throw new TechIntegrationError(
+      error instanceof Error ? error.message : 'Falha ao chamar a Tech Travel.',
+      {
+        code: 'TECH_FETCH_ERROR',
+        details: { endpoint, request: maskSensitive(options.body) },
+      },
+    )
   } finally {
     clearTimeout(timeout)
   }

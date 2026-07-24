@@ -6,7 +6,9 @@ import {
   createSession,
   getClientIp,
 } from '@/lib/server/auth-service'
+import { writeAuditEvent } from '@/lib/server/audit-log'
 import { logError } from '@/lib/server/logger'
+import { beginMfaLogin } from '@/lib/server/mfa-service'
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
 import { secureSessionCookie, sessionCookieName, sessionMaxAgeSeconds } from '@/lib/server-auth'
@@ -59,7 +61,34 @@ export async function POST(request: Request) {
       )
     }
 
+    const mfa = await beginMfaLogin(authentication.principal, metadata)
+    if (mfa.required) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: mfa.mode === 'enroll' ? 'MFA_ENROLLMENT_REQUIRED' : 'MFA_REQUIRED',
+          error: mfa.mode === 'enroll'
+            ? 'Configure o autenticador para concluir o acesso.'
+            : 'Informe o codigo do autenticador para concluir o acesso.',
+          challengeToken: mfa.challengeToken,
+          challengeExpiresAt: mfa.expiresAt.toISOString(),
+          requestId: guard.requestId,
+        },
+        { status: 202, headers: { 'X-Request-Id': guard.requestId } },
+      )
+    }
+
     const session = await createSession(authentication.principal, metadata)
+    await writeAuditEvent({
+      action: 'auth.login',
+      result: 'success',
+      tenantId: session.principal.tenantId,
+      actorUserId: session.principal.user.id,
+      requestId: guard.requestId,
+      ipAddress: metadata.ipAddress,
+      userAgent: metadata.userAgent,
+      metadata: { authenticationLevel: 'password' },
+    })
     const response = NextResponse.json(
       {
         ok: true,

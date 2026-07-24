@@ -1,11 +1,12 @@
 import 'server-only'
 
-import { empresasPermitidasParaUsuario } from '@/lib/grupos'
-import { hasServerPermission } from '@/lib/security/api-guard'
+import { guardApiRequest, hasServerPermission } from '@/lib/security/api-guard'
 import { getStorageEntries } from '@/lib/server-db'
+import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
 import type { FileEntityType, FileLinkInput } from '@/lib/server/file-storage'
+import type { RateLimitPolicy } from '@/lib/server/rate-limit'
 import type { RequestPrincipal } from '@/lib/server/request-context'
-import type { Atendimento, Empresa, Funcionario, GrupoEmpresarial } from '@/types'
+import type { Atendimento, Funcionario, Permissoes } from '@/types'
 
 export class FileAccessDeniedError extends Error {
   constructor() {
@@ -13,24 +14,38 @@ export class FileAccessDeniedError extends Error {
   }
 }
 
+export function guardFileEntityRequest(request: Request, rateLimit: RateLimitPolicy) {
+  return guardApiRequest(request, {
+    requireAuth: true,
+    authorization: {
+      action: 'read',
+      resource: 'session',
+    },
+    rateLimit,
+  })
+}
+
 export async function assertFileEntityAccess(
   principal: RequestPrincipal,
   link: FileLinkInput,
 ): Promise<void> {
-  const entries = await getStorageEntries(principal.tenantId)
-  const persisted = asRecord(entries['bbt-data-v4'])
-  const state = asRecord(persisted.state || persisted)
-  const companies = arrayOf<Empresa>(state.empresas)
-  const groups = arrayOf<GrupoEmpresarial>(state.gruposEmpresariais)
-  const allowedCompanyIds = new Set(
-    empresasPermitidasParaUsuario(principal.user, companies, groups).map((company) => company.id),
-  )
   if (link.entityType === 'import') {
     if (hasServerPermission(principal.user, 'importar_planilhas')) return
     throw new FileAccessDeniedError()
   }
+  const entries = await getStorageEntries(principal.tenantId)
+  const persisted = asRecord(entries['bbt-data-v4'])
+  const state = asRecord(persisted.state || persisted)
   const companyId = resolveCompanyId(link.entityType, link.entityId, state, entries)
-  if (companyId && allowedCompanyIds.has(companyId)) return
+  const permission = fileReadPermission(link.entityType)
+  if (companyId) {
+    try {
+      await requireCompanyAccess(principal, companyId, permission)
+      return
+    } catch {
+      // The public error below intentionally does not reveal whether the entity exists.
+    }
+  }
   throw new FileAccessDeniedError()
 }
 
@@ -55,10 +70,33 @@ export async function assertFileEntityMutationAccess(
 ): Promise<void> {
   await assertFileEntityAccess(principal, link)
   if (link.entityType === 'import') return
-  if (principal.user.role === 'master' || principal.user.role === 'company_admin') return
-  if (link.entityType === 'company' && hasServerPermission(principal.user, 'cadastrar_empresas')) return
-  if (link.entityType === 'employee' && hasServerPermission(principal.user, 'cadastrar_funcionarios')) return
+  const entries = await getStorageEntries(principal.tenantId)
+  const persisted = asRecord(entries['bbt-data-v4'])
+  const state = asRecord(persisted.state || persisted)
+  const companyId = resolveCompanyId(link.entityType, link.entityId, state, entries)
+  if (companyId) {
+    try {
+      await requireCompanyAccess(principal, companyId, fileMutationPermission(link.entityType))
+      return
+    } catch {
+      // Use the same public error for missing entities and denied mutations.
+    }
+  }
   throw new FileAccessDeniedError()
+}
+
+function fileReadPermission(entityType: FileEntityType): keyof Permissoes {
+  if (entityType === 'employee') return 'ver_funcionarios'
+  if (entityType === 'demand') return 'ver_demandas'
+  if (entityType === 'voucher') return 'ver_vouchers'
+  return 'ver_empresas'
+}
+
+function fileMutationPermission(entityType: FileEntityType): keyof Permissoes {
+  if (entityType === 'employee') return 'gerenciar_funcionarios'
+  if (entityType === 'demand') return 'criar_demandas'
+  if (entityType === 'voucher') return 'ver_vouchers'
+  return 'alterar_configuracoes'
 }
 
 export async function assertStoredFileMutationAccess(

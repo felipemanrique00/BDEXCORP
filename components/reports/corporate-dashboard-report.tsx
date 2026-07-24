@@ -26,13 +26,14 @@ import {
 } from 'lucide-react'
 
 import { CorporateMapLeaflet } from '@/components/reports/corporate-map-leaflet'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
-import { getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
+import { canAccessCompanyPermission, getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
 import { buildCsv, downloadTextFile, imageUrlToDataUrl } from '@/lib/browser-download'
 import { BRAND_LOGO_DARK } from '@/lib/branding'
 import { BBTLogo } from '@/components/branding/bbt-logo'
 import { addDaysISODate, todayISODate } from '@/lib/date'
-import { getEmpresasDoGrupo } from '@/lib/grupos'
+import { getEmpresasDoGrupo, resolverEscopoGrupoUsuario } from '@/lib/grupos'
 import { montarCorporateDashboardStandaloneHtml } from '@/lib/reporting/corporate-dashboard-html'
 import {
   categoriaColor,
@@ -80,9 +81,24 @@ export function CorporateDashboardReport({
 }: Props = {}) {
   const searchParams = useSearchParams()
   const { empresas, funcionarios, gruposEmpresariais } = useStore()
+  const { includesCompany } = useCorporateCompanyScope()
   const user = userOverride ?? (typeof window !== 'undefined' ? getCurrentUser() : null)
-  const empresasPermitidas = useMemo(() => getEmpresasPermitidas(user, empresas, gruposEmpresariais), [empresas, gruposEmpresariais, user])
+  const empresasPermitidas = useMemo(
+    () => getEmpresasPermitidas(user, empresas, gruposEmpresariais)
+      .filter((empresa) => (
+        canAccessCompanyPermission(user, empresa.id, 'ver_relatorios', empresas, gruposEmpresariais)
+        && (lockScope || includesCompany(empresa.id, 'ver_relatorios'))
+      )),
+    [empresas, gruposEmpresariais, includesCompany, lockScope, user],
+  )
   const empresasPermitidasIds = useMemo(() => new Set(empresasPermitidas.map((empresa) => empresa.id)), [empresasPermitidas])
+  const gruposPermitidos = useMemo(() => gruposEmpresariais.filter((grupo) => {
+    if (grupo.ativo === false) return false
+    if (user?.corporate_access) {
+      return resolverEscopoGrupoUsuario(user, grupo, empresas, 'ver_relatorios').podeVerConsolidado
+    }
+    return getEmpresasDoGrupo(grupo.id, empresasPermitidas, gruposEmpresariais).length > 0
+  }), [empresas, empresasPermitidas, gruposEmpresariais, user])
 
   const [dataInicio, setDataInicio] = useState(searchParams.get('inicio') || addDaysISODate(todayISODate(), -365))
   const [dataFim, setDataFim] = useState(searchParams.get('fim') || todayISODate())
@@ -99,8 +115,11 @@ export function CorporateDashboardReport({
 
   const empresasDoGrupo = useMemo(() => {
     if (!grupoId) return []
+    const grupo = gruposEmpresariais.find((item) => item.id === grupoId)
+    const ids = new Set(resolverEscopoGrupoUsuario(user, grupo, empresas, 'ver_relatorios').empresaIdsPermitidas)
     return getEmpresasDoGrupo(grupoId, empresasPermitidas, gruposEmpresariais)
-  }, [empresasPermitidas, grupoId, gruposEmpresariais])
+      .filter((empresa) => ids.has(empresa.id))
+  }, [empresas, empresasPermitidas, grupoId, gruposEmpresariais, user])
 
   const atendimentosEscopo = useMemo(() => {
     const grupoIds = grupoId ? new Set(empresasDoGrupo.map((empresa) => empresa.id)) : null
@@ -138,6 +157,12 @@ export function CorporateDashboardReport({
 
   const maxDetalhesPage = Math.max(1, Math.ceil(relatorio.linhas.length / 35))
   const detalhes = relatorio.linhas.slice((detailPage - 1) * 35, detailPage * 35)
+  const exportCompanyIds = empresaId
+    ? [empresaId]
+    : grupoId ? empresasDoGrupo.map((empresa) => empresa.id) : empresasPermitidas.map((empresa) => empresa.id)
+  const canExport = exportCompanyIds.length > 0 && exportCompanyIds.every((id) => (
+    canAccessCompanyPermission(user, id, 'exportar_relatorios', empresas, gruposEmpresariais)
+  ))
 
   function selecionarEmpresa(id: string) {
     setEmpresaId(id)
@@ -175,6 +200,7 @@ export function CorporateDashboardReport({
   }
 
   function exportarCSV() {
+    if (!canExport) return
     const header = ['Data', 'Passageiro', 'ID', 'Empresa', 'Categoria', 'Localizador', 'Fornecedor', 'Cidade/Destino', 'Rota', 'Centro de custo', 'Pagamento', 'Status', 'Taxas', 'Economia', 'Valor final']
     const rows = relatorio.linhas.map((linha) => [
       linha.data,
@@ -201,6 +227,7 @@ export function CorporateDashboardReport({
   }
 
   async function exportarHTML() {
+    if (!canExport) return
     let brandLogoDataUrl = ''
     try {
       brandLogoDataUrl = await imageUrlToDataUrl(BRAND_LOGO_DARK)
@@ -234,14 +261,14 @@ export function CorporateDashboardReport({
               </h2>
               <p className="mt-1 text-sm text-slate-500">Filtros, evolução mensal, mapa real, rankings e base detalhada usando o mesmo escopo do relatório acima.</p>
             </div>
-            <div className="flex flex-wrap gap-2">
+            {canExport && <div className="flex flex-wrap gap-2">
               <button onClick={exportarCSV} aria-label="Exportar dashboard filtrado em CSV" className="bbt-button-outline h-9">
                 <Download className="h-4 w-4" /> CSV filtrado
               </button>
               <button onClick={exportarHTML} aria-label="Salvar dashboard interativo em HTML" className="bbt-button-outline h-9">
                 <FileText className="h-4 w-4" /> HTML
               </button>
-            </div>
+            </div>}
           </div>
         </div>
       ) : (
@@ -258,14 +285,14 @@ export function CorporateDashboardReport({
               </p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+          {canExport && <div className="flex flex-wrap gap-2">
             <button onClick={exportarCSV} aria-label="Exportar dashboard filtrado em CSV" className="bbt-button-outline h-9 bg-white/10 text-white hover:bg-white/15">
               <Download className="h-4 w-4" /> CSV filtrado
             </button>
             <button onClick={exportarHTML} aria-label="Salvar dashboard interativo em HTML" className="bbt-button-outline h-9 bg-white/10 text-white hover:bg-white/15">
               <FileText className="h-4 w-4" /> HTML
             </button>
-          </div>
+          </div>}
         </div>
       )}
 
@@ -290,7 +317,7 @@ export function CorporateDashboardReport({
             <Field label="Grupo">
               <select value={grupoId} onChange={(event) => selecionarGrupo(event.target.value)} disabled={lockScope} className="bbt-input">
                 <option value="">Todos os grupos</option>
-                {gruposEmpresariais.filter((grupo) => grupo.ativo !== false).map((grupo) => <option key={grupo.id} value={grupo.id}>{grupo.nome}</option>)}
+                {gruposPermitidos.map((grupo) => <option key={grupo.id} value={grupo.id}>{grupo.nome}</option>)}
               </select>
             </Field>
           </div>

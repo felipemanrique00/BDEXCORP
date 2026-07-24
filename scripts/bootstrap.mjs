@@ -58,11 +58,26 @@ try {
         [String(process.env.BOOTSTRAP_TENANT_NAME).trim(), tenantSlug],
       )
       const tenantId = tenant.rows[0].id
+      await client.query("select set_config('app.tenant_id', $1, true)", [tenantId])
 
       await client.query(
         `insert into tenant_subscriptions (tenant_id, plan_id, status, billing_mode)
          values ($1, $2, 'active', 'manual')`,
         [tenantId, plan.id],
+      )
+      await client.query(
+        `insert into tenant_domain_rollouts (
+           tenant_id, domain_key, read_mode, write_mode, status, metadata
+         )
+         select
+           $1,
+           domain_key,
+           'relational',
+           'relational',
+           'active',
+           '{"source":"bootstrap","automaticCutover":false,"legacyDataPresent":false}'::jsonb
+         from unnest($2::text[]) domain_key`,
+        [tenantId, ['approvals', 'demands', 'emissions', 'finance', 'requesters', 'vouchers']],
       )
 
       const roles = await createRoles(client, tenantId)
@@ -93,7 +108,10 @@ try {
       )
       await client.query(
         `insert into audit_logs (tenant_id, actor_user_id, action, entity_type, entity_id, result, metadata)
-         values ($1, $2, 'platform.bootstrap', 'tenant', $1::text, 'success', jsonb_build_object('source', 'bootstrap'))`,
+         values (
+           $1::uuid, $2::uuid, 'platform.bootstrap', 'tenant',
+           $1::uuid::text, 'success', jsonb_build_object('source', 'bootstrap')
+         )`,
         [tenantId, userId],
       )
 
@@ -157,6 +175,14 @@ async function createRoles(client, tenantId) {
       [tenantId, definition.key, definition.name, definition.description],
     )
     ids[definition.key] = role.rows[0].id
+    if (definition.key === 'tenant_admin') {
+      await client.query(
+        `insert into role_permissions (role_id, permission_key, allowed)
+         select $1, permission_key, true from permissions`,
+        [role.rows[0].id],
+      )
+      continue
+    }
     for (const permission of definition.permissions) {
       await client.query(
         `insert into role_permissions (role_id, permission_key, allowed)
@@ -169,20 +195,112 @@ async function createRoles(client, tenantId) {
 }
 
 function roleDefinitions() {
-  const all = [
-    'ver_financeiro', 'editar_financeiro', 'cadastrar_empresas', 'cadastrar_funcionarios',
-    'cadastrar_hoteis', 'editar_politicas', 'gerar_relatorios', 'importar_planilhas',
-    'ver_produtividade_todos', 'gerenciar_usuarios', 'excluir_demandas', 'aprovar_demandas',
-  ]
   return [
-    { key: 'tenant_admin', name: 'Administrador do tenant', description: 'Administracao integral do ambiente', permissions: all },
-    { key: 'agent', name: 'Agente', description: 'Operacao de viagens', permissions: ['cadastrar_funcionarios'] },
-    { key: 'financial_manager', name: 'Gestor financeiro', description: 'Gestao financeira e relatorios', permissions: ['ver_financeiro', 'editar_financeiro', 'gerar_relatorios', 'importar_planilhas', 'ver_produtividade_todos', 'aprovar_demandas'] },
-    { key: 'supervisor', name: 'Supervisor', description: 'Supervisao operacional', permissions: ['ver_financeiro', 'cadastrar_empresas', 'cadastrar_funcionarios', 'cadastrar_hoteis', 'editar_politicas', 'gerar_relatorios', 'importar_planilhas', 'ver_produtividade_todos', 'aprovar_demandas'] },
-    { key: 'operator', name: 'Operacional', description: 'Operacao com acesso controlado', permissions: [] },
-    { key: 'company_admin', name: 'Administrador de empresa', description: 'Administracao restrita as empresas vinculadas', permissions: ['cadastrar_funcionarios', 'gerar_relatorios', 'aprovar_demandas'] },
-    { key: 'requester', name: 'Solicitante', description: 'Criacao e acompanhamento de demandas', permissions: [] },
-    { key: 'readonly', name: 'Somente leitura', description: 'Consulta sem alteracoes', permissions: ['gerar_relatorios'] },
+    {
+      key: 'tenant_admin',
+      name: 'Administrador do tenant',
+      description: 'Administracao integral do ambiente',
+      permissions: [],
+    },
+    {
+      key: 'agent',
+      name: 'Agente',
+      description: 'Operacao de viagens',
+      permissions: [
+        'ver_empresas', 'ver_funcionarios', 'cadastrar_funcionarios', 'gerenciar_funcionarios',
+        'ver_solicitantes', 'criar_demandas', 'ver_demandas', 'ver_reservas', 'ver_emissoes',
+        'ver_vouchers', 'operar_cotacoes', 'operar_reservas', 'operar_emissoes',
+        'operar_cancelamentos', 'gerenciar_integracoes', 'ver_politicas', 'ver_aprovacoes',
+        'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos',
+        'gerenciar_arquivos', 'usar_busca_global', 'acessar_portal_viajante',
+      ],
+    },
+    {
+      key: 'financial_manager',
+      name: 'Gestor financeiro',
+      description: 'Gestao financeira e relatorios',
+      permissions: [
+        'ver_financeiro', 'editar_financeiro', 'gerar_relatorios', 'ver_relatorios',
+        'exportar_relatorios', 'importar_planilhas', 'ver_produtividade_todos',
+        'aprovar_demandas', 'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios',
+        'ver_solicitantes', 'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+        'operar_cotacoes', 'ver_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
+        'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos', 'ver_auditoria',
+        'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos', 'gerenciar_orcamentos',
+      ],
+    },
+    {
+      key: 'supervisor',
+      name: 'Supervisor',
+      description: 'Supervisao operacional',
+      permissions: [
+        'ver_financeiro', 'cadastrar_empresas', 'cadastrar_funcionarios', 'cadastrar_hoteis',
+        'editar_politicas', 'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios',
+        'importar_planilhas', 'ver_produtividade_todos', 'aprovar_demandas', 'ver_empresas',
+        'ver_consolidado_grupo', 'ver_funcionarios', 'gerenciar_funcionarios',
+        'ver_solicitantes', 'gerenciar_solicitantes', 'criar_demandas', 'ver_demandas',
+        'ver_reservas', 'ver_emissoes', 'ver_vouchers', 'operar_cotacoes',
+        'operar_reservas', 'operar_emissoes', 'operar_cancelamentos',
+        'gerenciar_integracoes', 'ver_politicas', 'gerenciar_politicas',
+        'simular_politicas', 'ver_aprovacoes', 'decidir_aprovacoes', 'ver_workflows',
+        'gerenciar_workflows', 'executar_workflows', 'usar_ia', 'gerenciar_ia',
+        'ver_arquivos', 'gerenciar_arquivos', 'ver_auditoria', 'ver_inteligencia',
+        'usar_busca_global', 'ver_orcamentos', 'gerenciar_orcamentos',
+        'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
+      ],
+    },
+    {
+      key: 'operator',
+      name: 'Operacional',
+      description: 'Operacao com acesso controlado',
+      permissions: [
+        'ver_empresas', 'ver_funcionarios', 'ver_solicitantes', 'criar_demandas',
+        'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+        'operar_cotacoes', 'operar_reservas', 'operar_emissoes',
+        'operar_cancelamentos', 'gerenciar_integracoes', 'ver_workflows',
+        'executar_workflows', 'usar_ia', 'ver_arquivos', 'gerenciar_arquivos',
+        'usar_busca_global', 'acessar_portal_viajante',
+      ],
+    },
+    {
+      key: 'company_admin',
+      name: 'Administrador de empresa',
+      description: 'Administracao restrita as empresas vinculadas',
+      permissions: [
+        'ver_empresas', 'ver_funcionarios', 'cadastrar_funcionarios', 'gerenciar_funcionarios',
+        'ver_solicitantes', 'gerenciar_solicitantes', 'criar_demandas', 'ver_demandas',
+        'aprovar_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+        'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios', 'editar_politicas',
+        'alterar_configuracoes', 'ver_politicas', 'gerenciar_politicas',
+        'simular_politicas', 'ver_aprovacoes', 'decidir_aprovacoes', 'ver_workflows',
+        'gerenciar_workflows', 'executar_workflows', 'gerenciar_delegacoes',
+        'usar_ia', 'gerenciar_ia', 'ver_arquivos', 'gerenciar_arquivos', 'ver_auditoria',
+        'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos', 'gerenciar_orcamentos',
+        'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
+      ],
+    },
+    {
+      key: 'requester',
+      name: 'Solicitante',
+      description: 'Criacao e acompanhamento de demandas',
+      permissions: [
+        'ver_empresas', 'ver_funcionarios', 'ver_solicitantes', 'criar_demandas',
+        'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+        'ver_politicas', 'ver_aprovacoes', 'ver_workflows', 'usar_ia',
+        'ver_arquivos', 'usar_busca_global', 'acessar_portal_viajante',
+      ],
+    },
+    {
+      key: 'readonly',
+      name: 'Somente leitura',
+      description: 'Consulta sem alteracoes',
+      permissions: [
+        'ver_empresas', 'ver_funcionarios', 'ver_solicitantes', 'ver_demandas',
+        'ver_reservas', 'ver_emissoes', 'ver_vouchers', 'ver_relatorios',
+        'ver_politicas', 'ver_workflows', 'usar_ia', 'ver_arquivos',
+        'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos',
+      ],
+    },
   ]
 }
 

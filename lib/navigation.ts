@@ -1,7 +1,8 @@
-﻿import {
+import {
   BarChart3,
   Bot,
   Briefcase,
+  BrainCircuit,
   Building2,
   CalendarCheck,
   CreditCard,
@@ -13,7 +14,9 @@
   Inbox,
   LayoutDashboard,
   Leaf,
+  LibraryBig,
   Network,
+  Navigation,
   Plane,
   ReceiptText,
   ServerCog,
@@ -24,6 +27,7 @@
   Upload,
   Users,
   Wallet,
+  Zap,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -64,77 +68,103 @@ export function buildSidebarMenu({
   const podeImportar = hasPermission(user, 'importar_planilhas') || hasPermission(user, 'gerenciar_usuarios')
   const podeUsuarios = hasPermission(user, 'gerenciar_usuarios')
   const podeProdutividade = hasPermission(user, 'ver_produtividade_todos')
-  const podeAprovar = hasPermission(user, 'aprovar_demandas') || user.role === 'master'
-  const isCompanyUser = user.role !== 'master'
+  const podeAprovar = hasPermission(user, 'ver_aprovacoes') || hasPermission(user, 'aprovar_demandas')
+  const podeVerEmpresas = hasPermission(user, 'ver_empresas')
+  const podeVerDemandas = hasPermission(user, 'ver_demandas')
+  const podeCriarDemandas = hasPermission(user, 'criar_demandas')
+  const podeVerReservas = hasPermission(user, 'ver_reservas') || hasPermission(user, 'operar_reservas')
+  const podeVerEmissoes = hasPermission(user, 'ver_emissoes') || hasPermission(user, 'operar_emissoes')
+  const podeVerVouchers = hasPermission(user, 'ver_vouchers')
+  const podeVerFuncionarios = hasPermission(user, 'ver_funcionarios')
+  const podeVerPoliticas = hasPermission(user, 'ver_politicas')
+  const podeGerenciarWorkflows = hasPermission(user, 'gerenciar_workflows')
+  const podeGerenciarIntegracoes = hasPermission(user, 'gerenciar_integracoes')
+  const podeAlterarConfiguracoes = hasPermission(user, 'alterar_configuracoes')
+  const podeUsarIa = hasPermission(user, 'usar_ia')
+  const podeGerenciarIa = hasPermission(user, 'gerenciar_ia')
+  const podeVerInteligencia = hasPermission(user, 'ver_inteligencia')
+  const podeAcessarPortalViajante = hasPermission(user, 'acessar_portal_viajante')
 
   return [
     {
       id: 'operacao',
       label: 'Operação',
       itens: [
-        { href: '/dashboard', label: 'Dashboard executivo', description: 'Cockpit geral da operação', icon: LayoutDashboard, hidden: isCompanyUser },
+        { href: '/dashboard', label: 'Dashboard executivo', description: 'Cockpit geral da operação', icon: LayoutDashboard, hidden: !podeProdutividade },
         {
           href: '/dashboard/portal-empresa',
           label: 'Portal empresas/Grupos',
-          description: isCompanyUser ? 'Portal do cliente' : 'Visão cliente, empresa e grupo',
+          description: user.corporate_profile ? 'Portal corporativo autorizado' : 'Visão cliente, empresa e grupo',
           icon: Building2,
+          hidden: !podeVerEmpresas,
         },
-        { href: '/dashboard/caixa-entrada', label: 'Entrada de demandas', description: 'E-mail, áudio, PDF e texto', icon: Inbox, badge: naoLidas || undefined, hidden: isCompanyUser },
+        {
+          href: '/dashboard/minha-viagem',
+          label: 'Minha viagem',
+          description: 'Reservas, vouchers e suporte do viajante',
+          icon: Navigation,
+          hidden: !podeAcessarPortalViajante,
+        },
+        { href: '/dashboard/caixa-entrada', label: 'Entrada de demandas', description: 'E-mail, áudio, PDF e texto', icon: Inbox, badge: naoLidas || undefined, hidden: !podeCriarDemandas },
         {
           href: '/dashboard/demandas',
           label: 'Fila de demandas',
           description: 'Triagem, SLA, status e alertas',
           icon: Briefcase,
           badge: alertasHoje || novasDemandas || undefined,
-          hidden: isCompanyUser,
+          hidden: !podeVerDemandas,
         },
-        { href: '/dashboard/reservas', label: 'Reservas e cotações', description: 'Fornecedores, APIs e portais', icon: CalendarCheck, hidden: isCompanyUser || !podeImportar },
-        { href: '/dashboard/vouchers', label: 'Vouchers emitidos', description: 'Documentos emitidos e enviados', icon: FileStack, hidden: isCompanyUser },
-        { href: '/dashboard/aprovacoes', label: 'Aprovações', description: 'Workflow multinível de viagens', icon: ShieldCheck, hidden: isCompanyUser || !podeAprovar },
-        { href: '/dashboard/risco', label: 'Centro de risco', description: 'Duty of care e viajantes em campo', icon: ShieldAlert, hidden: isCompanyUser },
-        { href: '/dashboard/produtividade', label: 'Equipe e produtividade', description: 'Agentes, carga, fila e SLA', icon: BarChart3, hidden: isCompanyUser || !podeProdutividade },
-        { href: '/dashboard/ia', label: `Central ${AI_SHORT_NAME}`, description: 'Assistente, canais e agente operacional', icon: Bot, activeWhen: ['/dashboard/ia', '/dashboard/ia-chat', '/dashboard/ia-operacional', '/dashboard/assistente'], hidden: isCompanyUser },
+        { href: '/dashboard/reservas', label: 'Reservas e cotações', description: 'Fornecedores, APIs e portais', icon: CalendarCheck, hidden: !podeVerReservas },
+        { href: '/dashboard/vouchers', label: 'Vouchers emitidos', description: 'Documentos emitidos e enviados', icon: FileStack, hidden: !podeVerVouchers },
+        { href: '/dashboard/aprovacoes', label: 'Aprovações', description: 'Workflow multinível de viagens', icon: ShieldCheck, hidden: !podeAprovar },
+        { href: '/dashboard/risco', label: 'Centro de risco', description: 'Duty of care e viajantes em campo', icon: ShieldAlert, hidden: !podeVerDemandas },
+        { href: '/dashboard/produtividade', label: 'Equipe e produtividade', description: 'Agentes, carga, fila e SLA', icon: BarChart3, hidden: !podeProdutividade },
+        { href: '/dashboard/ia', label: `Central ${AI_SHORT_NAME}`, description: 'Assistente, canais e agente operacional', icon: Bot, activeWhen: ['/dashboard/ia', '/dashboard/ia-chat', '/dashboard/ia-operacional', '/dashboard/assistente'], hidden: !podeUsarIa },
       ],
     },
     {
       id: 'integracoes',
       label: 'Integrações',
       itens: [
-        { href: '/dashboard/wintour', label: 'Wintour', description: 'Importação diária de vendas', icon: Database, hidden: isCompanyUser || !podeImportar },
-        { href: '/dashboard/reservas', label: 'Conector Tech Travel', description: 'Aéreo, hotel, locação e OS', icon: Hotel, hidden: isCompanyUser || !podeImportar },
-        { href: '/dashboard/importar', label: 'Importações gerais', description: 'Planilhas, XML, PDF e bases gerais', icon: Upload, hidden: isCompanyUser || !podeImportar },
-        { href: '/dashboard/emissoes', label: 'Emissões e importações', description: 'Tech Travel, XLS, XLSX e PDF', icon: FileStack, hidden: isCompanyUser || !podeImportar },
+        { href: '/dashboard/wintour', label: 'Wintour', description: 'Importação diária de vendas', icon: Database, hidden: !podeImportar },
+        { href: '/dashboard/reservas', label: 'Conector Tech Travel', description: 'Aéreo, hotel, locação e OS', icon: Hotel, hidden: !podeGerenciarIntegracoes },
+        { href: '/dashboard/importar', label: 'Importações gerais', description: 'Planilhas, XML, PDF e bases gerais', icon: Upload, hidden: !podeImportar },
+        { href: '/dashboard/emissoes', label: 'Emissões e importações', description: 'Tech Travel, XLS, XLSX e PDF', icon: FileStack, hidden: !podeVerEmissoes },
       ],
     },
     {
       id: 'financeiro',
       label: 'Financeiro',
       itens: [
-        { href: '/dashboard/financeiro', label: 'Financeiro operacional', description: 'Pagar, receber e caixa operacional', icon: Wallet, hidden: isCompanyUser || !podeFinanceiro },
-        { href: '/dashboard/financeiro?aba=carteira', label: 'Carteira e cartões', description: 'Pix, cartões físicos/virtuais e limites', icon: CreditCard, hidden: isCompanyUser || !podeFinanceiro },
-        { href: '/dashboard/financeiro?aba=faturas', label: 'Faturas corporativas', description: 'Fechamento e cobrança de clientes', icon: ReceiptText, hidden: isCompanyUser || !podeFinanceiro },
-        { href: '/dashboard/reconciliacao', label: 'Reconciliação', description: 'Divergências e conferência financeira', icon: ShieldAlert, hidden: isCompanyUser || !podeUsuarios },
+        { href: '/dashboard/financeiro', label: 'Financeiro operacional', description: 'Pagar, receber e caixa operacional', icon: Wallet, hidden: !podeFinanceiro },
+        { href: '/dashboard/financeiro?aba=carteira', label: 'Carteira e cartões', description: 'Pix, cartões físicos/virtuais e limites', icon: CreditCard, hidden: !podeFinanceiro },
+        { href: '/dashboard/financeiro?aba=faturas', label: 'Faturas corporativas', description: 'Fechamento e cobrança de clientes', icon: ReceiptText, hidden: !podeFinanceiro },
+        { href: '/dashboard/reconciliacao', label: 'Reconciliação', description: 'Divergências e conferência financeira', icon: ShieldAlert, hidden: !hasPermission(user, 'editar_financeiro') },
       ],
     },
     {
       id: 'cadastros',
       label: 'Cadastros',
       itens: [
-        { href: '/dashboard/empresas', label: 'Empresas', description: 'Clientes, políticas, acessos e contratos', icon: Building2, hidden: isCompanyUser || !podeCadastrarEmpresas },
-        { href: '/dashboard/grupos', label: 'Grupos / holdings', description: 'Holdings, grupos econômicos e vínculos', icon: Network, hidden: isCompanyUser || !podeCadastrarEmpresas },
-        { href: '/dashboard/funcionarios', label: 'Viajantes', description: 'Funcionários, documentos e perfis', icon: Users, hidden: isCompanyUser },
-        { href: '/dashboard/hoteis', label: 'Hotéis', description: 'Fornecedores e tarifas negociadas', icon: Hotel, hidden: isCompanyUser },
+        { href: '/dashboard/empresas', label: 'Empresas', description: 'Clientes, políticas, acessos e contratos', icon: Building2, hidden: !podeCadastrarEmpresas },
+        { href: '/dashboard/grupos', label: 'Grupos / holdings', description: 'Holdings, grupos econômicos e vínculos', icon: Network, hidden: !hasPermission(user, 'gerenciar_empresas_grupo') },
+        { href: '/dashboard/funcionarios', label: 'Viajantes', description: 'Funcionários, documentos e perfis', icon: Users, hidden: !podeVerFuncionarios },
+        { href: '/dashboard/hoteis', label: 'Hotéis', description: 'Fornecedores e tarifas negociadas', icon: Hotel, hidden: !hasPermission(user, 'cadastrar_hoteis') && !podeVerReservas },
       ],
     },
     {
       id: 'inteligencia',
       label: 'Inteligência',
       itens: [
-        { href: '/dashboard/relatorios', label: 'Relatórios e BI', description: 'Resumo executivo e análises', icon: FileBarChart, hidden: isCompanyUser || !podeRelatorios },
-        { href: '/dashboard/relatorios/dashboard', label: 'Dashboard executivo', description: 'Mapa, evolução mensal, filtros e BI completo', icon: LayoutDashboard, hidden: isCompanyUser || !podeRelatorios },
-        { href: '/dashboard/relatorios/aereo', label: 'Relatório aéreo executivo', description: 'Rotas, cias, mapa e custos aéreos', icon: Plane, hidden: isCompanyUser || !podeRelatorios },
-        { href: '/dashboard/sustentabilidade', label: 'Sustentabilidade', description: 'ESG e pegada de carbono', icon: Leaf, hidden: isCompanyUser },
-        { href: '/dashboard/auditoria', label: 'Auditoria', description: 'Trilha de ações e alterações', icon: History, hidden: isCompanyUser || !podeUsuarios },
+        { href: '/dashboard/inteligencia', label: 'Centro de Inteligência', description: 'Indicadores, oportunidades e riscos', icon: BrainCircuit, hidden: !podeVerInteligencia },
+        { href: '/dashboard/relatorios', label: 'Relatórios e BI', description: 'Resumo executivo e análises', icon: FileBarChart, hidden: !podeRelatorios && !hasPermission(user, 'ver_relatorios') },
+        { href: '/dashboard/relatorios/dashboard', label: 'Dashboard executivo', description: 'Mapa, evolução mensal, filtros e BI completo', icon: LayoutDashboard, hidden: !podeRelatorios && !hasPermission(user, 'ver_relatorios') },
+        { href: '/dashboard/relatorios/aereo', label: 'Relatório aéreo executivo', description: 'Rotas, cias, mapa e custos aéreos', icon: Plane, hidden: !podeRelatorios && !hasPermission(user, 'ver_relatorios') },
+        { href: '/dashboard/politicas', label: 'Políticas corporativas', description: 'Catálogo, versões, conflitos e simulação', icon: ShieldCheck, hidden: !podeVerPoliticas },
+        { href: '/dashboard/ia/conhecimento', label: 'Base de conhecimento', description: 'Conteúdo corporativo autorizado para a BIA', icon: LibraryBig, hidden: !podeGerenciarIa },
+        { href: '/dashboard/automacoes', label: 'Central de automações', description: 'Eventos, regras, workflows e execuções', icon: Zap, hidden: !hasPermission(user, 'executar_automacoes') && !hasPermission(user, 'gerenciar_automacoes') },
+        { href: '/dashboard/sustentabilidade', label: 'Sustentabilidade', description: 'ESG e pegada de carbono', icon: Leaf, hidden: !hasPermission(user, 'ver_relatorios') },
+        { href: '/dashboard/auditoria', label: 'Auditoria', description: 'Trilha de ações e alterações', icon: History, hidden: !podeUsuarios },
       ],
     },
     {
@@ -142,10 +172,10 @@ export function buildSidebarMenu({
       label: 'Administração',
       itens: [
         { href: '/dashboard/plataforma', label: 'Administração SaaS', description: 'Tenants, planos, limites e consumo', icon: ServerCog, hidden: user.platform_admin !== true },
-        { href: '/dashboard/usuarios', label: 'Usuários e permissões', description: 'Equipe interna, clientes e escopos', icon: Shield, hidden: isCompanyUser || !podeUsuarios },
-        { href: '/dashboard/configuracoes', label: 'Configurações', description: 'Sistema, IA e conexões', icon: Settings, hidden: isCompanyUser },
+        { href: '/dashboard/usuarios', label: 'Usuários e permissões', description: 'Equipe interna, clientes e escopos', icon: Shield, hidden: !podeUsuarios && !hasPermission(user, 'gerenciar_vinculos_acesso') },
+        { href: '/dashboard/workflows', label: 'Workflows empresariais', description: 'Processos, aprovações, delegações e SLA', icon: ShieldCheck, hidden: !podeGerenciarWorkflows },
+        { href: '/dashboard/configuracoes', label: 'Configurações', description: 'Sistema, IA e conexões', icon: Settings, hidden: !podeAlterarConfiguracoes },
       ],
     },
   ]
 }
-

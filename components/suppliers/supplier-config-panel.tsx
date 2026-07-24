@@ -2,22 +2,32 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
-import { CheckCircle2, ExternalLink, Plus, Search, Settings2, Trash2 } from 'lucide-react'
+import { CheckCircle2, ExternalLink, Link2, Loader2, Plus, Save, Search, Settings2, Trash2 } from 'lucide-react'
 
+import { useCorporateContext } from '@/components/corporate-context-provider'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { SearchInput } from '@/components/ui/search-input'
 import {
+  listTechProviderCompanyMappings,
+  removeTechProviderCompanyMapping,
+  saveTechProviderCompanyMapping,
+  type TechProviderCompanyMappingClient,
+} from '@/lib/integrations/tech/company-mapping-client'
+import {
+  deactivateIntegrationProviderOnServer,
+  listIntegrationProviderLogsFromServer,
+  listIntegrationProvidersFromServer,
+  saveIntegrationProviderOnServer,
+  testIntegrationProviderOnServer,
+  type IntegrationProviderClientRecord,
+} from '@/lib/integrations/provider-catalog-client'
+import {
   capabilityLabel,
-  deleteSupplierIntegration,
-  getSupplierIntegrations,
-  getSupplierLogs,
+  getSupplierIntegrations as getLegacySupplierIntegrations,
+  getSupplierLogs as getLegacySupplierLogs,
   serviceLabel,
-  testarSupplierConnector,
-  updateSupplierIntegration,
-  upsertSupplierIntegration,
   type SupplierCapability,
-  type SupplierIntegration,
   type SupplierMode,
   type SupplierService,
   type SupplierStatus,
@@ -26,18 +36,44 @@ import {
 const SERVICES: SupplierService[] = ['aereo', 'hotelaria', 'locacao', 'pacotes', 'lazer', 'transfer', 'seguro', 'outros']
 const CAPABILITIES: SupplierCapability[] = ['pesquisa', 'cotacao', 'reserva', 'emissao', 'cancelamento', 'remarcacao', 'voucher', 'importacao', 'status', 'faturamento']
 
-export function SupplierConfigPanel({ canEdit = true, compact = false }: { canEdit?: boolean; compact?: boolean }) {
+export function SupplierConfigPanel({
+  canManageProviders = false,
+  canManageMappings = false,
+  compact = false,
+}: {
+  canManageProviders?: boolean
+  canManageMappings?: boolean
+  compact?: boolean
+}) {
+  const { access } = useCorporateContext()
   const [reload, setReload] = useState(0)
   const [search, setSearch] = useState('')
   const [service, setService] = useState<SupplierService | ''>('')
   const [status, setStatus] = useState<SupplierStatus | ''>('')
-  const [editing, setEditing] = useState<SupplierIntegration | null>(null)
+  const [editing, setEditing] = useState<IntegrationProviderClientRecord | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
-  const [confirmDelete, setConfirmDelete] = useState<SupplierIntegration | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<IntegrationProviderClientRecord | null>(null)
+  const [providerCatalog, setProviderCatalog] = useState<IntegrationProviderClientRecord[] | null>(null)
+  const [providerLogs, setProviderLogs] = useState<ReturnType<typeof getLegacySupplierLogs> | null>(null)
+  const [catalogLoading, setCatalogLoading] = useState(true)
+  const [catalogError, setCatalogError] = useState('')
+  const [providerBusyKey, setProviderBusyKey] = useState('')
+  const [techMappings, setTechMappings] = useState<TechProviderCompanyMappingClient[]>([])
+  const [mappingDrafts, setMappingDrafts] = useState<Record<string, string>>({})
+  const [mappingsLoading, setMappingsLoading] = useState(false)
+  const [mappingBusyCompanyId, setMappingBusyCompanyId] = useState('')
+  const [mappingsError, setMappingsError] = useState('')
+
+  const manageableCompanies = useMemo(
+    () => (access?.companies || [])
+      .filter((company) => company.permissions.gerenciar_integracoes)
+      .sort((left, right) => left.companyName.localeCompare(right.companyName)),
+    [access?.companies],
+  )
 
   const suppliers = useMemo(() => {
     void reload
-    let list = getSupplierIntegrations()
+    let list = providerCatalog || getLegacySupplierIntegrations()
     if (service) list = list.filter((s) => s.servicos.includes(service))
     if (status) list = list.filter((s) => s.status === status)
     if (search.trim()) {
@@ -45,51 +81,199 @@ export function SupplierConfigPanel({ canEdit = true, compact = false }: { canEd
       list = list.filter((s) => normalizar(`${s.nome} ${s.tipo} ${s.modo} ${s.status} ${s.servicos.join(' ')} ${s.capacidades.join(' ')}`).includes(q))
     }
     return compact ? list.slice(0, 12) : list
-  }, [compact, reload, search, service, status])
+  }, [compact, providerCatalog, reload, search, service, status])
 
   const logs = useMemo(() => {
     void reload
-    return getSupplierLogs(compact ? 20 : 80)
-  }, [compact, reload])
+    return (providerLogs || getLegacySupplierLogs(compact ? 20 : 80)).slice(0, compact ? 20 : 80)
+  }, [compact, providerLogs, reload])
+
+  useEffect(() => {
+    let active = true
+    setCatalogLoading(true)
+    setCatalogError('')
+    void listIntegrationProvidersFromServer()
+      .then((items) => {
+        if (!active) return
+        setProviderCatalog(items)
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        setProviderCatalog(null)
+        setCatalogError(error instanceof Error ? error.message : 'Nao foi possivel carregar os conectores.')
+      })
+      .finally(() => {
+        if (active) setCatalogLoading(false)
+      })
+
+    if (canManageProviders) {
+      void listIntegrationProviderLogsFromServer(compact ? 20 : 80)
+        .then((items) => {
+          if (active) setProviderLogs(items)
+        })
+        .catch(() => {
+          if (active) setProviderLogs(null)
+        })
+    } else {
+      setProviderLogs([])
+    }
+    return () => {
+      active = false
+    }
+  }, [canManageProviders, compact, reload])
+
+  useEffect(() => {
+    if (!canManageMappings || compact) return
+    let active = true
+    setMappingsLoading(true)
+    setMappingsError('')
+    void listTechProviderCompanyMappings()
+      .then((items) => {
+        if (!active) return
+        setTechMappings(items)
+        setMappingDrafts(Object.fromEntries(
+          items
+            .filter((item) => item.status === 'active')
+            .map((item) => [item.companyId, item.providerCompanyId]),
+        ))
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        setMappingsError(error instanceof Error ? error.message : 'Nao foi possivel carregar os vinculos.')
+      })
+      .finally(() => {
+        if (active) setMappingsLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [canManageMappings, compact])
 
   function refresh() {
     setReload((n) => n + 1)
   }
 
   function novo() {
+    if (!canManageProviders || !providerCatalog) return
     setEditing(null)
     setModalOpen(true)
   }
 
-  function editar(supplier: SupplierIntegration) {
+  function editar(supplier: IntegrationProviderClientRecord) {
+    if (!canManageProviders || !providerCatalog) return
     setEditing(supplier)
     setModalOpen(true)
   }
 
-  function testar(supplier: SupplierIntegration) {
-    const log = testarSupplierConnector(supplier)
-    if (log.status === 'sucesso') toast.success(log.message)
-    else if (log.status === 'falha') toast.error(log.message)
-    else toast.message(log.message)
-    refresh()
-  }
-
-  function toggleStatus(supplier: SupplierIntegration) {
-    const next = supplier.status === 'ativo' ? 'inativo' : 'ativo'
-    updateSupplierIntegration(supplier.id, { status: next })
-    toast.success(`${supplier.nome} ${next === 'ativo' ? 'ativado' : 'inativado'}.`)
-    refresh()
-  }
-
-  function remove() {
-    if (!confirmDelete) return
-    if (deleteSupplierIntegration(confirmDelete.id)) {
-      toast.success('Fornecedor removido.')
+  async function testar(supplier: IntegrationProviderClientRecord) {
+    if (!canManageProviders || !providerCatalog) return
+    setProviderBusyKey(supplier.id)
+    try {
+      const log = await testIntegrationProviderOnServer(supplier.id)
+      if (log.status === 'sucesso') toast.success(log.message)
+      else if (log.status === 'falha') toast.error(log.message)
+      else toast.message(log.message)
       refresh()
-    } else {
-      toast.error('Nao foi possivel remover.')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel testar o conector.')
+    } finally {
+      setProviderBusyKey('')
     }
-    setConfirmDelete(null)
+  }
+
+  async function toggleStatus(supplier: IntegrationProviderClientRecord) {
+    if (!canManageProviders || !providerCatalog) return
+    const next = supplier.status === 'ativo' ? 'inativo' : 'ativo'
+    setProviderBusyKey(supplier.id)
+    try {
+      const saved = await saveIntegrationProviderOnServer({ ...supplier, status: next })
+      setProviderCatalog((current) => current?.map((item) => item.id === saved.id ? saved : item) || [saved])
+      toast.success(`${supplier.nome} ${next === 'ativo' ? 'ativado' : 'inativado'}.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel alterar o conector.')
+    } finally {
+      setProviderBusyKey('')
+    }
+  }
+
+  async function remove() {
+    if (!confirmDelete) return
+    setProviderBusyKey(confirmDelete.id)
+    try {
+      const deactivated = await deactivateIntegrationProviderOnServer(
+        confirmDelete.id,
+        confirmDelete.version,
+      )
+      if (!deactivated) throw new Error('Conector nao encontrado.')
+      setProviderCatalog((current) => current?.filter((item) => item.id !== confirmDelete.id) || [])
+      toast.success('Fornecedor removido.')
+      setConfirmDelete(null)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel remover.')
+    } finally {
+      setProviderBusyKey('')
+    }
+  }
+
+  async function saveProvider(
+    provider: Parameters<typeof saveIntegrationProviderOnServer>[0],
+  ): Promise<boolean> {
+    if (!canManageProviders || !providerCatalog) return false
+    setProviderBusyKey(provider.id || 'new')
+    try {
+      const saved = await saveIntegrationProviderOnServer(provider)
+      setProviderCatalog((current) => {
+        const list = current || []
+        const index = list.findIndex((item) => item.id === saved.id)
+        if (index < 0) return [...list, saved]
+        return list.map((item) => item.id === saved.id ? saved : item)
+      })
+      toast.success(provider.id ? 'Fornecedor atualizado.' : 'Fornecedor cadastrado.')
+      return true
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel salvar o fornecedor.')
+      return false
+    } finally {
+      setProviderBusyKey('')
+    }
+  }
+
+  async function saveCompanyMapping(companyId: string) {
+    const providerCompanyId = String(mappingDrafts[companyId] || '').trim()
+    if (!providerCompanyId) {
+      toast.error('Informe o ID da empresa na Tech Travel.')
+      return
+    }
+    setMappingBusyCompanyId(companyId)
+    try {
+      const saved = await saveTechProviderCompanyMapping(companyId, providerCompanyId)
+      setTechMappings((current) => [
+        saved,
+        ...current.filter((item) => item.companyId !== companyId),
+      ])
+      setMappingDrafts((current) => ({ ...current, [companyId]: saved.providerCompanyId }))
+      toast.success('Vinculo da Tech Travel salvo.')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel salvar o vinculo.')
+    } finally {
+      setMappingBusyCompanyId('')
+    }
+  }
+
+  async function deactivateCompanyMapping(companyId: string) {
+    setMappingBusyCompanyId(companyId)
+    try {
+      await removeTechProviderCompanyMapping(companyId)
+      setTechMappings((current) => current.map((item) => (
+        item.companyId === companyId ? { ...item, status: 'inactive' } : item
+      )))
+      setMappingDrafts((current) => ({ ...current, [companyId]: '' }))
+      toast.success('Vinculo da Tech Travel desativado.')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel desativar o vinculo.')
+    } finally {
+      setMappingBusyCompanyId('')
+    }
   }
 
   return (
@@ -101,13 +285,24 @@ export function SupplierConfigPanel({ canEdit = true, compact = false }: { canEd
             A Tech/TTravel é o hub único de fornecedores. A IA BIA e as telas de operação usam essa conexão para cotar, reservar, emitir, consultar OS, voucher, políticas e centros de custo.
           </p>
         </div>
-        {canEdit && (
-          <button type="button" onClick={novo} className="bbt-button-accent">
+        {canManageProviders && (
+          <button
+            type="button"
+            onClick={novo}
+            className="bbt-button-accent"
+            disabled={catalogLoading || !providerCatalog}
+          >
             <Plus className="h-4 w-4" />
             Conector adicional
           </button>
         )}
       </div>
+
+      {catalogError && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+          {catalogError} O catálogo legado permanece disponível somente para consulta.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_220px_220px]">
         <SearchInput value={search} onChangeValue={setSearch} placeholder="Buscar Tech Travel, aéreo, hotelaria, locação, OS, emissão..." />
@@ -158,22 +353,37 @@ export function SupplierConfigPanel({ canEdit = true, compact = false }: { canEd
                   <td className="px-4 py-3"><StatusBadge status={supplier.status} /></td>
                   <td className="px-4 py-3">
                     <div className="flex justify-end gap-1">
-                      <button type="button" onClick={() => testar(supplier)} className="rounded-lg p-2 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/20" title="Testar">
-                        <Search className="h-4 w-4" />
-                      </button>
-                      {canEdit && (
+                      {canManageProviders && providerCatalog && (
                         <>
-                          <button type="button" onClick={() => editar(supplier)} className="rounded-lg p-2 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/20" title="Editar">
+                          <button
+                            type="button"
+                            onClick={() => void testar(supplier as IntegrationProviderClientRecord)}
+                            className="rounded-lg p-2 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-blue-900/20"
+                            title="Testar"
+                            disabled={providerBusyKey === supplier.id}
+                          >
+                            {providerBusyKey === supplier.id
+                              ? <Loader2 className="h-4 w-4 animate-spin" />
+                              : <Search className="h-4 w-4" />}
+                          </button>
+                          <button type="button" onClick={() => editar(supplier as IntegrationProviderClientRecord)} className="rounded-lg p-2 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/20" title="Editar">
                             <Settings2 className="h-4 w-4" />
                           </button>
-                          <button type="button" onClick={() => toggleStatus(supplier)} className="rounded-lg p-2 text-slate-500 transition hover:bg-green-50 hover:text-green-600 dark:hover:bg-green-900/20" title="Ativar/inativar">
+                          <button type="button" onClick={() => void toggleStatus(supplier as IntegrationProviderClientRecord)} className="rounded-lg p-2 text-slate-500 transition hover:bg-green-50 hover:text-green-600 dark:hover:bg-green-900/20" title="Ativar/inativar">
                             <CheckCircle2 className="h-4 w-4" />
                           </button>
-                          <button type="button" onClick={() => setConfirmDelete(supplier)} className="rounded-lg p-2 text-slate-500 transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20" title="Remover">
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDelete(supplier as IntegrationProviderClientRecord)}
+                            className="rounded-lg p-2 text-slate-500 transition hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-red-900/20"
+                            title={supplier.id === 'tech-ttravel' ? 'Conector principal protegido' : 'Remover'}
+                            disabled={supplier.id === 'tech-ttravel'}
+                          >
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </>
                       )}
+                      {(!canManageProviders || !providerCatalog) && <span className="px-2 text-slate-400">-</span>}
                     </div>
                   </td>
                 </tr>
@@ -186,7 +396,89 @@ export function SupplierConfigPanel({ canEdit = true, compact = false }: { canEd
         </div>
       </div>
 
-      {!compact && (
+      {canManageMappings && !compact && (
+        <section className="border-t border-bbt-gray-100 pt-5 dark:border-slate-700">
+          <div className="flex items-start gap-3">
+            <Link2 className="mt-0.5 h-5 w-5 shrink-0 text-bbt-accent" />
+            <div>
+              <h3 className="font-semibold text-bbt-primary dark:text-white">Empresa BDEX x empresa Tech Travel</h3>
+              <p className="mt-1 text-sm text-slate-500">
+                Vincule cada empresa ao cadastro correspondente na Tech Travel.
+              </p>
+            </div>
+          </div>
+
+          {mappingsError && (
+            <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+              {mappingsError}
+            </div>
+          )}
+
+          <div className="mt-4 divide-y divide-bbt-gray-100 border-y border-bbt-gray-100 dark:divide-slate-700 dark:border-slate-700">
+            {mappingsLoading && (
+              <div className="flex items-center gap-2 py-5 text-sm text-slate-500">
+                <Loader2 className="h-4 w-4 animate-spin" /> Carregando vínculos...
+              </div>
+            )}
+            {!mappingsLoading && manageableCompanies.map((company) => {
+              const activeMapping = techMappings.find((item) => (
+                item.companyId === company.companyId && item.status === 'active'
+              ))
+              const busy = mappingBusyCompanyId === company.companyId
+              return (
+                <div key={company.companyId} className="grid gap-3 py-3 md:grid-cols-[minmax(220px,1fr)_minmax(240px,1fr)_auto] md:items-end">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-bbt-primary dark:text-white">{company.companyName}</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      {company.groupName || 'Empresa sem grupo'} · {activeMapping ? 'Vínculo ativo' : 'Sem vínculo específico'}
+                    </div>
+                  </div>
+                  <Field label="ID da empresa na Tech Travel">
+                    <input
+                      value={mappingDrafts[company.companyId] || ''}
+                      onChange={(event) => setMappingDrafts((current) => ({
+                        ...current,
+                        [company.companyId]: event.target.value,
+                      }))}
+                      className="bbt-input"
+                      placeholder="Identificador fornecido pela Tech Travel"
+                      maxLength={240}
+                      disabled={busy}
+                    />
+                  </Field>
+                  <div className="flex justify-end gap-1">
+                    <button
+                      type="button"
+                      onClick={() => void saveCompanyMapping(company.companyId)}
+                      className="rounded-lg p-2 text-slate-500 transition hover:bg-green-50 hover:text-green-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-green-900/20"
+                      title="Salvar vínculo"
+                      disabled={busy || !String(mappingDrafts[company.companyId] || '').trim()}
+                    >
+                      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void deactivateCompanyMapping(company.companyId)}
+                      className="rounded-lg p-2 text-slate-500 transition hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-red-900/20"
+                      title="Desativar vínculo"
+                      disabled={busy || !activeMapping}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+            {!mappingsLoading && manageableCompanies.length === 0 && (
+              <div className="py-5 text-sm text-slate-500">
+                Nenhuma empresa com permissão para gerenciar integrações está disponível neste acesso.
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {!compact && canManageProviders && (
         <div className="rounded-lg border border-bbt-gray-100 dark:border-slate-700">
           <div className="border-b border-bbt-gray-100 p-4 dark:border-slate-700">
           <h3 className="font-semibold">Logs recentes de conexão</h3>
@@ -206,7 +498,15 @@ export function SupplierConfigPanel({ canEdit = true, compact = false }: { canEd
         </div>
       )}
 
-      <SupplierModal open={modalOpen} editing={editing} onClose={() => { setModalOpen(false); setEditing(null); refresh() }} />
+      <SupplierModal
+        open={modalOpen}
+        editing={editing}
+        onSave={saveProvider}
+        onClose={() => {
+          setModalOpen(false)
+          setEditing(null)
+        }}
+      />
       <ConfirmDialog
         open={!!confirmDelete}
         onClose={() => setConfirmDelete(null)}
@@ -220,8 +520,21 @@ export function SupplierConfigPanel({ canEdit = true, compact = false }: { canEd
   )
 }
 
-function SupplierModal({ open, editing, onClose }: { open: boolean; editing: SupplierIntegration | null; onClose: () => void }) {
-  const [form, setForm] = useState<Partial<SupplierIntegration>>(editing || defaultForm())
+function SupplierModal({
+  open,
+  editing,
+  onSave,
+  onClose,
+}: {
+  open: boolean
+  editing: IntegrationProviderClientRecord | null
+  onSave: (
+    provider: Parameters<typeof saveIntegrationProviderOnServer>[0],
+  ) => Promise<boolean>
+  onClose: () => void
+}) {
+  const [form, setForm] = useState<Partial<IntegrationProviderClientRecord>>(editing || defaultForm())
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (open) setForm(editing || defaultForm())
@@ -237,24 +550,30 @@ function SupplierModal({ open, editing, onClose }: { open: boolean; editing: Sup
     setForm({ ...form, capacidades: current.includes(capability) ? current.filter((c) => c !== capability) : [...current, capability] })
   }
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.nome?.trim() || !form.servicos?.length) {
       toast.error('Preencha nome e pelo menos um servico.')
       return
     }
-    const saved = upsertSupplierIntegration({
-      ...form,
-      nome: form.nome.trim(),
-      servicos: form.servicos,
-      capacidades: form.capacidades?.length ? form.capacidades : ['pesquisa', 'cotacao', 'reserva', 'voucher', 'status'],
-    } as SupplierIntegration)
-    if (!saved) {
-      toast.error('Nao foi possivel salvar o fornecedor.')
-      return
+    setSaving(true)
+    try {
+      const saved = await onSave({
+        ...form,
+        id: editing?.id,
+        nome: form.nome.trim(),
+        tipo: form.tipo || 'outro',
+        servicos: form.servicos,
+        capacidades: form.capacidades?.length ? form.capacidades : ['pesquisa', 'cotacao', 'reserva', 'voucher', 'status'],
+        modo: form.modo || 'portal_assistido',
+        status: form.status || 'ativo',
+        prioridade: Number(form.prioridade ?? 50),
+        auth_type: form.auth_type || 'portal',
+      })
+      if (saved) onClose()
+    } finally {
+      setSaving(false)
     }
-    toast.success(editing ? 'Fornecedor atualizado.' : 'Fornecedor cadastrado.')
-    onClose()
   }
 
   return (
@@ -263,7 +582,7 @@ function SupplierModal({ open, editing, onClose }: { open: boolean; editing: Sup
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Field label="Nome *"><input value={form.nome || ''} onChange={(e) => setForm({ ...form, nome: e.target.value })} className="bbt-input" required /></Field>
           <Field label="Tipo">
-            <select value={form.tipo || 'outro'} onChange={(e) => setForm({ ...form, tipo: e.target.value as SupplierIntegration['tipo'] })} className="bbt-input">
+            <select value={form.tipo || 'outro'} onChange={(e) => setForm({ ...form, tipo: e.target.value as IntegrationProviderClientRecord['tipo'] })} className="bbt-input">
               <option value="consolidadora">Consolidadora</option>
               <option value="operadora">Operadora</option>
               <option value="fornecedor_direto">Fornecedor direto</option>
@@ -304,7 +623,7 @@ function SupplierModal({ open, editing, onClose }: { open: boolean; editing: Sup
             </select>
           </Field>
           <Field label="Auth">
-            <select value={form.auth_type || 'portal'} onChange={(e) => setForm({ ...form, auth_type: e.target.value as SupplierIntegration['auth_type'] })} className="bbt-input">
+            <select value={form.auth_type || 'portal'} onChange={(e) => setForm({ ...form, auth_type: e.target.value as IntegrationProviderClientRecord['auth_type'] })} className="bbt-input">
               <option value="portal">Portal</option>
               <option value="bearer">Bearer</option>
               <option value="api_key">API key</option>
@@ -326,15 +645,18 @@ function SupplierModal({ open, editing, onClose }: { open: boolean; editing: Sup
         <Field label="Observacoes operacionais"><textarea value={form.observacoes || ''} onChange={(e) => setForm({ ...form, observacoes: e.target.value })} className="bbt-input min-h-[90px] py-2" /></Field>
 
         <div className="flex justify-end gap-2 border-t border-bbt-gray-100 pt-4 dark:border-slate-700">
-          <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
-          <button type="submit" className="bbt-button-primary">Salvar fornecedor</button>
+          <button type="button" onClick={onClose} className="bbt-button-ghost" disabled={saving}>Cancelar</button>
+          <button type="submit" className="bbt-button-primary" disabled={saving}>
+            {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+            Salvar fornecedor
+          </button>
         </div>
       </form>
     </Modal>
   )
 }
 
-function defaultForm(): Partial<SupplierIntegration> {
+function defaultForm(): Partial<IntegrationProviderClientRecord> {
   return {
     nome: '',
     tipo: 'outro',

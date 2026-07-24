@@ -10,12 +10,17 @@ import type {
   StatusMovimentoCarteira,
 } from '@/types'
 import type { LancamentoFinanceiro } from '@/lib/financeiro'
-import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { corporateFinanceStateSchema } from '@/lib/corporate-finance/schema'
+import {
+  applyDomainApiValueLocally,
+  loadJSON,
+  safeSetJSON,
+} from '@/lib/storage-quota'
 import { createEntityId } from '@/lib/ids'
 
 const STORAGE_KEY = 'bbt-corporate-finance'
 
-interface CorporateFinanceState {
+export interface CorporateFinanceState {
   carteiras: CarteiraCorporativa[]
   cartoes: CartaoCorporativo[]
   movimentos: MovimentoCarteiraCorporativa[]
@@ -115,6 +120,40 @@ export function getCorporateFinanceState(): CorporateFinanceState {
     ...state,
     faturas: state.faturas.map((f) => ({ ...f, status: statusFatura(f) })),
   }
+}
+
+export function aplicarCorporateFinanceStateDoServidor(
+  value: unknown,
+  scopedCompanyIds?: string[],
+): CorporateFinanceState {
+  const parsed = corporateFinanceStateSchema.parse(value) as CorporateFinanceState
+  if (!scopedCompanyIds?.length) {
+    applyDomainApiValueLocally(STORAGE_KEY, parsed)
+    return parsed
+  }
+
+  const scoped = new Set(scopedCompanyIds)
+  const current = load()
+  const next: CorporateFinanceState = {
+    carteiras: [
+      ...current.carteiras.filter((item) => !scoped.has(item.company_id)),
+      ...parsed.carteiras,
+    ],
+    cartoes: [
+      ...current.cartoes.filter((item) => !scoped.has(item.company_id)),
+      ...parsed.cartoes,
+    ],
+    movimentos: [
+      ...current.movimentos.filter((item) => !scoped.has(item.company_id)),
+      ...parsed.movimentos,
+    ],
+    faturas: [
+      ...current.faturas.filter((item) => !scoped.has(item.company_id)),
+      ...parsed.faturas,
+    ],
+  }
+  applyDomainApiValueLocally(STORAGE_KEY, next)
+  return next
 }
 
 export function getAllCarteirasCorporativas(): CarteiraCorporativa[] {

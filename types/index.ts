@@ -5,6 +5,27 @@
 
 export type UserRole = 'master' | 'company_admin' | 'colaborador'
 export type PerfilBBT = 'agente' | 'lider' | 'gestor_financeiro' | 'operacional' | 'supervisor'
+export type CorporateProfile =
+  | 'owner'
+  | 'ceo'
+  | 'group_admin'
+  | 'executive_assistant'
+  | 'group_finance'
+  | 'manager'
+  | 'viewer'
+  | 'company_admin'
+  | 'requester'
+export type CorporateAccessMode = 'all_companies' | 'selected_companies'
+
+export interface CorporateDelegationAuthority {
+  sourceId: string
+  source: 'group' | 'company'
+  profile: CorporateProfile
+  permissions: Permissoes
+  companyIds: string[]
+  accessMode: CorporateAccessMode | null
+  canViewConsolidated: boolean
+}
 
 export interface Permissoes {
   ver_financeiro: boolean
@@ -19,44 +40,395 @@ export interface Permissoes {
   gerenciar_usuarios: boolean
   excluir_demandas: boolean
   aprovar_demandas: boolean
+  ver_empresas: boolean
+  ver_consolidado_grupo: boolean
+  ver_funcionarios: boolean
+  gerenciar_funcionarios: boolean
+  ver_solicitantes: boolean
+  gerenciar_solicitantes: boolean
+  criar_demandas: boolean
+  ver_demandas: boolean
+  ver_reservas: boolean
+  ver_emissoes: boolean
+  ver_vouchers: boolean
+  ver_relatorios: boolean
+  exportar_relatorios: boolean
+  gerenciar_vinculos_acesso: boolean
+  gerenciar_empresas_grupo: boolean
+  alterar_configuracoes: boolean
+  operar_cotacoes: boolean
+  operar_reservas: boolean
+  operar_emissoes: boolean
+  operar_cancelamentos: boolean
+  gerenciar_integracoes: boolean
+  ver_politicas: boolean
+  gerenciar_politicas: boolean
+  publicar_politicas: boolean
+  simular_politicas: boolean
+  ver_aprovacoes: boolean
+  decidir_aprovacoes: boolean
+  ver_workflows: boolean
+  gerenciar_workflows: boolean
+  executar_workflows: boolean
+  gerenciar_delegacoes: boolean
+  usar_ia: boolean
+  gerenciar_ia: boolean
+  ver_arquivos: boolean
+  gerenciar_arquivos: boolean
+  ver_auditoria: boolean
+  ver_inteligencia: boolean
+  usar_busca_global: boolean
+  ver_orcamentos: boolean
+  gerenciar_orcamentos: boolean
+  executar_automacoes: boolean
+  gerenciar_automacoes: boolean
+  acessar_portal_viajante: boolean
 }
+
+const CORPORATE_PERMISSIONS_DENIED = {
+  ver_empresas: false,
+  ver_consolidado_grupo: false,
+  ver_funcionarios: false,
+  gerenciar_funcionarios: false,
+  ver_solicitantes: false,
+  gerenciar_solicitantes: false,
+  criar_demandas: false,
+  ver_demandas: false,
+  ver_reservas: false,
+  ver_emissoes: false,
+  ver_vouchers: false,
+  ver_relatorios: false,
+  exportar_relatorios: false,
+  gerenciar_vinculos_acesso: false,
+  gerenciar_empresas_grupo: false,
+  alterar_configuracoes: false,
+  operar_cotacoes: false,
+  operar_reservas: false,
+  operar_emissoes: false,
+  operar_cancelamentos: false,
+  gerenciar_integracoes: false,
+  ver_politicas: false,
+  gerenciar_politicas: false,
+  publicar_politicas: false,
+  simular_politicas: false,
+  ver_aprovacoes: false,
+  decidir_aprovacoes: false,
+  ver_workflows: false,
+  gerenciar_workflows: false,
+  executar_workflows: false,
+  gerenciar_delegacoes: false,
+  usar_ia: false,
+  gerenciar_ia: false,
+  ver_arquivos: false,
+  gerenciar_arquivos: false,
+  ver_auditoria: false,
+  ver_inteligencia: false,
+  usar_busca_global: false,
+  ver_orcamentos: false,
+  gerenciar_orcamentos: false,
+  executar_automacoes: false,
+  gerenciar_automacoes: false,
+  acessar_portal_viajante: false,
+} as const
 
 export const PERMISSOES_PADRAO_POR_PERFIL: Record<PerfilBBT, Permissoes> = {
   lider: {
+    ...CORPORATE_PERMISSIONS_DENIED,
     ver_financeiro: true, editar_financeiro: true,
     cadastrar_empresas: true, cadastrar_funcionarios: true, cadastrar_hoteis: true,
     editar_politicas: true, gerar_relatorios: true, importar_planilhas: true,
     ver_produtividade_todos: true, gerenciar_usuarios: true, excluir_demandas: true,
     aprovar_demandas: true,
+    ver_empresas: true, ver_consolidado_grupo: true,
+    ver_funcionarios: true, gerenciar_funcionarios: true,
+    ver_solicitantes: true, gerenciar_solicitantes: true,
+    criar_demandas: true, ver_demandas: true, ver_reservas: true,
+    ver_emissoes: true, ver_vouchers: true, ver_relatorios: true,
+    exportar_relatorios: true, gerenciar_vinculos_acesso: true,
+    gerenciar_empresas_grupo: true, alterar_configuracoes: true,
+    operar_cotacoes: true, operar_reservas: true, operar_emissoes: true,
+    operar_cancelamentos: true, gerenciar_integracoes: true,
+    ver_politicas: true, gerenciar_politicas: true, publicar_politicas: true,
+    simular_politicas: true, ver_aprovacoes: true, decidir_aprovacoes: true,
+    ver_workflows: true, gerenciar_workflows: true, executar_workflows: true,
+    gerenciar_delegacoes: true, usar_ia: true, gerenciar_ia: true,
+    ver_arquivos: true, gerenciar_arquivos: true, ver_auditoria: true,
+    ver_inteligencia: true, usar_busca_global: true,
+    ver_orcamentos: true, gerenciar_orcamentos: true,
+    executar_automacoes: true, gerenciar_automacoes: true,
+    acessar_portal_viajante: true,
   },
   gestor_financeiro: {
+    ...CORPORATE_PERMISSIONS_DENIED,
     ver_financeiro: true, editar_financeiro: true,
     cadastrar_empresas: false, cadastrar_funcionarios: false, cadastrar_hoteis: false,
     editar_politicas: false, gerar_relatorios: true, importar_planilhas: true,
     ver_produtividade_todos: true, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: true,
+    ver_empresas: true, ver_consolidado_grupo: true,
+    ver_funcionarios: true, ver_demandas: true, ver_reservas: true,
+    ver_emissoes: true, ver_vouchers: true, ver_relatorios: true,
+    exportar_relatorios: true,
+    operar_cotacoes: true,
+    ver_politicas: true, ver_aprovacoes: true, decidir_aprovacoes: true,
+    ver_workflows: true, executar_workflows: true, usar_ia: true,
+    ver_arquivos: true, ver_auditoria: true, ver_inteligencia: true,
+    usar_busca_global: true, ver_orcamentos: true, gerenciar_orcamentos: true,
   },
   supervisor: {
+    ...CORPORATE_PERMISSIONS_DENIED,
     ver_financeiro: true, editar_financeiro: false,
     cadastrar_empresas: true, cadastrar_funcionarios: true, cadastrar_hoteis: true,
     editar_politicas: true, gerar_relatorios: true, importar_planilhas: true,
     ver_produtividade_todos: true, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: true,
+    ver_empresas: true, ver_consolidado_grupo: true,
+    ver_funcionarios: true, gerenciar_funcionarios: true,
+    ver_solicitantes: true, gerenciar_solicitantes: true,
+    criar_demandas: true, ver_demandas: true, ver_reservas: true,
+    ver_emissoes: true, ver_vouchers: true, ver_relatorios: true,
+    exportar_relatorios: true,
+    operar_cotacoes: true, operar_reservas: true, operar_emissoes: true,
+    operar_cancelamentos: true, gerenciar_integracoes: true,
+    ver_politicas: true, gerenciar_politicas: true, simular_politicas: true,
+    ver_aprovacoes: true, decidir_aprovacoes: true, ver_workflows: true,
+    gerenciar_workflows: true, executar_workflows: true, usar_ia: true,
+    gerenciar_ia: true, ver_arquivos: true, gerenciar_arquivos: true,
+    ver_auditoria: true, ver_inteligencia: true, usar_busca_global: true,
+    ver_orcamentos: true, gerenciar_orcamentos: true,
+    executar_automacoes: true, gerenciar_automacoes: true,
+    acessar_portal_viajante: true,
   },
   agente: {
+    ...CORPORATE_PERMISSIONS_DENIED,
     ver_financeiro: false, editar_financeiro: false,
     cadastrar_empresas: false, cadastrar_funcionarios: true, cadastrar_hoteis: false,
     editar_politicas: false, gerar_relatorios: false, importar_planilhas: false,
     ver_produtividade_todos: false, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: false,
+    ver_empresas: true, ver_funcionarios: true, gerenciar_funcionarios: true,
+    ver_solicitantes: true, criar_demandas: true, ver_demandas: true,
+    ver_reservas: true, ver_emissoes: true, ver_vouchers: true,
+    operar_cotacoes: true, operar_reservas: true, operar_emissoes: true,
+    operar_cancelamentos: true, gerenciar_integracoes: true,
+    ver_politicas: true, ver_aprovacoes: true, ver_workflows: true,
+    executar_workflows: true, usar_ia: true, ver_arquivos: true,
+    gerenciar_arquivos: true, usar_busca_global: true,
+    acessar_portal_viajante: true,
   },
   operacional: {
+    ...CORPORATE_PERMISSIONS_DENIED,
     ver_financeiro: false, editar_financeiro: false,
     cadastrar_empresas: false, cadastrar_funcionarios: false, cadastrar_hoteis: false,
     editar_politicas: false, gerar_relatorios: false, importar_planilhas: false,
     ver_produtividade_todos: false, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: false,
+    ver_empresas: true, ver_funcionarios: true, ver_solicitantes: true,
+    criar_demandas: true, ver_demandas: true, ver_reservas: true,
+    ver_emissoes: true, ver_vouchers: true,
+    operar_cotacoes: true, operar_reservas: true, operar_emissoes: true,
+    operar_cancelamentos: true, gerenciar_integracoes: true,
+    ver_workflows: true, executar_workflows: true, usar_ia: true,
+    ver_arquivos: true, gerenciar_arquivos: true, usar_busca_global: true,
+    acessar_portal_viajante: true,
   },
+}
+
+const NO_PERMISSIONS: Permissoes = {
+  ...PERMISSOES_PADRAO_POR_PERFIL.operacional,
+  criar_demandas: false,
+  ver_demandas: false,
+  ver_reservas: false,
+  ver_emissoes: false,
+  ver_vouchers: false,
+  ver_empresas: false,
+  ver_funcionarios: false,
+  ver_solicitantes: false,
+  operar_cotacoes: false,
+  operar_reservas: false,
+  operar_emissoes: false,
+  operar_cancelamentos: false,
+  gerenciar_integracoes: false,
+  ver_politicas: false,
+  gerenciar_politicas: false,
+  publicar_politicas: false,
+  simular_politicas: false,
+  ver_aprovacoes: false,
+  decidir_aprovacoes: false,
+  ver_workflows: false,
+  gerenciar_workflows: false,
+  executar_workflows: false,
+  gerenciar_delegacoes: false,
+  usar_ia: false,
+  gerenciar_ia: false,
+  ver_arquivos: false,
+  gerenciar_arquivos: false,
+  ver_auditoria: false,
+  ver_inteligencia: false,
+  usar_busca_global: false,
+  ver_orcamentos: false,
+  gerenciar_orcamentos: false,
+  executar_automacoes: false,
+  gerenciar_automacoes: false,
+  acessar_portal_viajante: false,
+}
+
+function permissions(...enabled: Array<keyof Permissoes>): Permissoes {
+  const value = { ...NO_PERMISSIONS }
+  enabled.forEach((permission) => { value[permission] = true })
+  return value
+}
+
+export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes> = {
+  owner: {
+    ...permissions(...Object.keys(NO_PERMISSIONS) as Array<keyof Permissoes>),
+    operar_cotacoes: false,
+    operar_reservas: false,
+    operar_emissoes: false,
+    operar_cancelamentos: false,
+    gerenciar_integracoes: false,
+  },
+  ceo: permissions(
+    'ver_financeiro', 'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios',
+    'ver_solicitantes', 'ver_demandas', 'aprovar_demandas', 'ver_reservas',
+    'ver_emissoes', 'ver_vouchers', 'gerar_relatorios', 'ver_relatorios',
+    'exportar_relatorios', 'ver_produtividade_todos',
+    'ver_politicas', 'simular_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
+    'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos',
+    'ver_auditoria', 'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos',
+  ),
+  group_admin: permissions(
+    'ver_empresas', 'ver_consolidado_grupo', 'cadastrar_empresas', 'gerenciar_empresas_grupo',
+    'ver_funcionarios', 'cadastrar_funcionarios', 'gerenciar_funcionarios',
+    'ver_solicitantes', 'gerenciar_solicitantes', 'criar_demandas', 'ver_demandas',
+    'aprovar_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+    'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios', 'gerenciar_usuarios',
+    'gerenciar_vinculos_acesso', 'editar_politicas', 'alterar_configuracoes',
+    'ver_politicas', 'gerenciar_politicas', 'publicar_politicas', 'simular_politicas',
+    'ver_aprovacoes', 'decidir_aprovacoes', 'gerenciar_workflows', 'gerenciar_delegacoes',
+    'ver_workflows', 'executar_workflows', 'usar_ia', 'gerenciar_ia',
+    'ver_arquivos', 'gerenciar_arquivos', 'ver_auditoria', 'ver_inteligencia',
+    'usar_busca_global', 'ver_orcamentos', 'gerenciar_orcamentos',
+    'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
+  ),
+  executive_assistant: permissions(
+    'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
+    'criar_demandas', 'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+    'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios',
+    'ver_politicas', 'ver_aprovacoes',
+    'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos',
+    'gerenciar_arquivos', 'usar_busca_global', 'acessar_portal_viajante',
+  ),
+  group_finance: permissions(
+    'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
+    'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers', 'ver_financeiro',
+    'editar_financeiro', 'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios',
+    'ver_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
+    'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos',
+    'ver_auditoria', 'ver_inteligencia', 'usar_busca_global',
+    'ver_orcamentos', 'gerenciar_orcamentos',
+  ),
+  manager: permissions(
+    'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
+    'criar_demandas', 'ver_demandas', 'aprovar_demandas', 'ver_reservas',
+    'ver_emissoes', 'ver_vouchers', 'gerar_relatorios', 'ver_relatorios',
+    'exportar_relatorios',
+    'ver_politicas', 'simular_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
+    'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos',
+    'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos',
+  ),
+  viewer: permissions(
+    'ver_empresas', 'ver_funcionarios', 'ver_solicitantes', 'ver_demandas',
+    'ver_reservas', 'ver_emissoes', 'ver_vouchers', 'ver_relatorios',
+    'ver_politicas',
+    'ver_workflows', 'usar_ia', 'ver_arquivos', 'ver_inteligencia',
+    'usar_busca_global', 'ver_orcamentos',
+  ),
+  company_admin: permissions(
+    'ver_empresas', 'ver_funcionarios', 'cadastrar_funcionarios', 'gerenciar_funcionarios',
+    'ver_solicitantes', 'gerenciar_solicitantes', 'criar_demandas', 'ver_demandas',
+    'aprovar_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+    'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios', 'editar_politicas',
+    'alterar_configuracoes',
+    'ver_politicas', 'gerenciar_politicas', 'simular_politicas',
+    'ver_aprovacoes', 'decidir_aprovacoes', 'ver_workflows',
+    'gerenciar_workflows', 'executar_workflows', 'gerenciar_delegacoes',
+    'usar_ia', 'gerenciar_ia', 'ver_arquivos', 'gerenciar_arquivos',
+    'ver_auditoria', 'ver_inteligencia', 'usar_busca_global',
+    'ver_orcamentos', 'gerenciar_orcamentos',
+    'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
+  ),
+  requester: permissions(
+    'ver_empresas', 'ver_funcionarios', 'ver_solicitantes', 'criar_demandas',
+    'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+    'ver_politicas', 'ver_aprovacoes',
+    'ver_workflows', 'usar_ia', 'ver_arquivos', 'usar_busca_global',
+    'acessar_portal_viajante',
+  ),
+}
+
+export type AuthorizationScopeType =
+  | 'tenant'
+  | 'group'
+  | 'company'
+  | 'organizational_unit'
+  | 'cost_center'
+  | 'project'
+  | 'user'
+
+export interface AuthorizationScopeGrant {
+  id: string
+  effect: 'allow' | 'deny'
+  permission: keyof Permissoes
+  resource: string
+  actions: string[]
+  scopeType: AuthorizationScopeType
+  scopeId: string
+  companyId: string | null
+  fieldNames: string[]
+  isBoundary: boolean
+  conditions: Record<string, unknown>
+}
+
+export interface CorporateCompanyAccessSummary {
+  companyId: string
+  companyName: string
+  groupId: string | null
+  groupName: string | null
+  sources: Array<'tenant_admin' | 'legacy_unscoped' | 'group_all' | 'group_selected' | 'direct'>
+  profiles: CorporateProfile[]
+  permissions: Permissoes
+  delegationAuthorities?: CorporateDelegationAuthority[]
+}
+
+export interface CorporateGroupAccessSummary {
+  groupId: string
+  groupName: string
+  companyIds: string[]
+  canViewConsolidated: boolean
+  accessModes: CorporateAccessMode[]
+  profiles: CorporateProfile[]
+  delegationAuthorities?: CorporateDelegationAuthority[]
+}
+
+export interface CorporateContextOption {
+  type: 'company' | 'group'
+  id: string
+  label: string
+  groupId: string | null
+  companyIds: string[]
+  canViewConsolidated: boolean
+}
+
+export interface CorporateAccessSummary {
+  tenantWide: boolean
+  companyIds: string[]
+  groupIds: string[]
+  companies: CorporateCompanyAccessSummary[]
+  groups: CorporateGroupAccessSummary[]
+  contexts: CorporateContextOption[]
+  defaultContext: { type: 'company' | 'group'; id: string } | null
+  refreshedAt: string
 }
 
 export interface User {
@@ -75,6 +447,8 @@ export interface User {
   grupo_ids?: string[]
   perfil_bbt?: PerfilBBT
   permissoes?: Permissoes
+  corporate_profile?: CorporateProfile
+  corporate_access?: CorporateAccessSummary
   avatar?: string
   ativo?: boolean
   status?: 'invited' | 'active' | 'blocked' | 'inactive'
@@ -316,6 +690,9 @@ export interface DetalhesPacote {
 
 export interface Atendimento {
   id: string
+  relational_version?: number
+  relational_lifecycle_status?: string
+  relational_lifecycle_version?: number
   /** Identificador operacional legível usado para vincular demanda, cotação, reserva, emissão e voucher. */
   serial_os?: string
   empresa_id: string
@@ -539,6 +916,7 @@ export interface VoucherEmitido {
   emitido_por_user_name: string
   created_at: string
   updated_at?: string
+  version?: number
 }
 
 export const VOUCHER_PREFIX: Record<VoucherTipo, string> = {
@@ -625,6 +1003,7 @@ export interface CarteiraCorporativa {
   observacoes?: string
   created_at: string
   updated_at?: string
+  version?: number
 }
 
 export interface CartaoCorporativo {
@@ -646,6 +1025,7 @@ export interface CartaoCorporativo {
   criado_por_user_id?: string
   created_at: string
   updated_at?: string
+  version?: number
 }
 
 export interface MovimentoCarteiraCorporativa {
@@ -679,6 +1059,7 @@ export interface FaturaCorporativa {
   observacoes?: string
   created_at: string
   updated_at?: string
+  version?: number
 }
 
 // ============================================================

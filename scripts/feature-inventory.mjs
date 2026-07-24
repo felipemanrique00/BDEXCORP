@@ -27,10 +27,15 @@ for (const file of apiRoutes) {
   const methods = Array.from(source.matchAll(/export\s+async\s+function\s+(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/g))
     .map((match) => match[1])
     .join(', ')
-  const guarded = source.includes('guardApiRequest')
+  const guardKind = source.includes('guardApiRequest')
+    ? 'Guard do servidor'
+    : source.includes('guardFileEntityRequest')
+      ? 'Guard do servidor + autorizacao por vinculo'
+      : null
+  const guarded = Boolean(guardKind)
   const expectedPublic = publicApiRoutes.has(route)
   if (!guarded && !expectedPublic) unguarded.push(route)
-  const protection = guarded ? 'Guard do servidor' : expectedPublic ? 'Publica por contrato' : 'SEM GUARD'
+  const protection = guardKind || (expectedPublic ? 'Publica por contrato' : 'SEM GUARD')
   const evidence = e2eApis.has(route)
     ? 'E2E no CI'
     : route === '/api/health' || route === '/api/ready'

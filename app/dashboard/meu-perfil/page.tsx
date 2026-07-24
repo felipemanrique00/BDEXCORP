@@ -4,12 +4,13 @@ import { useState, useEffect, useMemo } from 'react'
 import { getCurrentUser, perfilBBTLabel } from '@/lib/auth'
 import { useStore } from '@/lib/store'
 import {
-  getAtendimentosFiltro, getEstatisticas, deleteAtendimento,
+  getAtendimentosFiltro, getEstatisticas,
   type FiltroAtendimento,
 } from '@/lib/atendimentos-storage'
+import { persistDemandStatusWithCompatibility } from '@/lib/demand-persistence-client'
 import {
   BarChart3, Clock, CheckCircle2, AlertTriangle, XCircle, AlertCircle,
-  Plus, Plane, Hotel as HotelIcon, Car, Package, Zap, Edit2, Trash2, FileText,
+  Plus, Plane, Hotel as HotelIcon, Car, Package, Zap, Edit2, FileText,
   Download, Calendar, Paperclip, DollarSign, TrendingUp, Percent, Wand2,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -94,12 +95,20 @@ export default function MeuPerfilPage() {
     return getEstatisticas(filtro)
   }, [filtro, reload])
 
-  function handleDelete() {
+  async function handleDelete() {
     if (!confirmDelete) return
-    deleteAtendimento(confirmDelete.id)
-    toast.success('Demanda excluída.')
-    setConfirmDelete(null)
-    setReload((n) => n + 1)
+    try {
+      await persistDemandStatusWithCompatibility(
+        confirmDelete,
+        'cancelado',
+        'Cancelamento solicitado pelo usuario no perfil.',
+      )
+      toast.success('Demanda cancelada.')
+      setConfirmDelete(null)
+      setReload((n) => n + 1)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível cancelar a demanda.')
+    }
   }
 
   function handleEdit(a: Atendimento) { setEditando(a); setNovaOpen(true) }
@@ -233,9 +242,9 @@ export default function MeuPerfilPage() {
         onSaved={() => setReload((n) => n + 1)}
       />
       <ConfirmDialog open={!!confirmDelete} onClose={() => setConfirmDelete(null)} onConfirm={handleDelete}
-        title="Excluir demanda"
-        message={`Confirma excluir a demanda de "${confirmDelete?.passageiro_nome}"? Esta ação não pode ser desfeita.`}
-        confirmLabel="Excluir" danger />
+        title="Cancelar demanda"
+        message={`Confirma o cancelamento da demanda de "${confirmDelete?.passageiro_nome}"? O histórico será preservado.`}
+        confirmLabel="Cancelar demanda" danger />
       <AnexarVoucherModal open={!!anexarAtendimento}
         onClose={() => { setAnexarAtendimento(null); setReload((n) => n + 1) }}
         atendimento={anexarAtendimento} />
@@ -346,7 +355,7 @@ function DemandaItem({ atendimento, empresaNome, onEdit, onDelete, onAnexar }: {
           <div className="flex gap-1">
             <button onClick={onAnexar} className="p-1.5 rounded hover:bg-bbt-accent/10 text-slate-400 hover:text-bbt-accent transition" title="Anexar voucher"><Paperclip className="w-4 h-4" /></button>
             <button onClick={onEdit} className="p-1.5 rounded hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-400 hover:text-blue-600 transition" title="Editar"><Edit2 className="w-4 h-4" /></button>
-            <button onClick={onDelete} className="p-1.5 rounded hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-400 hover:text-red-600 transition" title="Excluir"><Trash2 className="w-4 h-4" /></button>
+            <button onClick={onDelete} className="p-1.5 rounded hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-400 hover:text-red-600 transition" title="Cancelar demanda"><XCircle className="w-4 h-4" /></button>
           </div>
         </div>
       </div>

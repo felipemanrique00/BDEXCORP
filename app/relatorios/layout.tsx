@@ -11,6 +11,7 @@ export default async function RelatoriosLayout({ children }: { children: ReactNo
   const principal = await resolveSession(cookieStore.get(sessionCookieName())?.value || null)
   if (!principal) redirect('/login')
   if (principal.user.must_change_password) redirect('/alterar-senha')
+  if (!principal.user.permissoes?.ver_relatorios) redirect('/dashboard')
 
-  return <ReportsShell>{children}</ReportsShell>
+  return <ReportsShell user={principal.user}>{children}</ReportsShell>
 }

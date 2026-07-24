@@ -6,7 +6,13 @@ import type {
 } from '@/types'
 import { calcularFinanceiro } from '@/types'
 import { ensureAtendimentoSerial, gerarProximoSerialOS, matchesSerialOS } from '@/lib/atendimento-serial'
-import { compactarAtendimento, loadJSON, safeGetRaw, safeSetJSON } from '@/lib/storage-quota'
+import {
+  applyDomainApiValueLocally,
+  compactarAtendimento,
+  loadJSON,
+  safeGetRaw,
+  safeSetJSON,
+} from '@/lib/storage-quota'
 import { createEntityId } from '@/lib/ids'
 
 const STORAGE_ATENDIMENTOS = 'bbt-atendimentos'
@@ -149,6 +155,22 @@ export function atualizarAtendimentoNaLista(
 
 export function persistirAtendimentos(list: Atendimento[]): boolean {
   return saveAtendimentos(list)
+}
+
+export function persistirAtendimentosRecebidosDoServidor(list: Atendimento[]): boolean {
+  const compactados = list.map((item) => compactarAtendimento(item))
+  const ok = applyDomainApiValueLocally(STORAGE_ATENDIMENTOS, compactados)
+  if (ok) {
+    const rawText = safeGetRaw(STORAGE_ATENDIMENTOS)
+    atendimentosCacheRaw = rawText
+    atendimentosCache = compactados.map((atendimento: any, index: number) => ensureAtendimentoSerial({
+      prioridade: atendimento.prioridade || 'media',
+      ...atendimento,
+    }, index))
+  } else {
+    invalidarAtendimentosCache()
+  }
+  return ok
 }
 
 export function addAtendimento(data: AtendimentoInput): Atendimento | null {

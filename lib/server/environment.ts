@@ -20,9 +20,17 @@ const environmentSchema = z.object({
   POSTGRES_POOL_MAX: positiveInteger.max(50).default(10),
   POSTGRES_CONNECT_TIMEOUT_MS: positiveInteger.max(60_000).default(5_000),
   POSTGRES_STATEMENT_TIMEOUT_MS: positiveInteger.max(120_000).default(30_000),
+  AUTOMATION_WORKER_ENABLED: optionalBooleanValue.default(true),
+  AUTOMATION_WORKER_INTERVAL_MS: positiveInteger.min(1_000).max(300_000).default(5_000),
+  AUTOMATION_WORKER_BATCH_SIZE: positiveInteger.max(100).default(25),
   AUTH_SECRET: z.string().optional(),
   AUTH_SESSION_HOURS: positiveInteger.max(24 * 30).default(12),
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('bbt_session'),
+  MFA_ADMIN_REQUIRED: optionalBooleanValue.default(true),
+  MFA_ENCRYPTION_KEY: z.string().trim().optional(),
+  MFA_ISSUER: z.string().trim().min(2).max(80).default('BBT Corporativo'),
+  MFA_CHALLENGE_MINUTES: positiveInteger.min(2).max(30).default(10),
+  MFA_MAX_ATTEMPTS: positiveInteger.min(3).max(10).default(6),
   STORAGE_ROOT: z.string().min(1).default('.bbt-storage/files'),
   MAX_UPLOAD_BYTES: positiveInteger.max(100 * 1024 * 1024).default(15 * 1024 * 1024),
   SMTP_ENABLED: optionalBooleanValue.default(false),
@@ -84,6 +92,12 @@ function validateProductionEnvironment(environment: ServerEnvironment): void {
   if (!environment.AUTH_SECRET || environment.AUTH_SECRET.length < 32 || /change|default|example|secret/i.test(environment.AUTH_SECRET)) {
     errors.push('AUTH_SECRET deve ter ao menos 32 caracteres aleatorios e nao pode ser padrao')
   }
+  if (!environment.MFA_ADMIN_REQUIRED) {
+    errors.push('MFA_ADMIN_REQUIRED deve permanecer habilitado em producao')
+  }
+  if (!environment.MFA_ENCRYPTION_KEY || !isValidMfaEncryptionKey(environment.MFA_ENCRYPTION_KEY)) {
+    errors.push('MFA_ENCRYPTION_KEY deve conter exatamente 32 bytes em Base64')
+  }
   const localTestUrlAllowed = Boolean(
     environment.ALLOW_INSECURE_LOCALHOST &&
     environment.APP_URL &&
@@ -132,6 +146,15 @@ function isLoopbackHttpUrl(value: string): boolean {
   try {
     const url = new URL(value)
     return url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+function isValidMfaEncryptionKey(value: string): boolean {
+  try {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+    return Buffer.from(normalized, 'base64').length === 32
   } catch {
     return false
   }

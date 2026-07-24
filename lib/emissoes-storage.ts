@@ -1,19 +1,26 @@
 // ============================================================
 // Storage de Emissoes (atendimentos hoteleiros)
 // ============================================================
-import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import {
+  applyDomainApiValueLocally,
+  loadJSON,
+  safeSetJSON,
+} from '@/lib/storage-quota'
 import { createEntityId } from '@/lib/ids'
 
 export interface Emissao {
   id: string
   hotel_id: number
   empresa_id: string
+  funcionario_id?: string | null
   funcionario_nome: string
   data_checkin: string
   data_checkout: string
   valor_total: number
   observacoes: string
   created_at: string
+  updated_at?: string
+  version?: number
 }
 
 const STORAGE_KEY = 'bbt-emissoes'
@@ -29,6 +36,27 @@ function save(list: Emissao[]) {
 
 export function getAllEmissoes(): Emissao[] {
   return load()
+}
+
+export function substituirEmissoesDoServidor(emissoes: Emissao[]): boolean {
+  return applyDomainApiValueLocally(STORAGE_KEY, emissoes)
+}
+
+export function substituirEmissoesDaEmpresaDoServidor(
+  empresaId: string,
+  emissoes: Emissao[],
+): boolean {
+  const outrasEmpresas = load().filter((emissao) => emissao.empresa_id !== empresaId)
+  return substituirEmissoesDoServidor([
+    ...outrasEmpresas,
+    ...emissoes.filter((emissao) => emissao.empresa_id === empresaId),
+  ])
+}
+
+export function aplicarEmissoesDoServidor(emissoes: Emissao[]): boolean {
+  const porId = new Map(load().map((emissao) => [emissao.id, emissao]))
+  for (const emissao of emissoes) porId.set(emissao.id, emissao)
+  return substituirEmissoesDoServidor([...porId.values()])
 }
 
 export function getEmissoesByEmpresa(empresaId: string): Emissao[] {

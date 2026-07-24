@@ -6,12 +6,17 @@ O arquivo `FEATURE-INVENTORY.generated.md` lista individualmente todas as pagina
 
 Inventario atual:
 
-- 55 paginas;
-- 66 APIs;
+- 61 paginas;
+- 166 arquivos de rotas de API;
 - APIs publicas por contrato: health, readiness e consulta de sessao;
 - demais APIs com guard do servidor.
 
 Esse inventario e a lista canonica exigida para cada pagina/API. Nao interprete `Build e inventario` como teste funcional completo.
+
+`DOMAIN-MAP.md` complementa o inventario com 137 linhas de rastreabilidade e
+cobre nominalmente os 102 itens exigidos para identidade, cadastros,
+solicitacoes, produtos, operacao, financeiro, relatorios e integracoes. Itens
+parciais, hibridos ou ausentes estao marcados explicitamente.
 
 ## Legenda
 
@@ -24,33 +29,45 @@ Esse inventario e a lista canonica exigida para cada pagina/API. Nao interprete 
 
 | Area | Implementacao | Evidencia | Status |
 | --- | --- | --- | --- |
-| Login/sessao | Sessao DB, cookie seguro, bloqueio e revogacao | Dominio, unidade e E2E | Local parcial; E2E no CI |
+| Login/sessao | Sessao DB, cookie seguro, bloqueio e revogacao | Dominio, unidade, integracao e E2E | Verificado localmente |
 | Convite/reset | Token hash, expiracao, SMTP | Build e rotas guardadas | Pendente SMTP real |
-| Tenant/RBAC | Membership, papeis, escopo e guard | Migrations, dominio e integracao | Integracao no CI |
-| Isolamento | RLS forcado e FK composta | `tenant-isolation.test.ts` | Integracao no CI |
+| Tenant/RBAC | Membership, papeis, escopo e guard | Migrations, dominio e integracao | Verificado localmente em PostgreSQL |
+| Isolamento | RLS forcado e FK composta | `tenant-isolation.test.ts` e `identity-plane-rls.test.ts` | Verificado localmente em PostgreSQL |
+| Acesso corporativo | Grupo, empresas selecionadas/diretas e contexto consolidado | Unidade + integracao PostgreSQL | Verificado localmente |
 | Empresas/grupos | Cadastros e portal com escopo | Build/inventario | Nao verificado ponta a ponta |
 | Funcionarios | ID permanente, aliases e vinculacao manual | Testes de dominio | Verificado localmente |
 | Demandas/OS | Persistencia remota confirmada antes do sucesso | Dominio/build | Nao verificado ponta a ponta |
-| Reservas/cotacoes | APIs reais ou erro explicito | Build/inventario | Tech transacional bloqueada |
+| Politicas | DSL, versao, escopo, simulacao, conflito e 636 templates | Unidade/build/migrations | Motor e persistencia PostgreSQL verificados |
+| Aprovacoes | Grafo, alcada, delegacao, quorum e SLA | Unidade/build/migrations | Motor e persistencia PostgreSQL verificados; teste de carga concorrente dedicado ainda pendente |
+| Ciclo de viagem | Maquina de estados, versao, idempotencia e reaprovacao | Unidade/build/migrations | Motor verificado; E2E externo pendente |
+| Reservas/cotacoes | APIs reais ou erro explicito | Build/inventario | Adapter Tech implementado, nao homologado |
 | Vouchers | CRUD, PDF privado e vinculos | Unitario de PDF + E2E | E2E no CI |
 | Importacoes | Wintour/CSV/PDF, idempotencia e conciliacao | Dominio/build | Arquivos reais adicionais pendentes |
 | Financeiro | Validacao e persistencia confirmada | Unitario/build | Nao verificado ponta a ponta |
 | Relatorios | Empresa, grupo, pessoa, centro, agente, dashboard e HTML | Dominio/build | Revisao visual pendente |
-| IA/BIA | APIs guardadas, erro sem provedor | Dominio/build | Pendente credenciais reais |
+| IA/BIA | APIs guardadas, config por tenant, historico e tarefas relacionais | Unidade/build | Pendente credenciais reais |
+| Snapshots de relatorio | Persistencia por usuario/tenant no PostgreSQL | Unidade + teste RLS | Verificado localmente |
+| Rollout de dados | Shadow/dual, discrepancias, piloto e rollback | Unidade/scripts/migrations | Dry-run com dados reais pendente |
 | Tech Relatorios | Proxy servidor e normalizacao | Unitario/contrato | Pendente credencial/fornecedor |
 | WhatsApp | Configuracao protegida | Build | Envio nao homologado |
-| Plataforma SaaS | Tenants, planos, limites e convite | Build/E2E | E2E no CI + SMTP externo |
+| Plataforma SaaS | Tenants, planos, limites e convite | Build/E2E | E2E local aprovado; SMTP externo pendente |
 | Reset | Escopo de tenant, senha e arquivos em staging | Dominio/build | Restore operacional pendente |
 | Backup/restore | Scripts com hash e restore isolado | CI configurado | Nao executado localmente |
 
 ## Testes automatizados
 
 - `scripts/domain-tests.cjs`: regressao de regras, seguranca, importacao, identificacao, storage e relatorios.
-- `tests/unit`: senha, merge, financeiro, fornecedores, quota, PDF e demais funcoes puras.
-- `tests/integration/tenant-isolation.test.ts`: PostgreSQL real e ataques cruzados.
+- `tests/unit`: 68 arquivos e 344 testes aprovados localmente na validacao de 24/07/2026.
+- `tests/integration`: 15 arquivos e 50 cenarios aprovados em PostgreSQL descartavel com papel de aplicacao sem `SUPERUSER` e sem `BYPASSRLS`.
+- `tests/integration/tenant-isolation.test.ts` e `identity-plane-rls.test.ts`: isolamento de tenant e identidade, incluindo ataques cruzados.
+- `tests/integration/corporate-access-database.test.ts`: grants, constraints, IA e snapshots entre tenants.
 - `tests/e2e/auth.spec.ts`: redirect, login invalido/valido, admin SaaS, persistencia e arquivos privados.
 - `scripts/load-test.mjs`: leitura autenticada, throughput, media, p95 e erros.
 - `.github/workflows/quality.yml`: migrations, bootstrap, testes, build, browser, imagem, backup e restore.
+
+Nesta maquina, a suite de integracao foi executada contra banco descartavel e
+aprovou 50 cenarios em 15 arquivos. A mesma suite ainda precisa ser repetida no
+staging com a configuracao, proxy, TLS e credenciais reais daquele ambiente.
 
 ## Dependencias externas
 

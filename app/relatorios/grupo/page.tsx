@@ -32,10 +32,12 @@ function RelatorioGrupoInner() {
 
   const { empresas, funcionarios, gruposEmpresariais } = useStore()
   const grupo = gruposEmpresariais.find((item) => item.id === grupoId)
-  const escopo = resolverEscopoGrupoUsuario(user, grupo, empresas)
+  const escopo = resolverEscopoGrupoUsuario(user, grupo, empresas, 'ver_relatorios')
   const empresasPermitidas = empresas.filter((empresa) => escopo.empresaIdsPermitidas.includes(empresa.id))
   const empresaSelecionada = empresasPermitidas.find((empresa) => empresa.id === empresaFiltro)
   const empresaIds = empresaSelecionada ? [empresaSelecionada.id] : escopo.empresaIdsPermitidas
+  const exportScope = resolverEscopoGrupoUsuario(user, grupo, empresas, 'exportar_relatorios')
+  const canExport = empresaIds.length > 0 && empresaIds.every((id) => exportScope.empresaIdsPermitidas.includes(id))
   const empresaIdsKey = empresaIds.join('|')
 
   const atendimentos = useMemo(() => {
@@ -66,6 +68,7 @@ function RelatorioGrupoInner() {
         aereoUrl={`/relatorios/aereo?grupo=${grupoId}${empresaSelecionada ? `&empresa=${empresaSelecionada.id}` : ''}&inicio=${inicio}&fim=${fim}&visao=cliente`}
       />
       <CorporateReport
+        canExport={canExport}
         title={visao === 'agencia' ? 'Relatório Interno Consolidado por Grupo' : 'Relatório Consolidado por Grupo'}
         eyebrow={visao === 'agencia' ? 'Visão da agência' : 'Visão da empresa'}
         visao={visao}

@@ -16,13 +16,9 @@ import {
   sugestaoParaHotel,
   type HotelAISuggestion,
 } from '@/lib/ia-hotel-search'
-import {
-  addAgentRun,
-  addAgentTask,
-  upsertAgentMemory,
-} from '@/lib/ai-agent-storage'
 import { AI_NAME } from '@/lib/branding'
 import { encontrarFuncionarioConfiavel, encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
+import type { AiActionProposal, PrepareAiAction } from '@/lib/ai-actions'
 
 export interface TravelAgentContext {
   empresas: Empresa[]
@@ -33,8 +29,7 @@ export interface TravelAgentContext {
 }
 
 export interface TravelAgentOps {
-  addHotel?: (hotel: Omit<Hotel, 'id'>) => void
-  createAtendimento?: (data: Omit<Atendimento, 'id' | 'created_at' | 'updated_at'>) => Atendimento | null
+  prepareAction?: PrepareAiAction
   currentUser?: { id: string; name?: string }
   politicas?: PoliticaCargo[]
 }
@@ -47,6 +42,7 @@ export interface TravelAgentResponse {
   links?: Array<{ label: string; href: string; kind?: 'primary' | 'secondary' | 'download' }>
   cards?: Array<{ title: string; subtitle?: string; meta?: string; href?: string }>
   sources?: Array<{ title?: string; uri?: string }>
+  actionProposals?: AiActionProposal[]
   provedor?: 'sistema' | 'openai' | 'gemini' | 'local'
 }
 
@@ -69,7 +65,7 @@ interface PolicyDecision {
 
 interface HotelPlan {
   suggestions: HotelAISuggestion[]
-  cadastradas: HotelAISuggestion[]
+  actionProposals: AiActionProposal[]
   summary: string
   sources: Array<{ title?: string; uri?: string }>
   externalWarning?: string
@@ -139,8 +135,8 @@ export async function runTravelAgent(
   const policy = avaliarPolitica({ tipo, parsed, funcionario, empresa, politicas, dataInicio })
   const hotelPlan = await montarPlanoHotel(pergunta, destino, ctx, ops, tipo)
 
-  const atendimento = empresa && ops.createAtendimento
-    ? ops.createAtendimento(montarAtendimento({
+  const demandInput = empresa
+    ? montarAtendimento({
         empresa,
         funcionario,
         parsed,
@@ -152,47 +148,22 @@ export async function runTravelAgent(
         dataFim,
         prioridade,
         currentUserId: ops.currentUser?.id || 'ia-operacional',
-      }))
+      })
     : null
-
-  criarTarefasOperacionais({
-    atendimento,
-    tipo,
-    destino,
-    dataInicio,
-    requiresApproval: policy.requiresApproval,
-    externalWarning: hotelPlan.externalWarning,
-    prioridade,
-  })
-
-  salvarMemoriaSeAplicavel(pergunta, funcionario, empresa)
-
-  const plan = [
-    'Identificar viajante, empresa, centro de custo e politica aplicavel.',
-    'Consultar tarifa e disponibilidade em provedor real.',
-    'Aplicar a politica sobre os valores retornados.',
-    'Submeter aprovacao, reservar e emitir somente depois da conferencia.',
-  ]
-
-  addAgentRun({
-    input: pergunta,
-    intent,
-    status: 'pendente',
-    summary: `Demanda registrada para cotacao real em ${destino || 'destino nao informado'}.`,
-    plan,
-    created_entities: [
-      ...(atendimento ? [{ type: 'atendimento', id: atendimento.id, label: atendimento.passageiro_nome }] : []),
-    ],
-    blocked_by: [
-      ...policy.violations,
-      ...(hotelPlan.externalWarning ? [hotelPlan.externalWarning] : []),
-    ],
-  })
+  const demandProposal = demandInput && ops.prepareAction
+    ? await ops.prepareAction({
+        actionType: 'create_demand',
+        companyId: empresa?.id || null,
+        summary: `Criar demanda de ${demandInput.passageiro_nome}`,
+        payload: { demand: demandInput, submit: true },
+        expiresInMinutes: 30,
+      })
+    : null
 
   return montarRespostaTriagem({
     empresa,
     funcionario,
-    atendimento,
+    demandProposal,
     tipo,
     destino,
     dataInicio,
@@ -214,7 +185,11 @@ function classificarIntent(pergunta: string): AgentIntent {
   return 'desconhecido'
 }
 
-function responderRelatorio(pergunta: string, ctx: TravelAgentContext, intent: AgentIntent): TravelAgentResponse {
+async function responderRelatorio(
+  pergunta: string,
+  ctx: TravelAgentContext,
+  intent: AgentIntent,
+): Promise<TravelAgentResponse> {
   const q = normalizarTexto(pergunta)
   const periodo = /mes passado/.test(q) ? 'mes_passado' : /ano/.test(q) ? 'ano' : 'mes_atual'
   const { inicio, fim } = rangePeriodo(periodo)
@@ -223,14 +198,6 @@ function responderRelatorio(pergunta: string, ctx: TravelAgentContext, intent: A
   const porEmpresa = agrupar(atendimentos, (a) => ctx.empresas.find((e) => e.id === a.empresa_id)?.nome || 'Empresa sem cadastro')
   const porTipo = agrupar(atendimentos, (a) => a.tipo_servico)
   const urgentes = atendimentos.filter((a) => a.prioridade === 'urgente').length
-
-  addAgentRun({
-    input: pergunta,
-    intent,
-    status: 'concluido',
-    summary: `Relatorio gerado para ${inicio} a ${fim}.`,
-    plan: ['Ler demandas e vouchers da base unificada.', 'Cruzar valores por empresa e tipo.', 'Apontar riscos e proximas acoes.'],
-  })
 
   return {
     handled: true,
@@ -255,39 +222,42 @@ function responderRelatorio(pergunta: string, ctx: TravelAgentContext, intent: A
   }
 }
 
-function responderIncidente(pergunta: string, ctx: TravelAgentContext, intent: AgentIntent, ops: TravelAgentOps): TravelAgentResponse {
+async function responderIncidente(
+  pergunta: string,
+  ctx: TravelAgentContext,
+  intent: AgentIntent,
+  ops: TravelAgentOps,
+): Promise<TravelAgentResponse> {
   const funcionario = encontrarFuncionario(pergunta, {}, ctx.funcionarios)
   const atendimento = encontrarAtendimentoRelacionado(pergunta, ctx, funcionario)
-  const prioridade: Prioridade = 'urgente'
-  const task = addAgentTask({
-    kind: intent === 'emergencia' ? 'emergencia' : 'integracao_externa',
-    title: intent === 'emergencia' ? 'Incidente de viagem' : 'Alteracao/cancelamento de reserva',
-    description: pergunta,
-    status: 'pendente',
-    priority: prioridade,
-    requires_human: true,
-    entity_type: atendimento ? 'atendimento' : undefined,
-    entity_id: atendimento?.id,
-    payload: { funcionario_id: funcionario?.id, operador: ops.currentUser?.id },
-  })
-
-  addAgentRun({
-    input: pergunta,
-    intent,
-    status: 'pendente',
-    summary: `Tarefa ${task.id} criada para atendimento emergencial.`,
-    plan: ['Identificar reserva afetada.', 'Verificar politica e multas.', 'Buscar alternativas.', 'Escalar para humano antes de acao critica.'],
-    created_entities: [{ type: 'tarefa', id: task.id, label: task.title }],
-    blocked_by: ['Acoes criticas de cancelamento, multa ou remarcacao exigem validacao humana.'],
-  })
+  const proposal = ops.prepareAction
+    ? await ops.prepareAction({
+        actionType: 'human_handoff',
+        companyId: atendimento?.empresa_id || funcionario?.company_id || null,
+        summary: intent === 'emergencia'
+          ? 'Escalar incidente urgente para atendimento humano'
+          : 'Escalar alteração ou cancelamento para atendimento humano',
+        payload: {
+          reason: [
+            pergunta,
+            funcionario ? `Viajante identificado: ${funcionario.nome}.` : '',
+            atendimento ? `Demanda relacionada: ${atendimento.id}.` : '',
+          ].filter(Boolean).join('\n'),
+          priority: 'urgent',
+        },
+        expiresInMinutes: 15,
+      })
+    : null
 
   return {
     handled: true,
     title: intent === 'emergencia' ? 'Suporte emergencial' : 'Alteracao de reserva',
-    badge: 'Escalado com prioridade urgente',
+    badge: proposal ? 'Aguardando confirmação urgente' : 'Revisão humana necessária',
     message: [
-      `Abri a tarefa operacional **${task.id}** como urgente.`,
-      funcionario ? `Viajante identificado: ${funcionario.nome}.` : 'Nao identifiquei o viajante com confianca; a tarefa ficou aberta para triagem.',
+      proposal
+        ? 'Preparei o escalonamento urgente para a equipe humana. Confirme a proposta abaixo para abrir o atendimento.'
+        : 'Não criei tarefa automaticamente. Abra a fila de demandas para registrar o incidente com prioridade urgente.',
+      funcionario ? `Viajante identificado: ${funcionario.nome}.` : 'Nao identifiquei o viajante com confianca; confirme os dados antes do escalonamento.',
       atendimento ? `Demanda relacionada: ${atendimento.passageiro_nome} (${atendimento.tipo_servico}).` : '',
       '',
       'Proximo passo: revisar reserva/localizador, politica da empresa, custo de multa e alternativa disponivel antes de executar cancelamento ou remarcacao.',
@@ -298,6 +268,7 @@ function responderIncidente(pergunta: string, ctx: TravelAgentContext, intent: A
       { label: 'Abrir demandas', href: '/dashboard/demandas', kind: 'primary' },
       { label: `Painel da ${AI_NAME}`, href: '/dashboard/ia?tab=operacional', kind: 'secondary' },
     ],
+    actionProposals: proposal ? [proposal] : [],
     provedor: 'sistema',
   }
 }
@@ -343,7 +314,7 @@ async function montarPlanoHotel(
   tipo: TipoServico,
 ): Promise<HotelPlan> {
   if (!precisaHotel(pergunta, tipo)) {
-    return { suggestions: [], cadastradas: [], summary: 'Hotel nao solicitado.', sources: [] }
+    return { suggestions: [], actionProposals: [], summary: 'Hotel nao solicitado.', sources: [] }
   }
 
   const uf = extrairUF(pergunta) || CITY_UF[normalizarTexto(destino)] || ''
@@ -378,19 +349,25 @@ async function montarPlanoHotel(
     }
   }
 
-  const cadastradas: HotelAISuggestion[] = []
-  const podeCadastrar = Boolean(ops.addHotel) && /cadastre|cadastrar|incluir|sem hotel|nao tem|não tem|novo hotel|hospedagem/.test(normalizarTexto(pergunta))
-  if (podeCadastrar) {
-    suggestions
-      .filter((s) => !hotelJaExiste(ctx.hoteis, s.nome, s.cidade, s.uf))
-      .slice(0, 3)
-      .forEach((s) => {
-        ops.addHotel?.(sugestaoParaHotel(s))
-        cadastradas.push(s)
-      })
-  }
+  const podeCadastrar = Boolean(ops.prepareAction)
+    && /cadastre|cadastrar|incluir|sem hotel|nao tem|não tem|novo hotel|hospedagem/.test(normalizarTexto(pergunta))
+  const actionProposals = podeCadastrar
+    ? await Promise.all(
+        suggestions
+          .filter((suggestion) => !hotelJaExiste(ctx.hoteis, suggestion.nome, suggestion.cidade, suggestion.uf))
+          .slice(0, 3)
+          .map((suggestion) =>
+            ops.prepareAction!({
+              actionType: 'create_hotel',
+              summary: `Cadastrar hotel ${suggestion.nome}`,
+              payload: sugestaoParaHotel(suggestion),
+              expiresInMinutes: 30,
+            }),
+          ),
+      )
+    : []
 
-  return { suggestions, cadastradas, summary, sources, externalWarning }
+  return { suggestions, actionProposals, summary, sources, externalWarning }
 }
 
 function avaliarPolitica({
@@ -530,82 +507,10 @@ function montarAtendimento({
   }
 }
 
-function criarTarefasOperacionais({
-  atendimento,
-  tipo,
-  destino,
-  dataInicio,
-  requiresApproval,
-  externalWarning,
-  prioridade,
-}: {
-  atendimento: Atendimento | null
-  tipo: TipoServico
-  destino: string
-  dataInicio: string
-  requiresApproval: boolean
-  externalWarning?: string
-  prioridade: Prioridade
-}) {
-  addAgentTask({
-    kind: 'cotacao',
-    title: 'Obter cotacao real',
-    description: externalWarning ||
-      `Consultar tarifa e disponibilidade para ${destino || 'o destino informado'} em provedor integrado ou fornecedor homologado.`,
-    status: 'pendente',
-    priority: prioridade,
-    requires_human: true,
-    entity_type: atendimento ? 'atendimento' : undefined,
-    entity_id: atendimento?.id,
-    due_at: dataInicio,
-  })
-
-  if (requiresApproval) {
-    addAgentTask({
-      kind: 'aprovacao',
-      title: 'Revisar politica antes da cotacao',
-      description: 'A demanda possui uma excecao conhecida. O valor real ainda deve ser cotado antes da aprovacao financeira.',
-      status: 'pendente',
-      priority: prioridade,
-      requires_human: true,
-      entity_type: atendimento ? 'atendimento' : undefined,
-      entity_id: atendimento?.id,
-      due_at: dataInicio,
-    })
-  }
-
-  if (tipo === 'Hotel' || tipo === 'Pacote') {
-    addAgentTask({
-      kind: 'reserva_hotel',
-      title: 'Validar hotel e disponibilidade',
-      description: 'Confirmar disponibilidade, tarifa, faturamento e cancelamento antes de reservar.',
-      status: 'pendente',
-      priority: prioridade,
-      requires_human: true,
-      entity_type: atendimento ? 'atendimento' : undefined,
-      entity_id: atendimento?.id,
-      due_at: dataInicio,
-    })
-  }
-
-  if (tipo === 'Aéreo' || tipo === 'Pacote') {
-    addAgentTask({
-      kind: 'reserva_aereo',
-      title: 'Consultar disponibilidade aerea',
-      description: 'Obter opcoes reais de voo, bagagem e tarifa antes de solicitar aprovacao ou emitir.',
-      status: 'pendente',
-      priority: prioridade,
-      requires_human: true,
-      entity_type: atendimento ? 'atendimento' : undefined,
-      entity_id: atendimento?.id,
-      due_at: dataInicio,
-    })
-  }
-}
 function montarRespostaTriagem({
   empresa,
   funcionario,
-  atendimento,
+  demandProposal,
   tipo,
   destino,
   dataInicio,
@@ -615,7 +520,7 @@ function montarRespostaTriagem({
 }: {
   empresa?: Empresa
   funcionario?: Funcionario
-  atendimento: Atendimento | null
+  demandProposal: AiActionProposal | null
   tipo: TipoServico
   destino: string
   dataInicio: string
@@ -632,11 +537,11 @@ function montarRespostaTriagem({
 
   return {
     handled: true,
-    title: atendimento ? 'Demanda registrada para cotacao' : 'Dados preparados para cotacao',
-    badge: 'Aguardando fornecedor real',
+    title: demandProposal ? 'Demanda preparada para confirmação' : 'Dados preparados para cotação',
+    badge: demandProposal ? 'Nenhuma gravação executada' : 'Aguardando dados obrigatórios',
     message: [
-      atendimento
-        ? `A demanda ${atendimento.id} foi registrada sem valor estimado.`
+      demandProposal
+        ? 'A demanda foi preparada sem valor inventado e aguarda sua confirmação abaixo.'
         : 'Os dados foram organizados, mas a demanda ainda precisa de uma empresa valida para ser registrada.',
       '',
       `Empresa: ${empresa?.nome || 'nao confirmada'}.`,
@@ -647,8 +552,8 @@ function montarRespostaTriagem({
       '',
       'Nenhuma tarifa foi inventada. O proximo passo e consultar a Tech Travel ou um fornecedor homologado.',
       pendencias.length ? ['Pendencias', ...pendencias.map((item) => `- ${item}`)].join('\n') : '',
-      hotelPlan.cadastradas.length
-        ? `${hotelPlan.cadastradas.length} hotel(is) com fonte real foram adicionados ao cadastro.`
+      hotelPlan.actionProposals.length
+        ? `${hotelPlan.actionProposals.length} cadastro(s) de hotel com fonte real também aguardam sua confirmação.`
         : '',
     ].filter(Boolean).join('\n'),
     links: [
@@ -665,40 +570,13 @@ function montarRespostaTriagem({
       href: hotel.fonte_url || `/dashboard/hoteis?busca=${encodeURIComponent(hotel.nome)}`,
     })),
     sources: hotelPlan.sources,
+    actionProposals: [
+      ...(demandProposal ? [demandProposal] : []),
+      ...hotelPlan.actionProposals,
+    ],
     provedor: 'sistema',
   }
 }
-function salvarMemoriaSeAplicavel(pergunta: string, funcionario?: Funcionario, empresa?: Empresa) {
-  if (!funcionario) return
-  const q = normalizarTexto(pergunta)
-  const preferencias: string[] = []
-  if (/corredor/.test(q)) preferencias.push('Prefere assento no corredor.')
-  if (/janela/.test(q)) preferencias.push('Prefere assento na janela.')
-  if (/bagagem/.test(q)) preferencias.push('Costuma precisar de bagagem despachada.')
-  if (/cafe|café/.test(q)) preferencias.push('Valoriza cafe da manha incluso.')
-  if (/hotel perto|proximo|próximo/.test(q)) preferencias.push('Prioriza hotel perto do compromisso.')
-  if (!preferencias.length) return
-
-  upsertAgentMemory({
-    entity_type: 'funcionario',
-    entity_id: funcionario.id,
-    key: 'preferencias_viagem',
-    value: preferencias.join(' '),
-    source: 'mensagem do agente IA',
-    confidence: 'media',
-  })
-  if (empresa) {
-    upsertAgentMemory({
-      entity_type: 'empresa',
-      entity_id: empresa.id,
-      key: 'preferencias_operacionais',
-      value: `Preferencia observada em demanda de ${funcionario.nome}: ${preferencias.join(' ')}`,
-      source: 'mensagem do agente IA',
-      confidence: 'baixa',
-    })
-  }
-}
-
 function encontrarFuncionario(pergunta: string, parsed: Partial<MensagemParsed>, funcionarios: Funcionario[]): Funcionario | undefined {
   const nome = parsed.passageiro_nome || extrairNomeLivre(pergunta)
   const cpfTexto = parsed.cpf || pergunta.match(/\d{3}\D?\d{3}\D?\d{3}\D?\d{2}/)?.[0] || ''

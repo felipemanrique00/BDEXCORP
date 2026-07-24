@@ -1,4 +1,4 @@
-import type { Empresa, GrupoEmpresarial, User } from '@/types'
+import type { Empresa, GrupoEmpresarial, Permissoes, User } from '@/types'
 import { createEntityId } from '@/lib/ids'
 
 export type EscopoGrupoUsuario = {
@@ -72,6 +72,7 @@ export function aplicarVinculoEmpresaGrupo(
 
 export function hasScopedAccess(user: User | null): boolean {
   if (!user) return false
+  if (user.corporate_access) return !user.corporate_access.tenantWide
   return normalizarListaIds(user.empresa_ids).length > 0 || normalizarListaIds(user.grupo_ids).length > 0 || Boolean(user.company_id)
 }
 
@@ -81,6 +82,10 @@ export function empresasPermitidasParaUsuario(
   grupos: GrupoEmpresarial[],
 ): Empresa[] {
   if (!user) return []
+  if (user.corporate_access) {
+    const allowedIds = new Set(user.corporate_access.companyIds)
+    return empresas.filter((empresa) => allowedIds.has(empresa.id))
+  }
   if (user.role === 'master' && !hasScopedAccess(user)) return empresas
 
   const permitidas = new Set<string>()
@@ -115,6 +120,9 @@ export function usuarioPodeAcessarGrupo(
   grupo: GrupoEmpresarial | null | undefined,
 ): boolean {
   if (!user || !grupo) return false
+  if (user.corporate_access) {
+    return user.corporate_access.groups.some((access) => access.groupId === grupo.id && access.companyIds.length > 0)
+  }
   if (user.role === 'master' && !hasScopedAccess(user)) return true
   if (normalizarListaIds(user.grupo_ids).includes(grupo.id)) return true
   if (user.company_id && grupo.empresa_ids.includes(user.company_id)) return true
@@ -125,8 +133,28 @@ export function resolverEscopoGrupoUsuario(
   user: User | null,
   grupo: GrupoEmpresarial | null | undefined,
   empresas: Empresa[],
+  permission?: keyof Permissoes,
 ): EscopoGrupoUsuario {
   if (!user || !grupo) return { podeAcessar: false, podeVerConsolidado: false, empresaIdsPermitidas: [] }
+
+  if (user.corporate_access) {
+    const access = user.corporate_access.groups.find((item) => item.groupId === grupo.id)
+    if (!access?.canViewConsolidated) {
+      return { podeAcessar: false, podeVerConsolidado: false, empresaIdsPermitidas: [] }
+    }
+    const companyIds = access.companyIds.filter((companyId) => {
+      const companyAccess = user.corporate_access?.companies.find((company) => company.companyId === companyId)
+      return Boolean(
+        companyAccess?.permissions.ver_consolidado_grupo
+        && (!permission || companyAccess.permissions[permission]),
+      )
+    })
+    return {
+      podeAcessar: companyIds.length > 0,
+      podeVerConsolidado: companyIds.length > 0,
+      empresaIdsPermitidas: companyIds,
+    }
+  }
 
   const empresasGrupo = empresas
     .filter((empresa) => empresa.grupo_id === grupo.id || grupo.empresa_ids.includes(empresa.id))

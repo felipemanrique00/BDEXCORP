@@ -1,6 +1,9 @@
 import { techRequest } from '@/lib/integrations/tech/tech-client'
 import { getTechConfig, techConfigured, techMissingConfig } from '@/lib/integrations/tech/tech-config'
-import { TechIntegrationError } from '@/lib/integrations/tech/tech-errors'
+import {
+  assertTechMutationConfirmed,
+  TechIntegrationError,
+} from '@/lib/integrations/tech/tech-errors'
 import { getIdempotencyKey, getIdempotentResult, requestId, setIdempotentResult } from '@/lib/integrations/tech/tech-idempotency'
 import { logTechIntegration } from '@/lib/integrations/tech/tech-logger'
 import {
@@ -55,7 +58,7 @@ export async function techHealth(): Promise<IntegrationHealth> {
       capabilities: techCapabilities(),
       checkedAt: new Date().toISOString(),
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       ok: false,
       provider: 'tech-ttravel',
@@ -63,7 +66,7 @@ export async function techHealth(): Promise<IntegrationHealth> {
       configured: true,
       connected: false,
       baseUrl: config.baseUrl,
-      message: error?.message || 'Falha ao validar conexão Tech Travel.',
+      message: error instanceof Error ? error.message : 'Falha ao validar conexão Tech Travel.',
       capabilities: techCapabilities(),
       checkedAt: new Date().toISOString(),
     }
@@ -82,7 +85,7 @@ export async function techAccessCompany(companyId: string | number): Promise<boo
 export async function techSearchCities(args: { query: string; service: TravelService; providerCompanyId?: string | number | null }) {
   const config = getTechConfig()
   const session = await getTechSession({ companyId: args.providerCompanyId })
-  const response = await techRequest<any>(
+  const response = await techRequest<unknown>(
     '/BuscarCidades',
     {
       method: 'POST',
@@ -114,7 +117,7 @@ export async function techCreateQuote(request: TravelQuoteRequest): Promise<Trav
   const id = createEntityId('tech_quote', '_')
 
   if (request.service === 'aereo') {
-    const response = await techRequest<any>(
+    const response = await techRequest<unknown>(
       '/BuscarDisponibilidade',
       {
         method: 'POST',
@@ -147,7 +150,7 @@ export async function techCreateQuote(request: TravelQuoteRequest): Promise<Trav
 
   if (request.service === 'hotelaria') {
     const effectiveRequest = await ensureHotelCityId(request)
-    const response = await techRequest<any>(
+    const response = await techRequest<unknown>(
       '/Hotel/BuscarDisponibilidade',
       {
         method: 'POST',
@@ -186,7 +189,7 @@ export async function techCreateQuote(request: TravelQuoteRequest): Promise<Trav
 
 export async function techFareAir(payload: Record<string, unknown>, providerCompanyId?: string | number | null) {
   const session = await getTechSession({ companyId: providerCompanyId })
-  const response = await techRequest<any>('/TarifarDisponibilidade', {
+  const response = await techRequest<unknown>('/TarifarDisponibilidade', {
     method: 'POST',
     body: { DadosTarifas: payload, Token: session.token },
     requestId: requestId('tech_air_fare'),
@@ -220,27 +223,31 @@ export async function techCreateReservation(request: TravelReservationRequest): 
       { status: 501, code: 'TECH_RESERVATION_CAPABILITY_UNAVAILABLE' },
     )
   }
-  const session = await getTechSession({ companyId: request.payload?.providerCompanyId as any })
+  const session = await getTechSession({
+    companyId: scalarValue(request.payload?.providerCompanyId),
+  })
 
   const body =
     request.service === 'hotelaria'
       ? { CriarReserva: request.payload?.CriarReserva || request.payload || {}, Token: session.token }
       : { DadosCriar: request.payload?.DadosCriar || request.payload || {}, Token: session.token }
 
-  const response = await techRequest<any>(endpoint, {
+  const response = await techRequest<unknown>(endpoint, {
     method: 'POST',
     body,
     requestId: requestId('tech_reservation'),
   })
 
+  assertTechMutationConfirmed(response.data, 'reserve')
+  const references = reservationReferences(response.data)
   const reservation: TravelReservation = {
     id: createEntityId('tech_res', '_'),
     provider: 'tech-ttravel',
     service: request.service,
     status: 'reserved',
-    idOs: String(response.data?.IdOs || response.data?.DadosOs?.OS?.[0]?.IdOs || request.idOs || ''),
-    localizador: response.data?.Localizador || response.data?.Localizadores?.Localizador?.[0]?.Localizador,
-    sistema: response.data?.Sistema || response.data?.Localizadores?.Localizador?.[0]?.Sistema,
+    idOs: references.idOs || nullableText(request.idOs) || '',
+    localizador: references.localizador,
+    sistema: references.sistema,
     request,
     raw: response.data,
     createdAt: new Date().toISOString(),
@@ -258,7 +265,7 @@ export async function techCreateReservation(request: TravelReservationRequest): 
 
 export async function techConsultOS(idOs: string | number, providerCompanyId?: string | number | null) {
   const session = await getTechSession({ companyId: providerCompanyId })
-  const response = await techRequest<any>('/ConsultarOS', {
+  const response = await techRequest<unknown>('/ConsultarOS', {
     method: 'GET',
     query: { token: session.token, idOs },
     requestId: requestId('tech_os'),
@@ -283,7 +290,7 @@ export async function techConsultReservation(lookup: {
   providerCompanyId?: string | number | null
 }) {
   const session = await getTechSession({ companyId: lookup.providerCompanyId })
-  const response = await techRequest<any>('/ConsultarReserva', {
+  const response = await techRequest<unknown>('/ConsultarReserva', {
     method: 'POST',
     body: {
       DadosConsulta: {
@@ -310,14 +317,15 @@ export async function techConsultReservation(lookup: {
 
 export async function techIssueReservation(payload: Record<string, unknown>, providerCompanyId?: string | number | null) {
   const key = getIdempotencyKey('tech_issue', payload, String(payload.idempotencyKey || ''))
-  const cached = getIdempotentResult<any>(key)
+  const cached = getIdempotentResult<unknown>(key)
   if (cached) return cached
   const session = await getTechSession({ companyId: providerCompanyId })
-  const response = await techRequest<any>('/Emitir', {
+  const response = await techRequest<unknown>('/Emitir', {
     method: 'POST',
     body: { DadosParaEmissao: payload, Token: session.token },
     requestId: requestId('tech_issue'),
   })
+  assertTechMutationConfirmed(response.data, 'issue')
   await logTechIntegration({
     action: 'issue',
     status: 'success',
@@ -338,7 +346,7 @@ export async function techCancelTicket(payload: Record<string, unknown>, provide
 
 export async function techSimpleGet(endpoint: string, action: 'policies' | 'cost-centers' | 'motives' | 'additional-fields' | 'reusable-tickets', providerCompanyId?: string | number | null) {
   const session = await getTechSession({ companyId: providerCompanyId })
-  const response = await techRequest<any>(endpoint, {
+  const response = await techRequest<unknown>(endpoint, {
     method: 'GET',
     query: { token: session.token },
     requestId: requestId(`tech_${action}`),
@@ -355,15 +363,16 @@ export async function techSimpleGet(endpoint: string, action: 'policies' | 'cost
 
 export async function techCheckChurning(payload: Record<string, unknown>, providerCompanyId?: string | number | null) {
   const session = await getTechSession({ companyId: providerCompanyId })
-  const response = await techRequest<any>('/VerificaChurning', {
+  const response = await techRequest<unknown>('/VerificaChurning', {
     method: 'POST',
     body: { Churning: payload, Token: session.token },
     requestId: requestId('tech_churning'),
   })
+  const churning = asRecord(response.data).ExisteChurning === true
   await logTechIntegration({
     action: 'churning',
-    status: response.data?.ExisteChurning ? 'warning' : 'success',
-    message: response.data?.ExisteChurning ? 'Tech indicou possível reserva duplicada.' : 'Churning Tech sem duplicidade.',
+    status: churning ? 'warning' : 'success',
+    message: churning ? 'Tech indicou possível reserva duplicada.' : 'Churning Tech sem duplicidade.',
     endpoint: '/VerificaChurning',
     durationMs: response.durationMs,
   })
@@ -374,7 +383,7 @@ export function techCapabilities(): string[] {
   return [
     'login',
     'seleção de empresa',
-    'cidades/base por aéreo, hotel, carro e rodoviário',
+    'busca de cidades para aéreo e hotelaria',
     'cotação aérea',
     'tarifação aérea',
     'reserva aérea',
@@ -383,8 +392,8 @@ export function techCapabilities(): string[] {
     'emissão aérea',
     'cancelamento de reserva/bilhete',
     'políticas, centro de custo, motivos e campos adicionais',
-    'hotel: disponibilidade, detalhes, pagamento, pedido/reserva/emissão e cancelamento',
-    'carro/rodoviário/pedidos via OS e consulta de reserva conforme documentação',
+    'disponibilidade e reserva de hotel',
+    'relatório de emissões',
   ]
 }
 
@@ -397,15 +406,20 @@ async function ensureHotelCityId(request: TravelQuoteRequest): Promise<TravelQuo
 }
 
 async function techPostSensitive(endpoint: string, action: 'cancel' | 'cancel-ticket', payload: Record<string, unknown>, providerCompanyId?: string | number | null) {
-  const key = getIdempotencyKey(`tech_${action}`, payload, String((payload as any).idempotencyKey || ''))
-  const cached = getIdempotentResult<any>(key)
+  const key = getIdempotencyKey(
+    `tech_${action}`,
+    payload,
+    nullableText(payload.idempotencyKey) || '',
+  )
+  const cached = getIdempotentResult<unknown>(key)
   if (cached) return cached
   const session = await getTechSession({ companyId: providerCompanyId })
-  const response = await techRequest<any>(endpoint, {
+  const response = await techRequest<unknown>(endpoint, {
     method: 'POST',
     body: { ...payload, Token: session.token },
     requestId: requestId(`tech_${action}`),
   })
+  assertTechMutationConfirmed(response.data, action)
   await logTechIntegration({
     action,
     status: 'success',
@@ -414,4 +428,72 @@ async function techPostSensitive(endpoint: string, action: 'cancel' | 'cancel-ti
     durationMs: response.durationMs,
   })
   return setIdempotentResult(key, response.data)
+}
+
+function reservationReferences(payload: unknown): {
+  idOs?: string
+  localizador?: string
+  sistema?: string
+} {
+  return {
+    idOs: findNestedText(payload, new Set(['idos'])),
+    localizador: findNestedText(payload, new Set(['localizador', 'locator'])),
+    sistema: findNestedText(payload, new Set(['sistema', 'system'])),
+  }
+}
+
+function findNestedText(
+  value: unknown,
+  expectedKeys: Set<string>,
+  depth = 0,
+): string | undefined {
+  if (depth > 8 || value === null || value === undefined) return undefined
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 100)) {
+      const found = findNestedText(item, expectedKeys, depth + 1)
+      if (found) return found
+    }
+    return undefined
+  }
+  if (typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  for (const [key, item] of Object.entries(record)) {
+    if (expectedKeys.has(normalizeLookupKey(key))) {
+      const found = nullableText(item)
+      if (found) return found
+    }
+  }
+  for (const item of Object.values(record)) {
+    const found = findNestedText(item, expectedKeys, depth + 1)
+    if (found) return found
+  }
+  return undefined
+}
+
+function scalarValue(value: unknown): string | number | null | undefined {
+  if (typeof value === 'string' || typeof value === 'number') return value
+  return value === null ? null : undefined
+}
+
+function nullableText(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed || undefined
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return undefined
+}
+
+function normalizeLookupKey(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/gi, '')
+    .toLowerCase()
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
 }

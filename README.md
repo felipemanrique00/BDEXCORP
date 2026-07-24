@@ -67,6 +67,8 @@ Servicos de referencia:
 
 Consulte [DEPLOYMENT-SERVER.md](docs/DEPLOYMENT-SERVER.md), [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) e [RUNBOOK.md](docs/RUNBOOK.md) antes da primeira implantacao.
 
+Para o procedimento completo, incluindo DNS, servidor, primeiro administrador, convites, perfis e operacao diaria, use o [Manual de hospedagem e logins](MANUAL-HOSPEDAGEM-E-LOGINS.md).
+
 ## Seguranca
 
 - Sessao opaca armazenada no PostgreSQL, cookie `HttpOnly`, `SameSite=Lax` e `Secure` em HTTPS.
@@ -80,20 +82,48 @@ Consulte [DEPLOYMENT-SERVER.md](docs/DEPLOYMENT-SERVER.md), [BACKUP-RESTORE.md](
 
 ## Integracoes
 
-- Tech Travel Relatorios: preparada; exige `TECH_REPORTS_ENABLED` e credenciais reais.
-- Tech Travel transacional: permanece bloqueada enquanto cotacao/reserva/emissao/cancelamento nao forem homologados pelo fornecedor.
+- Tech Travel Relatorios: preparada; exige `TECH_REPORTS_ENABLED`, chave rotacionada e homologacao.
+- Tech Travel transacional: adapter implementado, mas deve permanecer desabilitado ate cotacao/reserva/emissao/cancelamento serem homologados com credenciais e sandbox reais.
 - SMTP: necessario para convites e recuperacao de senha em operacao real.
 - OpenAI/Gemini: opcionais; indisponibilidade e exibida como erro, sem resposta simulada.
 - WhatsApp: somente habilite depois de configurar e homologar o transporte real.
 
 ## Documentacao
 
-- [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)
+Entrada e decisao de producao:
+
+- [FINAL-PRODUCTION-READINESS.md](docs/FINAL-PRODUCTION-READINESS.md)
+- [GO-LIVE-CHECKLIST.md](docs/GO-LIVE-CHECKLIST.md)
+- [KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)
+
+Arquitetura e dados:
+
+- [SYSTEM-ARCHITECTURE.md](docs/SYSTEM-ARCHITECTURE.md)
+- [DOMAIN-MAP.md](docs/DOMAIN-MAP.md)
+- [DATABASE-MODEL.md](docs/DATABASE-MODEL.md)
+- [DATA-MIGRATION.md](docs/DATA-MIGRATION.md)
 - [SAAS-ARCHITECTURE.md](docs/SAAS-ARCHITECTURE.md)
-- [SECURITY.md](docs/SECURITY.md)
-- [ENVIRONMENT-VARIABLES.md](docs/ENVIRONMENT-VARIABLES.md)
+- [CORPORATE-ACCESS.md](docs/CORPORATE-ACCESS.md)
+
+Governanca:
+
+- [POLICY-ENGINE.md](docs/POLICY-ENGINE.md)
+- [POLICY-DSL.md](docs/POLICY-DSL.md)
+- [POLICY-TEMPLATE-CATALOG.md](docs/POLICY-TEMPLATE-CATALOG.md)
+- [APPROVAL-WORKFLOW.md](docs/APPROVAL-WORKFLOW.md)
+- [TRAVEL-LIFECYCLE.md](docs/TRAVEL-LIFECYCLE.md)
+
+Seguranca, API e operacao:
+
+- [SECURITY-THREAT-MODEL.md](docs/SECURITY-THREAT-MODEL.md)
+- [AUTHORIZATION-MATRIX.md](docs/AUTHORIZATION-MATRIX.md)
+- [API.md](docs/API.md)
+- [INTEGRATIONS.md](docs/INTEGRATIONS.md)
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)
+- [RUNBOOK.md](docs/RUNBOOK.md)
+- [INCIDENT-RESPONSE.md](docs/INCIDENT-RESPONSE.md)
 - [FEATURE-VERIFICATION.md](docs/FEATURE-VERIFICATION.md)
-- [LGPD-TECHNICAL-CONTROLS.md](docs/LGPD-TECHNICAL-CONTROLS.md)
 - [Inventario gerado](docs/FEATURE-INVENTORY.generated.md)
 
 Nenhuma funcionalidade foi intencionalmente removida. Operacoes sem integracao real retornam indisponibilidade explicita em vez de sucesso ficticio.

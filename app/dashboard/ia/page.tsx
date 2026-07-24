@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   Brain,
@@ -21,7 +21,7 @@ import { AI_NAME, AI_SHORT_NAME } from '@/lib/branding'
 import {
   IA_CONFIG_DEFAULT,
   IA_CONFIG_MAXIMA,
-  getIAConfig,
+  loadIAConfig,
   saveIAConfig,
   type IAConfig,
   type IAInteractionScope,
@@ -29,7 +29,8 @@ import {
 import { getStatusIA, type StatusIA } from '@/lib/ia-parser'
 import { reportClientFailure } from '@/lib/client-observability'
 import { getAllAtendimentos } from '@/lib/atendimentos-storage'
-import { getAllAgentApprovals, getAllAgentQuotes, getAllAgentRuns, getAllAgentTasks } from '@/lib/ai-agent-storage'
+import { loadAiAgentState } from '@/lib/ai-agent-client'
+import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { useStore } from '@/lib/store'
 import { toast } from 'sonner'
 
@@ -80,18 +81,55 @@ export default function IAPage() {
 
 function IAConfigPanel({ status }: { status: StatusIA | null }) {
   const { empresas, funcionarios, hoteis } = useStore()
+  const currentUser = useMemo(
+    () => (typeof window !== 'undefined' ? getCurrentUser() : null),
+    [],
+  )
+  const canManageConfig = hasPermission(currentUser, 'alterar_configuracoes')
+    || hasPermission(currentUser, 'gerenciar_usuarios')
   const [config, setConfig] = useState<IAConfig>(IA_CONFIG_DEFAULT)
   const [techStatus, setTechStatus] = useState<any | null>(null)
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
+  const [saving, setSaving] = useState(false)
+  const saveSequence = useRef(0)
+  const [agentStats, setAgentStats] = useState({
+    tasks: 0,
+    approvals: 0,
+    quotes: 0,
+    runs: 0,
+  })
 
   useEffect(() => {
-    setConfig(getIAConfig())
+    let active = true
+    loadIAConfig()
+      .then((savedConfig) => {
+        if (active) setConfig(savedConfig)
+      })
+      .catch((error) => {
+        reportClientFailure('ai_config_load_failed', error, { component: 'ai-control-center' })
+        toast.error(error instanceof Error ? error.message : 'Falha ao carregar as configuracoes da IA.')
+      })
     fetch('/api/integrations/tech/status')
       .then((response) => response.json())
       .then((payload) => setTechStatus(payload?.health || null))
       .catch((error) => {
         reportClientFailure('tech_status_load_failed', error, { component: 'ai-control-center' })
       })
+    loadAiAgentState()
+      .then((state) => {
+        setAgentStats({
+          tasks: state.tasks.length,
+          approvals: state.approvals.filter((item) => item.status === 'pendente').length,
+          quotes: state.quotes.length,
+          runs: state.runs.length,
+        })
+      })
+      .catch((error) => {
+        reportClientFailure('ai_agent_state_load_failed', error, { component: 'ai-control-center' })
+      })
+    return () => {
+      active = false
+    }
   }, [])
 
   const stats = useMemo(() => {
@@ -101,31 +139,53 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
       empresas: empresas.length,
       funcionarios: funcionarios.length,
       hoteis: hoteis.length,
-      tasks: getAllAgentTasks().length,
-      approvals: getAllAgentApprovals().filter((item) => item.status === 'pendente').length,
-      quotes: getAllAgentQuotes().length,
-      runs: getAllAgentRuns().length,
+      tasks: agentStats.tasks,
+      approvals: agentStats.approvals,
+      quotes: agentStats.quotes,
+      runs: agentStats.runs,
     }
-  }, [empresas.length, funcionarios.length, hoteis.length])
+  }, [agentStats, empresas.length, funcionarios.length, hoteis.length])
 
   function update<K extends keyof IAConfig>(key: K, value: IAConfig[K]) {
-    setConfig((current) => persistConfig({ ...current, [key]: value }))
+    if (!canManageConfig) return
+    setConfig((current) => {
+      const next = { ...current, [key]: value }
+      void persistConfig(next)
+      return next
+    })
   }
 
-  function persistConfig(next: IAConfig): IAConfig {
-    const saved = saveIAConfig(next)
-    setLastSavedAt(new Date())
-    return saved
+  async function persistConfig(next: IAConfig): Promise<IAConfig | null> {
+    const sequence = ++saveSequence.current
+    setSaving(true)
+    try {
+      const saved = await saveIAConfig(next)
+      if (sequence === saveSequence.current) {
+        setConfig(saved)
+        setLastSavedAt(new Date())
+      }
+      return saved
+    } catch (error) {
+      reportClientFailure('ai_config_save_failed', error, { component: 'ai-control-center' })
+      if (sequence === saveSequence.current) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao salvar as configuracoes da IA.')
+      }
+      return null
+    } finally {
+      if (sequence === saveSequence.current) setSaving(false)
+    }
   }
 
-  function salvar() {
-    persistConfig(config)
+  async function salvar() {
+    const saved = await persistConfig(config)
+    if (!saved) return
     toast.success('Configurações da IA salvas.')
   }
 
-  function ativarModoMaximo() {
-    const saved = persistConfig(IA_CONFIG_MAXIMA)
-    setConfig(saved)
+  async function ativarModoMaximo() {
+    setConfig(IA_CONFIG_MAXIMA)
+    const saved = await persistConfig(IA_CONFIG_MAXIMA)
+    if (!saved) return
     toast.success('Modo máximo da IA ativado.')
   }
 
@@ -145,14 +205,28 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button onClick={ativarModoMaximo} className="bbt-button-primary flex items-center gap-2">
+            <button
+              onClick={() => void ativarModoMaximo()}
+              disabled={saving || !canManageConfig}
+              className="bbt-button-primary flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
+            >
               <Sparkles className="w-4 h-4" /> Modo máximo
             </button>
-            <button onClick={salvar} className="bbt-button-ghost flex items-center gap-2">
+            <button
+              onClick={() => void salvar()}
+              disabled={saving || !canManageConfig}
+              className="bbt-button-ghost flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
+            >
               <Save className="w-4 h-4" /> Salvar agora
             </button>
           </div>
         </div>
+
+        {!canManageConfig && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-200">
+            Configuracao em modo somente leitura. Apenas administradores autorizados podem alterar as regras globais da IA.
+          </div>
+        )}
 
         <div className="rounded-lg border border-bbt-accent/25 bg-bbt-accent/10 p-3">
           <div className="text-sm font-semibold text-bbt-primary dark:text-white">Modo maximo da IA</div>
@@ -172,8 +246,9 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
               <button
                 key={value}
                 type="button"
+                disabled={!canManageConfig}
                 onClick={() => update('scope', value)}
-                className={`rounded-lg border p-3 text-left transition ${
+                className={`rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-60 ${
                   config.scope === value
                     ? 'border-bbt-accent bg-bbt-accent/10 text-bbt-primary dark:text-white'
                     : 'border-bbt-gray-100 hover:border-bbt-accent/50 dark:border-slate-700'
@@ -192,6 +267,7 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
             label="Permitir pesquisa na internet"
             detail="Necessário para hotéis, telefones, fornecedores e informações em tempo real."
             checked={config.permitirInternet}
+            disabled={!canManageConfig}
             onChange={(value) => update('permitirInternet', value)}
           />
           <ToggleRow
@@ -199,6 +275,7 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
             label="Criar demandas automaticamente"
             detail="A IA pode abrir solicitações interpretadas a partir de texto, e-mail ou áudio."
             checked={config.permitirCriarDemandas}
+            disabled={!canManageConfig}
             onChange={(value) => update('permitirCriarDemandas', value)}
           />
           <ToggleRow
@@ -206,6 +283,7 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
             label="Cadastrar hotéis automaticamente"
             detail="Quando não existir hotel no cadastro, a IA pode buscar e criar registros."
             checked={config.permitirCadastrarHoteis}
+            disabled={!canManageConfig}
             onChange={(value) => update('permitirCadastrarHoteis', value)}
           />
           <ToggleRow
@@ -213,6 +291,7 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
             label="Preparar reservas pela Tech"
             detail="A IA pode consultar disponibilidade, preparar reserva e acionar a Tech/TTravel quando a conexão estiver configurada."
             checked={config.permitirReservasTech}
+            disabled={!canManageConfig}
             onChange={(value) => update('permitirReservasTech', value)}
           />
           <ToggleRow
@@ -220,6 +299,7 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
             label="Permitir leitura financeira"
             detail="Autoriza respostas sobre faturamento, custos, despesas e margem."
             checked={config.permitirFinanceiro}
+            disabled={!canManageConfig}
             onChange={(value) => update('permitirFinanceiro', value)}
           />
           <ToggleRow
@@ -227,6 +307,7 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
             label="Exigir confirmacao para execucao"
             detail="Use quando quiser a IA preparando ações, mas sem gravar automaticamente."
             checked={config.exigirConfirmacaoExecucao}
+            disabled={!canManageConfig}
             onChange={(value) => update('exigirConfirmacaoExecucao', value)}
           />
         </div>
@@ -237,6 +318,7 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
           </label>
           <textarea
             value={config.assuntosBloqueados}
+            disabled={!canManageConfig}
             onChange={(event) => update('assuntosBloqueados', event.target.value)}
             rows={3}
             placeholder="Ex: política, religião, investimentos pessoais"
@@ -249,7 +331,11 @@ function IAConfigPanel({ status }: { status: StatusIA | null }) {
           <span className="text-xs text-slate-500">
             Qualquer mudança feita aqui já fica gravada para o popup, canais e agente operacional.
           </span>
-          <button onClick={salvar} className="bbt-button-primary flex items-center gap-2">
+          <button
+            onClick={() => void salvar()}
+            disabled={saving || !canManageConfig}
+            className="bbt-button-primary flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
             <Save className="w-4 h-4" /> Salvar configurações
           </button>
         </div>
@@ -323,7 +409,7 @@ function TabButton({ active, onClick, icon: Icon, label }: { active: boolean; on
   )
 }
 
-function ToggleRow({ icon: Icon, label, detail, checked, onChange }: { icon: any; label: string; detail: string; checked: boolean; onChange: (value: boolean) => void }) {
+function ToggleRow({ icon: Icon, label, detail, checked, disabled = false, onChange }: { icon: any; label: string; detail: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
   return (
     <label className="flex items-start justify-between gap-3 rounded-lg border border-bbt-gray-100 p-3 dark:border-slate-700">
       <div className="flex gap-3">
@@ -333,7 +419,13 @@ function ToggleRow({ icon: Icon, label, detail, checked, onChange }: { icon: any
           <div className="mt-0.5 text-xs text-slate-500">{detail}</div>
         </div>
       </div>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="mt-1 h-5 w-5 accent-bbt-accent" />
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="mt-1 h-5 w-5 accent-bbt-accent disabled:cursor-not-allowed disabled:opacity-60"
+      />
     </label>
   )
 }

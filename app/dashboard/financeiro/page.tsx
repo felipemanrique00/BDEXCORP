@@ -1,12 +1,20 @@
 'use client'
 import { addDaysISODate, lastDayOfMonthISODate, todayISODate } from '@/lib/date'
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { useStore } from '@/lib/store'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
 import {
-  getAllLancamentos, calcularResumoFinanceiro, pagarLancamento,
+  getAllLancamentos, calcularResumoFinanceiroDaLista, pagarLancamento,
   type LancamentoFinanceiro, type FormaPagamento,
 } from '@/lib/financeiro'
+import { getAllAtendimentos } from '@/lib/atendimentos-storage'
+import {
+  createFinancialDemandSyncKey,
+  FinanceClientError,
+  loadFinancialEntriesFromServer,
+  settleFinancialEntryOnServer,
+  syncFinancialEntriesFromDemandsOnServer,
+} from '@/lib/finance-persistence-client'
 import {
   atualizarCarteiraEmpresa,
   criarCartaoCorporativo,
@@ -18,6 +26,17 @@ import {
   marcarFaturaPaga,
   registrarMovimentoCarteira,
 } from '@/lib/corporate-finance'
+import {
+  CORPORATE_FINANCE_RELATIONAL_WRITE_DISABLED,
+  CorporateFinanceClientError,
+  configureCorporateWalletOnServer,
+  createCorporateCardOnServer,
+  createCorporateFinanceOperationKey,
+  createCorporateWalletMovementOnServer,
+  generateCorporateInvoiceOnServer,
+  loadCorporateFinanceFromServer,
+  settleCorporateInvoiceOnServer,
+} from '@/lib/corporate-finance-client'
 import { sincronizarTudoOperacional } from '@/lib/operational-sync'
 import { useFiltroPersistente } from '@/lib/filtros'
 import { formatarValor, formatarData } from '@/lib/normalizers'
@@ -32,16 +51,26 @@ import type { CartaoCorporativo } from '@/types'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
 import { PageHero } from '@/components/ui/page-hero'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 type Aba = 'resumo' | 'receber' | 'pagar' | 'carteira' | 'cartoes' | 'faturas'
 
 export default function FinanceiroPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const { empresas } = useStore()
-  const podeVer = hasPermission(user, 'ver_financeiro') || hasPermission(user, 'gerenciar_usuarios')
+  const { includesCompany } = useCorporateCompanyScope()
+  const empresasNoContexto = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_financeiro')),
+    [empresas, includesCompany],
+  )
+  const podeVer = empresasNoContexto.length > 0 && (hasPermission(user, 'ver_financeiro') || hasPermission(user, 'gerenciar_usuarios'))
+  const podeEditarEmpresa = (companyId: string | null | undefined) => includesCompany(companyId, 'editar_financeiro')
+  const podeEditarNoContexto = empresasNoContexto.some((empresa) => podeEditarEmpresa(empresa.id))
+  const podeReprocessar = !user?.corporate_profile && hasPermission(user, 'editar_financeiro')
 
   const [aba, setAba] = useState<Aba>('resumo')
   const [reload, setReload] = useState(0)
+  const pendingCorporateFinanceKeys = useRef(new Map<string, string>())
   const [pagamento, setPagamento] = useState<LancamentoFinanceiro | null>(null)
   const [aporteValor, setAporteValor] = useState(0)
   const [pixPagamento, setPixPagamento] = useState({ valor: 0, descricao: 'Débito externo conciliado' })
@@ -71,43 +100,79 @@ export default function FinanceiroPage() {
   const lancamentos = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
-    let r = getAllLancamentos()
+    let r = getAllLancamentos().filter((lancamento) => includesCompany(lancamento.empresa_id, 'ver_financeiro'))
     if (filtro.empresa_id) r = r.filter((l) => l.empresa_id === filtro.empresa_id)
     if (filtro.desde) r = r.filter((l) => l.data_vencimento >= filtro.desde!)
     if (filtro.ate) r = r.filter((l) => l.data_vencimento <= filtro.ate!)
     if (filtro.status) r = r.filter((l) => l.status === filtro.status)
     return r.sort((a, b) => a.data_vencimento.localeCompare(b.data_vencimento))
-  }, [filtro, reload])
+  }, [filtro, includesCompany, reload])
 
   const resumo = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return null
-    return calcularResumoFinanceiro({
+    const scoped = getAllLancamentos().filter((lancamento) => includesCompany(lancamento.empresa_id, 'ver_financeiro'))
+    return calcularResumoFinanceiroDaLista(scoped, {
       desde: filtro.desde || undefined,
       ate: filtro.ate || undefined,
       empresa_id: filtro.empresa_id || undefined,
     })
-  }, [filtro, reload])
+  }, [filtro, includesCompany, reload])
 
   const aReceber = lancamentos.filter((l) => l.tipo === 'receber')
   const aPagar = lancamentos.filter((l) => l.tipo === 'pagar')
   const empresaSelecionadaId = filtro.empresa_id || ''
+  const empresasNoContextoKey = empresasNoContexto.map((empresa) => empresa.id).sort().join('|')
+
+  useEffect(() => {
+    if (empresaSelecionadaId && !empresasNoContexto.some((empresa) => empresa.id === empresaSelecionadaId)) {
+      setFiltro({ empresa_id: '' })
+    }
+  }, [empresaSelecionadaId, empresasNoContexto, empresasNoContextoKey, setFiltro])
+
+  useEffect(() => {
+    if (!podeVer) return
+    let active = true
+    void Promise.allSettled([
+      loadFinancialEntriesFromServer(),
+      loadCorporateFinanceFromServer(),
+    ])
+      .then((results) => {
+        if (!active) return
+        results.forEach((result) => {
+          if (result.status === 'rejected') {
+            toast.error(
+              result.reason instanceof Error
+                ? result.reason.message
+                : 'Falha ao carregar o financeiro.',
+            )
+          }
+        })
+        refresh()
+      })
+    return () => {
+      active = false
+    }
+  }, [empresasNoContextoKey, podeVer])
+
   const carteiras = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
-    const all = getAllCarteirasCorporativas()
+    const all = getAllCarteirasCorporativas().filter((carteira) => includesCompany(carteira.company_id, 'ver_financeiro'))
     return empresaSelecionadaId ? all.filter((c) => c.company_id === empresaSelecionadaId) : all
-  }, [empresaSelecionadaId, reload])
+  }, [empresaSelecionadaId, includesCompany, reload])
   const cartoes = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
     return getCartoesCorporativos(empresaSelecionadaId || undefined)
-  }, [empresaSelecionadaId, reload])
+      .filter((cartao) => includesCompany(cartao.company_id, 'ver_financeiro'))
+  }, [empresaSelecionadaId, includesCompany, reload])
   const faturas = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
     return getFaturasCorporativas(empresaSelecionadaId || undefined)
-  }, [empresaSelecionadaId, reload])
+      .filter((fatura) => includesCompany(fatura.company_id, 'ver_financeiro'))
+  }, [empresaSelecionadaId, includesCompany, reload])
   const carteiraSelecionada = empresaSelecionadaId ? carteiras.find((c) => c.company_id === empresaSelecionadaId) : null
 
   useEffect(() => {
@@ -118,15 +183,94 @@ export default function FinanceiroPage() {
 
   function refresh() { setReload((n) => n + 1) }
 
-  async function gerarRetroativos() {
-    const r = sincronizarTudoOperacional()
+  function financeOperationKey(slot: string): string {
+    const existing = pendingCorporateFinanceKeys.current.get(slot)
+    if (existing) return existing
+    const created = createCorporateFinanceOperationKey(
+      slot,
+      empresaSelecionadaId || 'context',
+    )
+    pendingCorporateFinanceKeys.current.set(slot, created)
+    return created
+  }
+
+  function clearFinanceOperationKey(slot: string): void {
+    pendingCorporateFinanceKeys.current.delete(slot)
+  }
+
+  function shouldUseCorporateFinanceLegacy(error: unknown): boolean {
+    return error instanceof CorporateFinanceClientError
+      && error.code === CORPORATE_FINANCE_RELATIONAL_WRITE_DISABLED
+  }
+
+  async function commitLegacyCorporateFinance(message: string): Promise<boolean> {
     try {
       await commitPendingRemoteStorage()
+      return true
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a sincronizacao no servidor.')
+      toast.error(error instanceof Error ? error.message : message)
+      return false
+    }
+  }
+
+  async function gerarRetroativos() {
+    if (!podeReprocessar) {
+      toast.error('Somente a operacao interna pode reprocessar a sincronizacao financeira.')
       return
     }
-    toast.success(`${r.atendimentosFinanceiro} atendimento(s), ${r.vouchersCriados + r.vouchersAtualizados} voucher(s) e financeiro sincronizados.`)
+    try {
+      const demandas = getAllAtendimentos().filter((demanda) =>
+        Boolean(demanda.empresa_id)
+        && includesCompany(demanda.empresa_id, 'editar_financeiro')
+      )
+      if (!demandas.length) {
+        toast.info('Nao ha demandas autorizadas para sincronizar.')
+        return
+      }
+      const ids = demandas.map((demanda) => demanda.id)
+      const stateFingerprint = demandas
+        .map((demanda) => [
+          demanda.id,
+          demanda.updated_at || '',
+          demanda.status,
+          demanda.valor_venda || demanda.valor_final || demanda.valor_cotacao || 0,
+          demanda.valor_custo || 0,
+        ].join('|'))
+        .sort()
+        .join('\n')
+      const result = await syncFinancialEntriesFromDemandsOnServer(
+        ids,
+        createFinancialDemandSyncKey('finance-retroactive', ids, stateFingerprint),
+      )
+      toast.success(`${result.entries.length} lancamento(s) financeiro(s) sincronizado(s).`)
+    } catch (error) {
+      if (
+        error instanceof FinanceClientError
+        && error.code === 'FINANCE_RELATIONAL_WRITE_DISABLED'
+      ) {
+        const legacy = sincronizarTudoOperacional()
+        try {
+          await commitPendingRemoteStorage()
+        } catch (commitError) {
+          toast.error(
+            commitError instanceof Error
+              ? commitError.message
+              : 'Falha ao confirmar a sincronizacao no servidor.',
+          )
+          return
+        }
+        toast.success(
+          `${legacy.atendimentosFinanceiro} atendimento(s), ${legacy.vouchersCriados + legacy.vouchersAtualizados} voucher(s) e financeiro sincronizados no modo legado.`,
+        )
+      } else {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : 'Falha ao sincronizar os lancamentos financeiros.',
+        )
+        return
+      }
+    }
     refresh()
   }
 
@@ -135,27 +279,47 @@ export default function FinanceiroPage() {
       toast.error('Selecione uma empresa para usar carteira, cartoes ou faturas.')
       return null
     }
+    if (!podeEditarEmpresa(empresaSelecionadaId)) {
+      toast.error('Seu acesso a esta empresa e somente para consulta financeira.')
+      return null
+    }
     return empresaSelecionadaId
   }
 
   async function ativarCarteira() {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
-    const wallet = garantirCarteiraEmpresa(empresaId)
-    atualizarCarteiraEmpresa(wallet.id, {
-      status: 'ativa',
-      pix_habilitado: false,
-      cartao_habilitado: false,
-      limite_credito: wallet.limite_credito || 0,
-      limite_pix_diario: wallet.limite_pix_diario || 0,
-      limite_cartao_mensal: wallet.limite_cartao_mensal || 0,
-      provedor: 'pendente',
-    })
     try {
-      await commitPendingRemoteStorage()
+      await configureCorporateWalletOnServer({
+        company_id: empresaId,
+        status: 'ativa',
+        pix_habilitado: false,
+        cartao_habilitado: false,
+        limite_credito: carteiraSelecionada?.limite_credito || 0,
+        limite_pix_diario: carteiraSelecionada?.limite_pix_diario || 0,
+        limite_cartao_mensal: carteiraSelecionada?.limite_cartao_mensal || 0,
+        provedor: 'pendente',
+        expectedVersion: carteiraSelecionada?.version,
+      })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o controle financeiro no servidor.')
-      return
+      if (shouldUseCorporateFinanceLegacy(error)) {
+        const wallet = garantirCarteiraEmpresa(empresaId)
+        atualizarCarteiraEmpresa(wallet.id, {
+          status: 'ativa',
+          pix_habilitado: false,
+          cartao_habilitado: false,
+          limite_credito: wallet.limite_credito || 0,
+          limite_pix_diario: wallet.limite_pix_diario || 0,
+          limite_cartao_mensal: wallet.limite_cartao_mensal || 0,
+          provedor: 'pendente',
+        })
+        if (!await commitLegacyCorporateFinance(
+          'Falha ao confirmar o controle financeiro no servidor.',
+        )) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o controle financeiro no servidor.')
+        return
+      }
     }
     toast.success('Controle interno da empresa habilitado. Nenhuma conta bancária foi criada.')
     refresh()
@@ -168,19 +332,35 @@ export default function FinanceiroPage() {
       toast.error('Informe um valor valido.')
       return
     }
-    registrarMovimentoCarteira({
-      company_id: empresaId,
-      tipo: 'credito',
-      origem: 'manual',
-      valor: aporteValor,
-      descricao: 'Crédito externo conciliado no controle interno',
-    })
+    const slot = `credit:${empresaId}:${aporteValor}`
     try {
-      await commitPendingRemoteStorage()
+      await createCorporateWalletMovementOnServer({
+        company_id: empresaId,
+        tipo: 'credito',
+        origem: 'manual',
+        valor: aporteValor,
+        descricao: 'Credito externo conciliado no controle interno',
+        idempotencyKey: financeOperationKey(slot),
+        confirmed: true,
+      })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o credito no servidor.')
-      return
+      if (shouldUseCorporateFinanceLegacy(error)) {
+        registrarMovimentoCarteira({
+          company_id: empresaId,
+          tipo: 'credito',
+          origem: 'manual',
+          valor: aporteValor,
+          descricao: 'Credito externo conciliado no controle interno',
+        })
+        if (!await commitLegacyCorporateFinance(
+          'Falha ao confirmar o credito no servidor.',
+        )) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o credito no servidor.')
+        return
+      }
     }
+    clearFinanceOperationKey(slot)
     setAporteValor(0)
     toast.success('Crédito conciliado registrado no controle interno.')
     refresh()
@@ -193,30 +373,47 @@ export default function FinanceiroPage() {
       toast.error('Informe um valor de débito válido.')
       return
     }
-    const wallet = carteiraSelecionada || garantirCarteiraEmpresa(empresaId)
-    const saldoOperacional = Number(wallet.saldo_disponivel || 0) + Number(wallet.limite_credito || 0)
+    const saldoOperacional = Number(carteiraSelecionada?.saldo_disponivel || 0)
+      + Number(carteiraSelecionada?.limite_credito || 0)
     if (saldoOperacional < pixPagamento.valor) {
       toast.error('Saldo/limite interno insuficiente para registrar este débito.')
       return
     }
-    const movimento = registrarMovimentoCarteira({
-      company_id: empresaId,
-      tipo: 'debito',
-      origem: 'manual',
-      valor: pixPagamento.valor,
-      descricao: pixPagamento.descricao || 'Débito externo conciliado',
-    })
-    if (!movimento) {
-      toast.error('Não foi possível registrar o débito conciliado.')
-      return
-    }
-    setPixPagamento({ valor: 0, descricao: 'Débito externo conciliado' })
+    const descricao = pixPagamento.descricao || 'Debito externo conciliado'
+    const slot = `debit:${empresaId}:${pixPagamento.valor}:${descricao}`
     try {
-      await commitPendingRemoteStorage()
+      await createCorporateWalletMovementOnServer({
+        company_id: empresaId,
+        tipo: 'debito',
+        origem: 'manual',
+        valor: pixPagamento.valor,
+        descricao,
+        idempotencyKey: financeOperationKey(slot),
+        confirmed: true,
+      })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o debito no servidor.')
-      return
+      if (shouldUseCorporateFinanceLegacy(error)) {
+        const movimento = registrarMovimentoCarteira({
+          company_id: empresaId,
+          tipo: 'debito',
+          origem: 'manual',
+          valor: pixPagamento.valor,
+          descricao,
+        })
+        if (!movimento) {
+          toast.error('Não foi possível registrar o débito conciliado.')
+          return
+        }
+        if (!await commitLegacyCorporateFinance(
+          'Falha ao confirmar o debito no servidor.',
+        )) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o debito no servidor.')
+        return
+      }
     }
+    clearFinanceOperationKey(slot)
+    setPixPagamento({ valor: 0, descricao: 'Débito externo conciliado' })
     toast.success('Débito já realizado registrado no controle interno.')
     refresh()
   }
@@ -224,25 +421,43 @@ export default function FinanceiroPage() {
   async function criarCartao(tipo?: CartaoCorporativo['tipo']) {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
-    const card = criarCartaoCorporativo({
-      company_id: empresaId,
-      tipo: tipo || cartaoForm.tipo,
-      apelido: cartaoForm.apelido || 'Cartao viagem',
-      portador_nome: cartaoForm.portador_nome || undefined,
-      limite: cartaoForm.limite,
-      merchant_lock: cartaoForm.merchant_lock || undefined,
-      criado_por_user_id: user?.id,
-      ultimos4: cartaoForm.ultimos4,
-      bandeira: cartaoForm.bandeira,
-    })
+    let card: CartaoCorporativo | null = null
+    try {
+      card = await createCorporateCardOnServer({
+        company_id: empresaId,
+        tipo: tipo || cartaoForm.tipo,
+        apelido: cartaoForm.apelido || 'Cartao viagem',
+        portador_nome: cartaoForm.portador_nome || undefined,
+        limite: cartaoForm.limite,
+        merchant_lock: cartaoForm.merchant_lock || undefined,
+        funcionario_id: null,
+        ultimos4: cartaoForm.ultimos4,
+        bandeira: cartaoForm.bandeira,
+      })
+    } catch (error) {
+      if (shouldUseCorporateFinanceLegacy(error)) {
+        card = criarCartaoCorporativo({
+          company_id: empresaId,
+          tipo: tipo || cartaoForm.tipo,
+          apelido: cartaoForm.apelido || 'Cartao viagem',
+          portador_nome: cartaoForm.portador_nome || undefined,
+          limite: cartaoForm.limite,
+          merchant_lock: cartaoForm.merchant_lock || undefined,
+          criado_por_user_id: user?.id,
+          ultimos4: cartaoForm.ultimos4,
+          bandeira: cartaoForm.bandeira,
+        })
+        if (
+          card
+          && !await commitLegacyCorporateFinance('Falha ao confirmar o cartao no servidor.')
+        ) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o cartao no servidor.')
+        return
+      }
+    }
     if (!card) {
       toast.error('Informe os quatro últimos dígitos de um cartão já emitido.')
-      return
-    }
-    try {
-      await commitPendingRemoteStorage()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o cartao no servidor.')
       return
     }
     toast.success('Cartão já emitido registrado no controle interno.')
@@ -252,39 +467,83 @@ export default function FinanceiroPage() {
   async function gerarFatura() {
     const empresaId = exigirEmpresaSelecionada()
     if (!empresaId) return
-    const fatura = gerarFaturaEmpresa({
-      company_id: empresaId,
-      lancamentos: getAllLancamentos(),
-      periodo_inicio: periodoFatura.inicio,
-      periodo_fim: periodoFatura.fim,
-      vencimento: periodoFatura.vencimento,
-    })
+    const slot = [
+      'invoice',
+      empresaId,
+      periodoFatura.inicio,
+      periodoFatura.fim,
+      periodoFatura.vencimento,
+    ].join(':')
+    let fatura: (typeof faturas)[number] | null = null
+    try {
+      const result = await generateCorporateInvoiceOnServer({
+        company_id: empresaId,
+        periodo_inicio: periodoFatura.inicio,
+        periodo_fim: periodoFatura.fim,
+        vencimento: periodoFatura.vencimento,
+        idempotencyKey: financeOperationKey(slot),
+        confirmed: true,
+      })
+      fatura = result.invoice
+    } catch (error) {
+      if (shouldUseCorporateFinanceLegacy(error)) {
+        fatura = gerarFaturaEmpresa({
+          company_id: empresaId,
+          lancamentos: getAllLancamentos(),
+          periodo_inicio: periodoFatura.inicio,
+          periodo_fim: periodoFatura.fim,
+          vencimento: periodoFatura.vencimento,
+        })
+        if (
+          fatura
+          && !await commitLegacyCorporateFinance('Falha ao confirmar a fatura no servidor.')
+        ) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a fatura no servidor.')
+        return
+      }
+    }
     if (!fatura) {
       toast.error('Nao foi possivel gerar a fatura.')
       return
     }
-    try {
-      await commitPendingRemoteStorage()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a fatura no servidor.')
-      return
-    }
+    clearFinanceOperationKey(slot)
     toast.success(`Fatura ${fatura.numero} gerada/atualizada.`)
     refresh()
   }
 
   async function quitarFatura(id: string) {
-    const fatura = marcarFaturaPaga(id)
+    const atual = faturas.find((fatura) => fatura.id === id)
+    if (!atual || !podeEditarEmpresa(atual.company_id)) {
+      toast.error('Seu acesso a esta empresa e somente para consulta financeira.')
+      return
+    }
+    const slot = `settle:${id}:${atual.version || 1}`
+    let fatura: (typeof faturas)[number] | null = null
+    try {
+      const result = await settleCorporateInvoiceOnServer(id, {
+        expectedVersion: atual.version || 1,
+        idempotencyKey: financeOperationKey(slot),
+        confirmed: true,
+      })
+      fatura = result.invoice
+    } catch (error) {
+      if (shouldUseCorporateFinanceLegacy(error)) {
+        fatura = marcarFaturaPaga(id)
+        if (
+          fatura
+          && !await commitLegacyCorporateFinance('Falha ao confirmar a quitacao no servidor.')
+        ) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a quitacao no servidor.')
+        return
+      }
+    }
     if (!fatura) {
       toast.error('Nao foi possivel quitar a fatura.')
       return
     }
-    try {
-      await commitPendingRemoteStorage()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a quitacao no servidor.')
-      return
-    }
+    clearFinanceOperationKey(slot)
     toast.success(`Fatura ${fatura.numero} marcada como paga.`)
     refresh()
   }
@@ -313,20 +572,26 @@ export default function FinanceiroPage() {
           { icon: CheckCircle2, label: 'Recebido', value: formatarValor(resumo?.recebido || 0) },
           { icon: TrendingUp, label: 'Saldo', value: formatarValor(resumo?.saldo_previsto || 0), highlight: (resumo?.saldo_previsto || 0) < 0 },
         ]}
-        actions={
+        actions={podeReprocessar ?
           <button onClick={gerarRetroativos}
             className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-white text-sm hover:bg-white/15 transition border border-white/15">
             <RefreshCw className="w-4 h-4" /> Reprocessar sincronização
           </button>
-        }
+          : undefined}
       />
+
+      {!podeEditarNoContexto && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
+          Acesso financeiro em modo de consulta para o contexto selecionado.
+        </div>
+      )}
 
       <div className="bbt-card p-3 flex flex-wrap gap-3 items-end">
         <div>
           <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Empresa</label>
           <select value={filtro.empresa_id || ''} onChange={(e) => setFiltro({ empresa_id: e.target.value })} className="bbt-input text-sm">
             <option value="">Todas</option>
-            {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+            {empresasNoContexto.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
           </select>
         </div>
         <div>
@@ -468,7 +733,7 @@ export default function FinanceiroPage() {
                     <td className="px-3 py-2 text-right text-xs text-green-600">{formatarValor(l.valor_pago)}</td>
                     <td className="px-3 py-2 text-center"><StatusBadge status={l.status} /></td>
                     <td className="px-3 py-2">
-                      {l.status !== 'pago' && l.status !== 'cancelado' && (
+                      {podeEditarEmpresa(l.empresa_id) && l.status !== 'pago' && l.status !== 'cancelado' && (
                         <button onClick={() => setPagamento(l)} className="text-xs bbt-button-primary py-1 px-2 flex items-center gap-1">
                           <DollarSign className="w-3 h-3" /> {l.tipo === 'pagar' ? 'Pagar' : 'Receber'}
                         </button>
@@ -495,7 +760,7 @@ export default function FinanceiroPage() {
                 Registro contábil auxiliar de saldos e limites. Esta área não movimenta conta bancária nem envia pagamentos.
               </p>
             </div>
-            <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
+            <EmpresaCarteiraSelect empresas={empresasNoContexto} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
             <button onClick={ativarCarteira} className="bbt-button-primary w-full">
               <CheckCircle2 className="w-4 h-4" /> Habilitar controle da empresa
             </button>
@@ -571,7 +836,7 @@ export default function FinanceiroPage() {
             <CreditCard className="w-6 h-6 text-bbt-accent" />
             <h3 className="font-semibold">Cadastro de cartões emitidos</h3>
             <p className="text-sm text-slate-500">Registre somente cartões reais já emitidos pelo provedor financeiro. Esta tela não solicita emissão bancária.</p>
-            <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
+            <EmpresaCarteiraSelect empresas={empresasNoContexto} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
             <div>
               <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Bandeira</label>
               <select value={cartaoForm.bandeira} onChange={(e) => setCartaoForm({ ...cartaoForm, bandeira: e.target.value as NonNullable<CartaoCorporativo['bandeira']> })} className="bbt-input">
@@ -659,7 +924,7 @@ export default function FinanceiroPage() {
             <ReceiptText className="w-6 h-6 text-bbt-accent" />
             <h3 className="font-semibold">Gerar fatura da empresa</h3>
             <p className="text-sm text-slate-500">Agrupa contas a receber do periodo para emissao e acompanhamento da cobranca.</p>
-            <EmpresaCarteiraSelect empresas={empresas} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
+            <EmpresaCarteiraSelect empresas={empresasNoContexto} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
             <div>
               <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Inicio</label>
               <input type="date" value={periodoFatura.inicio} onChange={(e) => setPeriodoFatura({ ...periodoFatura, inicio: e.target.value })} className="bbt-input" />
@@ -747,19 +1012,49 @@ function PagamentoForm({ lancamento, userId, userName, onSucesso }: any) {
   const [valor, setValor] = useState(restante)
   const [data, setData] = useState(todayISODate())
   const [forma, setForma] = useState<FormaPagamento>('PIX')
+  const [salvando, setSalvando] = useState(false)
+  const [idempotencyKey] = useState(
+    () => `finance:settle:${lancamento.id}:${crypto.randomUUID()}`,
+  )
 
   async function submit() {
     if (valor <= 0) { toast.error('Valor inválido'); return }
-    if (pagarLancamento(lancamento.id, valor, data, forma, userId, userName)) {
-      try {
-        await commitPendingRemoteStorage()
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o pagamento no servidor.')
-        return
-      }
+    if (salvando) return
+    setSalvando(true)
+    try {
+      await settleFinancialEntryOnServer(lancamento.id, {
+        valor,
+        data_pagamento: data,
+        forma_pagamento: forma,
+        expectedVersion: lancamento.version || 1,
+        idempotencyKey,
+      })
       toast.success('Lançamento atualizado')
       onSucesso()
-    } else { toast.error('Erro') }
+    } catch (error) {
+      if (
+        error instanceof FinanceClientError
+        && error.code === 'FINANCE_RELATIONAL_WRITE_DISABLED'
+        && pagarLancamento(lancamento.id, valor, data, forma, userId, userName)
+      ) {
+        try {
+          await commitPendingRemoteStorage()
+        } catch (commitError) {
+          toast.error(
+            commitError instanceof Error
+              ? commitError.message
+              : 'Falha ao confirmar o pagamento no servidor.',
+          )
+          return
+        }
+        toast.success('Lançamento atualizado no modo legado')
+        onSucesso()
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Erro ao atualizar o lancamento.')
+      }
+    } finally {
+      setSalvando(false)
+    }
   }
 
   return (
@@ -792,8 +1087,15 @@ function PagamentoForm({ lancamento, userId, userName, onSucesso }: any) {
         </div>
       </div>
       <div className="flex justify-end gap-2 pt-2">
-        <button onClick={submit} className="bbt-button-primary flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4" /> Confirmar
+        <button
+          onClick={submit}
+          disabled={salvando}
+          className="bbt-button-primary flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {salvando
+            ? <RefreshCw className="w-4 h-4 animate-spin" />
+            : <CheckCircle2 className="w-4 h-4" />}
+          {salvando ? 'Confirmando...' : 'Confirmar'}
         </button>
       </div>
     </div>

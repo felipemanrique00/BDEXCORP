@@ -4,9 +4,17 @@ import { createHmac, randomBytes } from 'node:crypto'
 
 import { PERMISSOES_PADRAO_POR_PERFIL, type PerfilBBT, type Permissoes, type User, type UserRole } from '@/types'
 import { hashPassword, verifyPassword } from '@/lib/security/password'
+import { requiresAdministrativeMfa } from '@/lib/security/mfa-policy'
 import { writeAuditEvent } from '@/lib/server/audit-log'
+import { hydratePrincipalAuthorizationGrants } from '@/lib/server/authorization-grant-service'
+import { hydratePrincipalCorporateAccess } from '@/lib/server/corporate-access-service'
 import { getServerEnvironment } from '@/lib/server/environment'
-import { queryDatabase, withTransaction } from '@/lib/server/database'
+import {
+  queryDatabase,
+  withDatabaseSecurityContext,
+  withTenantTransaction,
+  withTransaction,
+} from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 
 const DUMMY_PASSWORD_HASH = hashPassword(randomBytes(32).toString('base64url'))
@@ -44,6 +52,8 @@ interface AuthRow {
   max_users: number | null
   max_storage_bytes: string | number | null
   max_monthly_operations: number | null
+  authentication_level?: 'password' | 'mfa'
+  mfa_verified_at?: Date | null
 }
 
 interface SessionRow extends AuthRow {
@@ -69,6 +79,12 @@ export interface RequestSecurityMetadata {
   ipAddress?: string | null
   userAgent?: string | null
   requestId?: string | null
+}
+
+export interface SessionAuthenticationContext {
+  level: 'password' | 'mfa'
+  mfaMethod?: 'totp' | 'recovery_code'
+  verifiedAt?: Date
 }
 
 export async function authenticateCredentials(
@@ -131,21 +147,23 @@ export async function authenticateCredentials(
     )
     await client.query('update users set last_login_at = now() where id = $1', [account.user_id])
   })
-  await writeLoginAudit(account, 'success', null, metadata)
-  return { principal: toPrincipal(account, '') }
+  await writeLoginAudit(account, 'success', null, metadata, 'auth.password.verify')
+  return { principal: await hydratePrincipalAccess(toPrincipal(account, '')) }
 }
 
 export async function createSession(
   principal: RequestPrincipal,
   metadata: RequestSecurityMetadata = {},
+  authentication: SessionAuthenticationContext = { level: 'password' },
 ): Promise<SessionCreationResult> {
   const environment = getServerEnvironment()
   const token = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + environment.AUTH_SESSION_HOURS * 60 * 60 * 1_000)
-  const result = await queryDatabase<{ id: string }>(
+  const result = await withTenantTransaction(principal.tenantId, (client) => client.query<{ id: string }>(
     `insert into user_sessions (
-       tenant_id, membership_id, user_id, token_hash, ip_address, user_agent, expires_at
-     ) values ($1, $2, $3, $4, $5::inet, $6, $7) returning id`,
+       tenant_id, membership_id, user_id, token_hash, ip_address, user_agent, expires_at,
+       authentication_level, mfa_verified_at, mfa_method
+     ) values ($1, $2, $3, $4, $5::inet, $6, $7, $8, $9, $10) returning id`,
     [
       principal.tenantId,
       principal.membershipId,
@@ -154,61 +172,167 @@ export async function createSession(
       normalizeIp(metadata.ipAddress),
       truncate(metadata.userAgent, 512),
       expiresAt,
+      authentication.level,
+      authentication.level === 'mfa' ? authentication.verifiedAt || new Date() : null,
+      authentication.level === 'mfa' ? authentication.mfaMethod || 'totp' : null,
     ],
-  )
+  ))
   const sessionId = result.rows[0].id
   return {
     token,
-    principal: { ...principal, sessionId },
+    principal: {
+      ...principal,
+      sessionId,
+      authenticationLevel: authentication.level,
+      mfaVerifiedAt: authentication.level === 'mfa'
+        ? (authentication.verifiedAt || new Date()).toISOString()
+        : null,
+    },
     expiresAt,
   }
 }
 
+export async function loadPrincipalForAuthenticatedUser(
+  userId: string,
+  tenantId: string,
+  membershipId: string,
+): Promise<RequestPrincipal | null> {
+  const result = await withTenantTransaction(tenantId, (client) => client.query<AuthRow>(
+    `${principalSelect(false)}
+     where u.id = $1
+       and t.id = $2
+       and m.id = $3
+     limit 1`,
+    [userId, tenantId, membershipId],
+  ))
+  const row = result.rows[0]
+  if (!row || !isAccountActive(row)) return null
+  return hydratePrincipalAccess(toPrincipal(row, ''))
+}
+
 export async function resolveSession(token: string | null | undefined): Promise<RequestPrincipal | null> {
   if (!token) return null
-  const result = await queryDatabase<SessionRow>(`${principalSelect(true)}
-    join user_sessions s on s.membership_id = m.id and s.user_id = u.id and s.tenant_id = t.id
-    where s.token_hash = $1
-    limit 1`, [hashOpaqueToken(token)])
+  const tokenHash = hashOpaqueToken(token)
+  const result = await withDatabaseSecurityContext(
+    { sessionTokenHash: tokenHash },
+    (client) => client.query<SessionRow>(
+      `${principalSelect(true)}
+       join user_sessions s on s.membership_id = m.id and s.user_id = u.id and s.tenant_id = t.id
+       where s.token_hash = $1
+       limit 1`,
+      [tokenHash],
+    ),
+  )
   const row = result.rows[0]
   if (!row) return null
 
   if (row.session_status !== 'active' || row.expires_at.getTime() <= Date.now() || !isAccountActive(row)) {
     if (row.session_status === 'active' && row.expires_at.getTime() <= Date.now()) {
-      await queryDatabase(
-        `update user_sessions set status = 'expired', revoked_at = now(), revocation_reason = 'expired'
-         where id = $1 and status = 'active'`,
-        [row.session_id],
+      await withDatabaseSecurityContext(
+        { sessionTokenHash: tokenHash },
+        (client) => client.query(
+          `update user_sessions set status = 'expired', revoked_at = now(), revocation_reason = 'expired'
+           where id = $1 and status = 'active'`,
+          [row.session_id],
+        ),
       )
     }
     return null
   }
 
-  await queryDatabase(
-    `update user_sessions set last_seen_at = now()
-     where id = $1 and last_seen_at < now() - interval '5 minutes'`,
-    [row.session_id],
+  await withDatabaseSecurityContext(
+    { sessionTokenHash: tokenHash },
+    (client) => client.query(
+      `update user_sessions set last_seen_at = now()
+       where id = $1 and last_seen_at < now() - interval '5 minutes'`,
+      [row.session_id],
+    ),
   )
-  return toPrincipal(row, row.session_id)
+  const principal = await hydratePrincipalAccess(toPrincipal(row, row.session_id))
+  if (
+    getServerEnvironment().MFA_ADMIN_REQUIRED &&
+    requiresAdministrativeMfa(principal) &&
+    principal.authenticationLevel !== 'mfa'
+  ) {
+    await withDatabaseSecurityContext(
+      { sessionTokenHash: tokenHash },
+      (client) => client.query(
+        `update user_sessions
+         set status = 'revoked', revoked_at = now(), revocation_reason = 'mfa_required'
+         where id = $1 and status = 'active'`,
+        [row.session_id],
+      ),
+    )
+    return null
+  }
+  return principal
+}
+
+export async function resolveAutomationExecutorPrincipal(
+  userId: string,
+  tenantId: string,
+): Promise<RequestPrincipal | null> {
+  const result = await withTenantTransaction(tenantId, (client) => client.query<AuthRow>(
+    `${principalSelect(false)}
+     where u.id = $1
+       and t.id = $2
+     limit 1`,
+    [userId, tenantId],
+  ))
+  const row = result.rows[0]
+  if (!row || !isAccountActive(row)) return null
+  const principal = await hydratePrincipalAccess(toPrincipal(row, `automation-worker:${tenantId}:${userId}`))
+  return { ...principal, authenticationLevel: 'system', mfaVerifiedAt: null }
+}
+
+async function hydratePrincipalAccess(principal: RequestPrincipal): Promise<RequestPrincipal> {
+  const corporatePrincipal = await hydratePrincipalCorporateAccess(principal)
+  return hydratePrincipalAuthorizationGrants(corporatePrincipal)
 }
 
 export async function revokeSession(token: string | null | undefined, reason = 'logout'): Promise<boolean> {
   if (!token) return false
-  const result = await queryDatabase(
-    `update user_sessions
-     set status = 'revoked', revoked_at = now(), revocation_reason = $2
-     where token_hash = $1 and status = 'active'`,
-    [hashOpaqueToken(token), reason.slice(0, 120)],
+  const tokenHash = hashOpaqueToken(token)
+  const result = await withDatabaseSecurityContext(
+    { sessionTokenHash: tokenHash },
+    (client) => client.query(
+      `update user_sessions
+       set status = 'revoked', revoked_at = now(), revocation_reason = $2
+       where token_hash = $1 and status = 'active'`,
+      [tokenHash, reason.slice(0, 120)],
+    ),
   )
   return (result.rowCount || 0) > 0
 }
 
 export async function revokeUserSessions(userId: string, reason: string, exceptSessionId?: string): Promise<number> {
-  const result = await queryDatabase(
-    `update user_sessions
-     set status = 'revoked', revoked_at = now(), revocation_reason = $2
-     where user_id = $1 and status = 'active' and ($3::uuid is null or id <> $3::uuid)`,
-    [userId, reason.slice(0, 120), exceptSessionId || null],
+  const result = await withDatabaseSecurityContext(
+    { identityUserId: userId },
+    (client) => client.query(
+      `update user_sessions
+       set status = 'revoked', revoked_at = now(), revocation_reason = $2
+       where user_id = $1 and status = 'active' and ($3::uuid is null or id <> $3::uuid)`,
+      [userId, reason.slice(0, 120), exceptSessionId || null],
+    ),
+  )
+  return result.rowCount || 0
+}
+
+export async function revokeTenantUserSessions(
+  tenantId: string,
+  userId: string,
+  reason: string,
+  exceptSessionId?: string,
+): Promise<number> {
+  const result = await withDatabaseSecurityContext(
+    { tenantId },
+    (client) => client.query(
+      `update user_sessions
+       set status = 'revoked', revoked_at = now(), revocation_reason = $3
+       where tenant_id = $1 and user_id = $2 and status = 'active'
+         and ($4::uuid is null or id <> $4::uuid)`,
+      [tenantId, userId, reason.slice(0, 120), exceptSessionId || null],
+    ),
   )
   return result.rowCount || 0
 }
@@ -226,7 +350,7 @@ export async function verifyUserPassword(userId: string, password: string): Prom
 export async function replaceUserPassword(userId: string, newPassword: string, reason: string): Promise<void> {
   assertStrongPassword(newPassword)
   const passwordHash = await hashPassword(newPassword)
-  await withTransaction(async (client) => {
+  await withDatabaseSecurityContext({ identityUserId: userId }, async (client) => {
     await client.query(
       `update user_credentials
        set password_hash = $2, password_updated_at = now(), must_change_password = false,
@@ -278,7 +402,7 @@ export function assertStrongPassword(password: string): void {
 
 function principalSelect(includeSession: boolean): string {
   const sessionColumns = includeSession
-    ? ',\n    s.id as session_id,\n    s.status as session_status,\n    s.expires_at'
+    ? ',\n    s.id as session_id,\n    s.status as session_status,\n    s.expires_at,\n    s.authentication_level,\n    s.mfa_verified_at'
     : ''
   return `select
     u.id as user_id,
@@ -325,11 +449,22 @@ function principalSelect(includeSession: boolean): string {
 }
 
 async function loadAuthenticationCandidates(email: string, tenantSlug: string | null): Promise<AuthRow[]> {
-  const result = await queryDatabase<AuthRow>(`${principalSelect(false)}
-    where u.email = $1
-      and ($2::text is null or t.slug = $2::citext)
-    order by m.created_at asc
-    limit 3`, [email, tenantSlug?.trim().toLowerCase() || null])
+  const identity = await queryDatabase<{ id: string }>(
+    'select id from users where email = $1 and deleted_at is null limit 1',
+    [email],
+  )
+  if (!identity.rows[0]) return []
+  const result = await withDatabaseSecurityContext(
+    { identityUserId: identity.rows[0].id },
+    (client) => client.query<AuthRow>(
+      `${principalSelect(false)}
+       where u.id = $1
+         and ($2::text is null or t.slug = $2::citext)
+       order by m.created_at asc
+       limit 3`,
+      [identity.rows[0].id, tenantSlug?.trim().toLowerCase() || null],
+    ),
+  )
   return result.rows
 }
 
@@ -360,6 +495,8 @@ function toPrincipal(row: AuthRow, sessionId: string): RequestPrincipal {
 
   return {
     sessionId,
+    authenticationLevel: row.authentication_level || 'password',
+    mfaVerifiedAt: row.mfa_verified_at?.toISOString() || null,
     tenantId: row.tenant_id,
     tenantSlug: row.tenant_slug,
     tenantStatus: row.tenant_status,
@@ -432,9 +569,10 @@ async function writeLoginAudit(
   result: 'success' | 'denied' | 'failure',
   reason: string | null,
   metadata: RequestSecurityMetadata,
+  action = 'auth.login',
 ): Promise<void> {
   await writeAuditEvent({
-    action: 'auth.login',
+    action,
     result,
     tenantId: row.tenant_id,
     actorUserId: row.user_id,

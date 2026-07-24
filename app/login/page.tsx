@@ -6,21 +6,32 @@ import Link from 'next/link'
 import {
   AlertCircle,
   Building2,
+  Check,
+  Copy,
   Eye,
   EyeOff,
+  KeyRound,
   Lock,
   Mail,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   type LucideIcon,
 } from 'lucide-react'
+import { QRCodeSVG } from 'qrcode.react'
 import { toast } from 'sonner'
 
 import { AI_NAME, SYSTEM_NAME } from '@/lib/branding'
 import { BBTLogo } from '@/components/branding/bbt-logo'
 import { setCurrentUser } from '@/lib/auth'
-import { authenticateWithServer, fetchServerSession } from '@/lib/client-session'
+import {
+  authenticateWithServer,
+  fetchServerSession,
+  startMfaEnrollmentWithServer,
+  verifyMfaWithServer,
+} from '@/lib/client-session'
 import { clearLocalSharedStorageForSessionChange } from '@/lib/storage-quota'
+import type { User } from '@/types'
 
 const heroImage =
   'https://images.unsplash.com/photo-1436491865332-7a61a109cc05?auto=format&fit=crop&w=1800&q=85'
@@ -31,6 +42,14 @@ const accessPillars: Array<{ icon: LucideIcon; label: string; detail: string }> 
   { icon: Sparkles, label: AI_NAME, detail: 'Inteligência aplicada à operação' },
 ]
 
+interface MfaLoginState {
+  mode: 'verify' | 'enroll'
+  challengeToken: string
+  expiresAt: string
+  secret?: string
+  provisioningUri?: string
+}
+
 export default function LoginPage() {
   const router = useRouter()
   const [email, setEmail] = useState('')
@@ -40,6 +59,10 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [showPass, setShowPass] = useState(false)
+  const [mfa, setMfa] = useState<MfaLoginState | null>(null)
+  const [mfaCode, setMfaCode] = useState('')
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([])
+  const [authenticatedUser, setAuthenticatedUser] = useState<User | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -67,6 +90,28 @@ export default function LoginPage() {
     const user = serverLogin.user
 
     if (!user) {
+      if (serverLogin.mfa) {
+        setPassword('')
+        setMfaCode('')
+        setMfa(serverLogin.mfa)
+        if (serverLogin.mfa.mode === 'enroll') {
+          const enrollment = await startMfaEnrollmentWithServer(serverLogin.mfa.challengeToken)
+          if (!enrollment.ok || !enrollment.secret || !enrollment.provisioningUri) {
+            setMfa(null)
+            setError(enrollment.error || 'Não foi possível configurar o autenticador.')
+            setLoading(false)
+            return
+          }
+          setMfa({
+            ...serverLogin.mfa,
+            expiresAt: enrollment.expiresAt || serverLogin.mfa.expiresAt,
+            secret: enrollment.secret,
+            provisioningUri: enrollment.provisioningUri,
+          })
+        }
+        setLoading(false)
+        return
+      }
       if (serverLogin.code === 'WORKSPACE_REQUIRED') {
         setWorkspaceRequired(true)
         setError('Informe o identificador do ambiente da sua organizacao.')
@@ -77,10 +122,52 @@ export default function LoginPage() {
       return
     }
 
+    finishLogin(user)
+  }
+
+  async function handleMfaSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!mfa) return
+    setError('')
+    setLoading(true)
+    const result = await verifyMfaWithServer(mfa.challengeToken, mfaCode)
+    if (!result.user) {
+      setError(result.reachable
+        ? result.error || 'Código de segurança inválido.'
+        : 'Serviço de autenticação indisponível.')
+      setLoading(false)
+      return
+    }
+    if (result.recoveryCodes?.length) {
+      setAuthenticatedUser(result.user)
+      setRecoveryCodes(result.recoveryCodes)
+      setMfa(null)
+      setMfaCode('')
+      setLoading(false)
+      return
+    }
+    finishLogin(result.user)
+  }
+
+  function finishLogin(user: User) {
     clearLocalSharedStorageForSessionChange()
     setCurrentUser(user)
     toast.success(`Bem-vindo, ${user.name.split(' ')[0]}!`)
     router.push(user.must_change_password ? '/alterar-senha' : defaultRoute(user))
+  }
+
+  function restartLogin() {
+    setMfa(null)
+    setMfaCode('')
+    setRecoveryCodes([])
+    setAuthenticatedUser(null)
+    setError('')
+    setLoading(false)
+  }
+
+  async function copyRecoveryCodes() {
+    await navigator.clipboard.writeText(recoveryCodes.join('\n'))
+    toast.success('Códigos copiados.')
   }
 
   return (
@@ -139,6 +226,7 @@ export default function LoginPage() {
               </p>
             </div>
 
+              {!mfa && recoveryCodes.length === 0 && (
               <form onSubmit={handleSubmit} className="space-y-5">
                 <div>
                   <label htmlFor="login-email" className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -222,6 +310,119 @@ export default function LoginPage() {
                   {loading ? 'Entrando...' : 'Entrar'}
                 </button>
               </form>
+              )}
+
+              {mfa && (
+                <form onSubmit={handleMfaSubmit} className="space-y-5">
+                  <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-4 dark:border-cyan-900/60 dark:bg-cyan-950/30">
+                    <div className="flex items-start gap-3">
+                      {mfa.mode === 'enroll'
+                        ? <Smartphone className="mt-0.5 h-5 w-5 shrink-0 text-bbt-violet dark:text-cyan-300" />
+                        : <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-bbt-violet dark:text-cyan-300" />}
+                      <div>
+                        <p className="text-sm font-semibold text-bbt-primary dark:text-white">
+                          {mfa.mode === 'enroll' ? 'Proteja sua conta' : 'Confirme seu acesso'}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
+                          {mfa.mode === 'enroll'
+                            ? 'Escaneie o QR Code em um aplicativo autenticador e informe o código exibido.'
+                            : 'Informe o código do aplicativo autenticador ou um código de recuperação.'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {mfa.mode === 'enroll' && mfa.provisioningUri && mfa.secret && (
+                    <div className="space-y-4">
+                      <div className="mx-auto w-fit rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+                        <QRCodeSVG
+                          value={mfa.provisioningUri}
+                          size={176}
+                          level="M"
+                          marginSize={1}
+                          title="QR Code para configurar o autenticador"
+                        />
+                      </div>
+                      <div>
+                        <p className="text-center text-xs text-slate-500">Não consegue escanear? Digite esta chave:</p>
+                        <code className="mt-2 block break-all rounded-md bg-slate-100 px-3 py-2 text-center text-xs font-semibold tracking-wider text-slate-800 dark:bg-slate-800 dark:text-slate-100">
+                          {mfa.secret.match(/.{1,4}/g)?.join(' ')}
+                        </code>
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label htmlFor="mfa-code" className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      {mfa.mode === 'enroll' ? 'Código de 6 dígitos' : 'Código de segurança'}
+                    </label>
+                    <div className="relative">
+                      <ShieldCheck className="pointer-events-none absolute left-3.5 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-slate-400" />
+                      <input
+                        id="mfa-code"
+                        type="text"
+                        value={mfaCode}
+                        onChange={(event) => setMfaCode(event.target.value.toUpperCase())}
+                        placeholder={mfa.mode === 'enroll' ? '000000' : '000000 ou código de recuperação'}
+                        required
+                        autoFocus
+                        autoComplete="one-time-code"
+                        inputMode={mfa.mode === 'enroll' ? 'numeric' : 'text'}
+                        className="bbt-input !h-12 !pl-11"
+                      />
+                    </div>
+                  </div>
+
+                  {error && (
+                    <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>{error}</span>
+                    </div>
+                  )}
+
+                  <button type="submit" disabled={loading} className="bbt-button-primary !h-12 w-full">
+                    {loading ? 'Validando...' : mfa.mode === 'enroll' ? 'Ativar e entrar' : 'Confirmar e entrar'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={restartLogin}
+                    className="w-full text-sm font-semibold text-slate-500 hover:text-bbt-violet"
+                  >
+                    Voltar ao login
+                  </button>
+                </form>
+              )}
+
+              {recoveryCodes.length > 0 && authenticatedUser && (
+                <div className="space-y-5">
+                  <div className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100">
+                    <Check className="mt-0.5 h-5 w-5 shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold">Autenticador ativado</p>
+                      <p className="mt-1 text-xs leading-5">
+                        Guarde estes códigos em local seguro. Cada código pode ser usado apenas uma vez.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                    {recoveryCodes.map((code) => (
+                      <code key={code} className="rounded bg-slate-100 px-2 py-1.5 text-center text-xs font-semibold dark:bg-slate-800">
+                        {code}
+                      </code>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={copyRecoveryCodes}
+                    className="flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    <Copy className="h-4 w-4" /> Copiar códigos
+                  </button>
+                  <button type="button" onClick={() => finishLogin(authenticatedUser)} className="bbt-button-primary !h-12 w-full">
+                    Confirmo que guardei os códigos
+                  </button>
+                </div>
+              )}
 
             <div className="mt-9 flex items-start gap-3 border-t border-slate-200 pt-5 text-xs leading-5 text-slate-400 dark:border-slate-800">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-bbt-accent" />

@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import { Suspense, useMemo } from 'react'
 import { useStore } from '@/lib/store'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
-import { canEditGlobal, canViewCompany } from '@/lib/auth'
+import { canAccessCompanyPermission, canEditGlobal } from '@/lib/auth'
 import { CorporateDashboardReport } from '@/components/reports/corporate-dashboard-report'
 import { CorporateReport } from '../_components/corporate-report'
 import { ReportToolbar } from '../_components/report-toolbar'
@@ -39,7 +39,7 @@ function RelatorioEmpresaInner() {
 
   if (!ready) return <div className="p-8 text-center text-sm text-slate-500">Carregando relatório...</div>
   if (!empresa) return <div className="p-8 text-center">Empresa não encontrada.</div>
-  if (!canViewCompany(user, empresaId, empresas, gruposEmpresariais)) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
+  if (!canAccessCompanyPermission(user, empresaId, 'ver_relatorios', empresas, gruposEmpresariais)) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
 
   function imprimir() { window.print() }
 
@@ -52,6 +52,7 @@ function RelatorioEmpresaInner() {
       />
 
       <CorporateReport
+        canExport={canAccessCompanyPermission(user, empresaId, 'exportar_relatorios', empresas, gruposEmpresariais)}
         title={visao === 'agencia' ? 'Relatório Interno por Empresa' : 'Relatório Corporativo de Viagens'}
         eyebrow={visao === 'agencia' ? 'Visão da agência' : 'Visão da empresa'}
         visao={visao}

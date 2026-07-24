@@ -111,6 +111,22 @@ export function canViewCompany(
   return canEditCompany(user, companyId, empresas, grupos)
 }
 
+export function canAccessCompanyPermission(
+  user: User | null,
+  companyId: string | null | undefined,
+  permission: keyof Permissoes,
+  empresas: Empresa[] = [],
+  grupos: GrupoEmpresarial[] = [],
+): boolean {
+  if (!user || user.ativo === false || !companyId) return false
+  if (user.corporate_access) {
+    return Boolean(user.corporate_access.companies.find(
+      (company) => company.companyId === companyId && company.permissions[permission],
+    ))
+  }
+  return hasPermission(user, permission) && canViewCompany(user, companyId, empresas, grupos)
+}
+
 export function canViewGroup(user: User | null, grupo: GrupoEmpresarial | null | undefined): boolean {
   return Boolean(user && user.ativo !== false && usuarioPodeAcessarGrupo(user, grupo))
 }

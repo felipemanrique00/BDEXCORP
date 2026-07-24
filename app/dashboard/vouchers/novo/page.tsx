@@ -8,10 +8,10 @@ import { useState, useEffect, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useStore } from '@/lib/store'
-import { getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
-import { addVoucherEmitido } from '@/lib/vouchers-emitidos-storage'
+import { getCurrentUser, getEmpresasPermitidas, hasPermission } from '@/lib/auth'
 import { getAtendimentoById, getAtendimentoBySerialOS } from '@/lib/atendimentos-storage'
-import { sincronizarVoucherOperacional } from '@/lib/operational-sync'
+import { sincronizarVoucherOperacionalGovernado } from '@/lib/operational-sync'
+import { createVoucherOnServer } from '@/lib/voucher-persistence-client'
 import type { VoucherEmitido, VoucherTipo, Atendimento } from '@/types'
 import {
   FileText, ArrowLeft, Save, Hotel as HotelIcon, Plane, Car, Package,
@@ -24,6 +24,8 @@ function NovoVoucherInner() {
   const params = useSearchParams()
   const { empresas, gruposEmpresariais, funcionarios, hoteis } = useStore()
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const canManageVoucher = user?.role === 'master'
+    && hasPermission(user, 'operar_reservas')
   const empresasPermitidas = getEmpresasPermitidas(user, empresas, gruposEmpresariais)
 
   const atendimentoId = params.get('atendimento')
@@ -145,8 +147,11 @@ function NovoVoucherInner() {
     return tarifaTotal + taxas
   })()
 
-  function salvar() {
-    if (user?.role !== 'master') { toast.error('Você não tem permissão para criar vouchers.'); return }
+  async function salvar() {
+    if (!user || user?.role !== 'master' || !canManageVoucher) {
+      toast.error('Você não tem permissão para criar vouchers.')
+      return
+    }
     if (!empresaId) { toast.error('Selecione a empresa.'); return }
     if (!empresasPermitidas.some((empresa) => empresa.id === empresaId)) {
       toast.error('Você não tem permissão para emitir vouchers para esta empresa.')
@@ -207,17 +212,19 @@ function NovoVoucherInner() {
       emitido_por_user_name: user.name,
     }
 
-    const v = addVoucherEmitido(dados)
-    if (!v) { toast.error('Erro ao salvar.'); setSalvando(false); return }
-
-    sincronizarVoucherOperacional(v, { agente_user_id: user.id, origem: 'Portal' })
-
-    toast.success(`Voucher ${v.id} criado e sincronizado com demandas/financeiro!`)
-    setSalvando(false)
-    router.push(`/dashboard/vouchers/${v.id}`)
+    try {
+      const v = await createVoucherOnServer(dados)
+      await sincronizarVoucherOperacionalGovernado(v, { agente_user_id: user.id, origem: 'Portal' })
+      toast.success(`Voucher ${v.id} criado e sincronizado com demandas/financeiro!`)
+      router.push(`/dashboard/vouchers/${v.id}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Erro ao salvar o voucher.')
+    } finally {
+      setSalvando(false)
+    }
   }
 
-  if (user?.role !== 'master') {
+  if (!canManageVoucher) {
     return (
       <div className="bbt-card p-12 text-center">
         <p className="mb-4 text-slate-500">Você não tem permissão para criar vouchers.</p>

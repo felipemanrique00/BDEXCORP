@@ -7,6 +7,14 @@ import { logError } from '@/lib/server/logger'
 
 let pool: Pool | null = null
 
+export interface DatabaseSecurityContext {
+  tenantId?: string
+  identityUserId?: string
+  sessionTokenHash?: string
+  inviteTokenHash?: string
+  platformAdminUserId?: string
+}
+
 export function databaseConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL)
 }
@@ -64,11 +72,45 @@ export async function withTenantTransaction<T>(
   tenantId: string,
   operation: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
-  if (!isUuid(tenantId)) throw new Error('Contexto de tenant invalido.')
   return withTransaction(async (client) => {
-    await client.query("select set_config('app.tenant_id', $1, true)", [tenantId])
+    await applyDatabaseSecurityContext(client, { tenantId })
     return operation(client)
   })
+}
+
+export async function withDatabaseSecurityContext<T>(
+  context: DatabaseSecurityContext,
+  operation: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return withTransaction(async (client) => {
+    await applyDatabaseSecurityContext(client, context)
+    return operation(client)
+  })
+}
+
+export async function applyDatabaseSecurityContext(
+  client: PoolClient,
+  context: DatabaseSecurityContext,
+): Promise<void> {
+  const settings: Array<[string, string]> = []
+  if (context.tenantId) settings.push(['app.tenant_id', requireUuid(context.tenantId, 'tenant')])
+  if (context.identityUserId) {
+    settings.push(['app.identity_user_id', requireUuid(context.identityUserId, 'usuario')])
+  }
+  if (context.platformAdminUserId) {
+    settings.push(['app.platform_admin_user_id', requireUuid(context.platformAdminUserId, 'administrador')])
+  }
+  if (context.sessionTokenHash) {
+    settings.push(['app.session_token_hash', requireTokenHash(context.sessionTokenHash, 'sessao')])
+  }
+  if (context.inviteTokenHash) {
+    settings.push(['app.invite_token_hash', requireTokenHash(context.inviteTokenHash, 'convite')])
+  }
+  if (!settings.length) throw new Error('Contexto de seguranca do banco vazio.')
+
+  for (const [name, value] of settings) {
+    await client.query('select set_config($1, $2, true)', [name, value])
+  }
 }
 
 export async function pingDatabase(): Promise<void> {
@@ -83,4 +125,14 @@ export async function closeDatabasePool(): Promise<void> {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+function requireUuid(value: string, label: string): string {
+  if (!isUuid(value)) throw new Error(`Contexto de ${label} invalido.`)
+  return value
+}
+
+function requireTokenHash(value: string, label: string): string {
+  if (!/^[0-9a-f]{64}$/i.test(value)) throw new Error(`Hash de ${label} invalido.`)
+  return value.toLowerCase()
 }

@@ -24,22 +24,29 @@ import { toast } from 'sonner'
 import { useStore } from '@/lib/store'
 import { getCurrentUser } from '@/lib/auth'
 import {
-  addAtendimento,
+  criarAtendimentoParaLista,
   getAllAtendimentos,
   getAtendimentoById,
   getAtendimentoBySerialOS,
-  updateAtendimento,
 } from '@/lib/atendimentos-storage'
+import {
+  persistDemandPatchWithCompatibility,
+  persistNewDemandWithCompatibility,
+} from '@/lib/demand-persistence-client'
 import { encontrarFuncionarioPorCodigo } from '@/lib/funcionario-identidade'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { listTravelQuotesFromServer } from '@/lib/travel/quote-client'
+import type { GovernedTravelQuoteSummary } from '@/lib/travel/quote-records'
+import { listTravelReservationsFromServer } from '@/lib/travel/reservation-client'
+import type { GovernedTravelReservationSummary } from '@/lib/travel/reservation-records'
 import {
-  addSupplierReservation,
   capabilityLabel,
+  filterSuppliersByService,
   getSupplierLogs,
+  getSupplierIntegrations,
   getSupplierReservations,
-  getSuppliersByService,
   prepararAcaoFornecedor,
-  selectSuppliersForService,
+  selectSuppliersFromCatalog,
   serviceLabel,
   type SupplierActionLog,
   type SupplierCapability,
@@ -48,7 +55,12 @@ import {
   type SupplierReservationStatus,
   type SupplierService,
 } from '@/lib/supplier-integrations'
+import {
+  listIntegrationProvidersFromServer,
+  type IntegrationProviderClientRecord,
+} from '@/lib/integrations/provider-catalog-client'
 import type { Atendimento, Funcionario, Prioridade, TipoServico } from '@/types'
+import { useCorporateContext, useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 type FormState = {
   serial_os: string
@@ -105,37 +117,52 @@ const INITIAL_FORM: FormState = {
 export default function ReservasPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const { empresas, funcionarios } = useStore()
+  const { context } = useCorporateContext()
+  const { includesCompany } = useCorporateCompanyScope()
+  const empresasNoContexto = useMemo(
+    () => empresas.filter((item) => includesCompany(item.id, 'ver_reservas')),
+    [empresas, includesCompany],
+  )
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<string[]>([])
   const [reload, setReload] = useState(0)
   const [busy, setBusy] = useState(false)
   const [demandaVinculadaId, setDemandaVinculadaId] = useState('')
+  const [quotes, setQuotes] = useState<GovernedTravelQuoteSummary[]>([])
+  const [quotesLoading, setQuotesLoading] = useState(true)
+  const [quotesError, setQuotesError] = useState('')
+  const [relationalReservations, setRelationalReservations] = useState<GovernedTravelReservationSummary[]>([])
+  const [reservationsLoading, setReservationsLoading] = useState(true)
+  const [reservationsError, setReservationsError] = useState('')
+  const [providerCatalog, setProviderCatalog] = useState<IntegrationProviderClientRecord[] | null>(null)
+  const [providerCatalogError, setProviderCatalogError] = useState('')
   const initialDemandAppliedRef = useRef(false)
 
   const empresa = useMemo(
-    () => empresas.find((item) => item.id === form.empresa_id),
-    [empresas, form.empresa_id],
+    () => empresasNoContexto.find((item) => item.id === form.empresa_id),
+    [empresasNoContexto, form.empresa_id],
   )
 
   const funcionariosEmpresa = useMemo(
-    () => funcionarios.filter((item) => !form.empresa_id || item.company_id === form.empresa_id),
-    [funcionarios, form.empresa_id],
+    () => funcionarios.filter((item) => includesCompany(item.company_id, 'ver_funcionarios') && (!form.empresa_id || item.company_id === form.empresa_id)),
+    [funcionarios, form.empresa_id, includesCompany],
   )
 
   const suppliers = useMemo(
     () => {
       void reload
-      return getSuppliersByService(form.service)
+      return filterSuppliersByService(providerCatalog || getSupplierIntegrations(), form.service)
     },
-    [form.service, reload],
+    [form.service, providerCatalog, reload],
   )
 
-  const reservas = useMemo(
+  const reservasLegadas = useMemo(
     () => {
       void reload
       return getSupplierReservations(120)
+        .filter((reserva) => includesCompany(reserva.empresa_id, 'ver_reservas'))
     },
-    [reload],
+    [includesCompany, reload],
   )
 
   const logs = useMemo(
@@ -146,23 +173,112 @@ export default function ReservasPage() {
     [reload],
   )
 
+  const reservasLegadasVisiveis = useMemo(() => {
+    const migratedReferences = new Set(
+      relationalReservations
+        .filter((reservation) => reservation.provider === 'legacy_supplier')
+        .map((reservation) => reservation.providerReference)
+        .filter(Boolean),
+    )
+    return reservasLegadas.filter((reservation) => !migratedReferences.has(reservation.id))
+  }, [relationalReservations, reservasLegadas])
+
   const demandasRecentes = useMemo(() => {
     void reload
     return getAllAtendimentos()
+      .filter((item) => includesCompany(item.empresa_id, 'ver_demandas'))
       .filter((item) => !['finalizado', 'cancelado'].includes(item.status))
       .sort((left, right) => right.created_at.localeCompare(left.created_at))
       .slice(0, 50)
+  }, [includesCompany, reload])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setProviderCatalogError('')
+    void listIntegrationProvidersFromServer()
+      .then((providers) => {
+        if (!controller.signal.aborted) setProviderCatalog(providers)
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        setProviderCatalog(null)
+        setProviderCatalogError(
+          error instanceof Error
+            ? error.message
+            : 'Nao foi possivel carregar o catalogo de conectores.',
+        )
+      })
+    return () => controller.abort()
   }, [reload])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setQuotesLoading(true)
+    setQuotesError('')
+    void listTravelQuotesFromServer({
+      companyId: context?.type === 'company' ? context.id : undefined,
+      groupId: context?.type === 'group' ? context.id : undefined,
+      limit: 120,
+    }, controller.signal)
+      .then((result) => {
+        setQuotes(result.items)
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        setQuotes([])
+        setQuotesError(error instanceof Error ? error.message : 'Nao foi possivel carregar as cotacoes.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setQuotesLoading(false)
+      })
+    return () => controller.abort()
+  }, [context?.id, context?.type, reload])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setReservationsLoading(true)
+    setReservationsError('')
+    void listTravelReservationsFromServer({
+      companyId: context?.type === 'company' ? context.id : undefined,
+      groupId: context?.type === 'group' ? context.id : undefined,
+      limit: 120,
+    }, controller.signal)
+      .then((result) => {
+        setRelationalReservations(result.items)
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        setRelationalReservations([])
+        setReservationsError(error instanceof Error ? error.message : 'Nao foi possivel carregar as reservas.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setReservationsLoading(false)
+      })
+    return () => controller.abort()
+  }, [context?.id, context?.type, reload])
+
+  useEffect(() => {
+    setForm((current) => {
+      if (current.empresa_id && includesCompany(current.empresa_id, 'ver_reservas')) return current
+      const companyId = context?.type === 'company' && includesCompany(context.id, 'ver_reservas') ? context.id : ''
+      return current.empresa_id === companyId ? current : { ...current, empresa_id: companyId, funcionario_id: '', funcionario_codigo: '' }
+    })
+  }, [context, includesCompany])
 
   const demandaVinculada = useMemo(() => {
     void reload
-    return demandaVinculadaId ? getAtendimentoById(demandaVinculadaId) || null : null
-  }, [demandaVinculadaId, reload])
+    const demanda = demandaVinculadaId ? getAtendimentoById(demandaVinculadaId) || null : null
+    return demanda && includesCompany(demanda.empresa_id, 'ver_demandas') ? demanda : null
+  }, [demandaVinculadaId, includesCompany, reload])
 
   useEffect(() => {
-    const recomendados = selectSuppliersForService(form.service, 4).map((supplier) => supplier.id)
+    const recomendados = selectSuppliersFromCatalog(
+      providerCatalog || getSupplierIntegrations(),
+      form.service,
+      4,
+    ).map((supplier) => supplier.id)
     setSelectedSupplierIds(recomendados)
-  }, [form.service])
+  }, [form.service, providerCatalog])
 
   useEffect(() => {
     if (initialDemandAppliedRef.current || typeof window === 'undefined') return
@@ -181,10 +297,14 @@ export default function ReservasPage() {
       return
     }
 
+    if (!includesCompany(demanda.empresa_id, 'ver_demandas')) {
+      toast.error('A demanda informada esta fora do contexto autorizado.')
+      return
+    }
     setForm((current) => formFromAtendimento(current, demanda, funcionarios, serial))
     setDemandaVinculadaId(demanda.id)
     toast.success(`Demanda ${demanda.serial_os || serial} pronta para cotação/reserva.`)
-  }, [funcionarios])
+  }, [funcionarios, includesCompany])
 
   function refresh() {
     setReload((value) => value + 1)
@@ -225,6 +345,10 @@ export default function ReservasPage() {
       return
     }
 
+    if (!includesCompany(demanda.empresa_id, 'ver_demandas')) {
+      toast.error('A demanda informada esta fora do contexto autorizado.')
+      return
+    }
     setForm((current) => formFromAtendimento(current, demanda, funcionarios, serial))
     setDemandaVinculadaId(demanda.id)
     toast.success(`Demanda ${demanda.serial_os || serial} vinculada para cotação/reserva.`)
@@ -274,12 +398,22 @@ export default function ReservasPage() {
       toast.error('Selecione a empresa antes de preparar a reserva.')
       return
     }
+    if (!includesCompany(form.empresa_id, 'criar_demandas')) {
+      toast.error('Voce nao possui permissao para criar operacoes nesta empresa.')
+      return
+    }
     if (!form.viajante_nome.trim()) {
       toast.error('Informe o viajante/hóspede/passageiro.')
       return
     }
     if (!form.destino.trim() && !form.item_nome.trim()) {
       toast.error('Informe destino, cidade, hotel, locadora ou produto.')
+      return
+    }
+    if (form.action !== 'cotacao') {
+      toast.error(
+        `${capabilityLabel(form.action)} transacional ainda nao esta homologada no conector. Nenhuma operacao foi criada.`,
+      )
       return
     }
 
@@ -290,9 +424,13 @@ export default function ReservasPage() {
         encontrarFuncionarioPorCodigo(funcionarios, form.funcionario_codigo, form.empresa_id)
       const ids = selectedSupplierIds.length
         ? selectedSupplierIds
-        : selectSuppliersForService(form.service, 4).map((supplier) => supplier.id)
+        : selectSuppliersFromCatalog(
+          providerCatalog || getSupplierIntegrations(),
+          form.service,
+          4,
+        ).map((supplier) => supplier.id)
 
-      const actionLogs = prepararAcaoFornecedor({
+      prepararAcaoFornecedor({
         service: form.service,
         action: form.action,
         supplier_ids: ids,
@@ -308,7 +446,7 @@ export default function ReservasPage() {
           solicitante_nome: form.solicitante_nome,
           observacoes: form.observacoes,
         },
-      })
+      }, providerCatalog || undefined)
 
       const tipoServico = mapTipoServico(form.service)
       const demandaVinculada = form.serial_os.trim() ? getAtendimentoBySerialOS(form.serial_os) : null
@@ -363,26 +501,18 @@ export default function ReservasPage() {
 
       let atendimento: Atendimento | null = null
       if (demandaVinculada) {
-        const ok = updateAtendimento(demandaVinculada.id, {
+        const persistida = await persistDemandPatchWithCompatibility(demandaVinculada, {
           ...atendimentoPayload,
-          status: form.action === 'emissao' || form.action === 'reserva' ? 'em_andamento' : demandaVinculada.status,
+          status: demandaVinculada.status,
           observacoes_internas: [
             demandaVinculada.observacoes_internas,
             `Vinculada em Reservas e cotações pelo Serial/OS ${demandaVinculada.serial_os}.`,
           ].filter(Boolean).join('\n'),
-        })
-        if (!ok) {
-          toast.error('Não consegui atualizar a demanda vinculada.')
-          return
-        }
-        atendimento = {
-          ...demandaVinculada,
-          ...atendimentoPayload,
-          status: form.action === 'emissao' || form.action === 'reserva' ? 'em_andamento' : demandaVinculada.status,
-          updated_at: new Date().toISOString(),
-        }
+        }, `Vinculo da operacao ${capabilityLabel(form.action)} em Reservas e cotacoes.`)
+        atendimento = persistida.demand
       } else {
-        atendimento = addAtendimento(atendimentoPayload)
+        const preparada = criarAtendimentoParaLista(atendimentoPayload, getAllAtendimentos())
+        atendimento = (await persistNewDemandWithCompatibility(preparada)).demand
       }
 
       if (!atendimento) {
@@ -390,14 +520,15 @@ export default function ReservasPage() {
         return
       }
 
-      await commitPendingRemoteStorage()
-
       let techQuote: any = null
-      if (form.action === 'cotacao' || form.action === 'status') {
+      let databaseQuoteId = ''
+      if (form.action === 'cotacao') {
         const techResponse = await fetch('/api/travel/quotes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            demandId: atendimento.id,
+            idempotencyKey: `${atendimento.id}:quote:${crypto.randomUUID()}`,
             service: form.service,
             empresaId: form.empresa_id,
             origem: form.origem || undefined,
@@ -416,6 +547,7 @@ export default function ReservasPage() {
         const payload = await techResponse.json().catch(() => null)
         if (techResponse.ok && payload?.quote) {
           techQuote = payload.quote
+          databaseQuoteId = String(payload.databaseQuoteId || '')
           toast.success(`Cotação Tech preparada com ${techQuote.options?.length || 0} opção(ões).`)
         } else if (payload?.code === 'TECH_NOT_CONFIGURED') {
           toast.warning('A demanda foi salva, mas a cotacao Tech Travel nao foi executada porque a integracao nao esta configurada.')
@@ -423,52 +555,27 @@ export default function ReservasPage() {
           toast.error(payload?.error || 'Tech Travel não retornou cotação agora.')
         }
       }
-      const reserva = addSupplierReservation({
-        status: resolveStatus(form.action, actionLogs),
-        service: form.service,
-        action: form.action,
-        supplier_ids: ids,
-        empresa_id: form.empresa_id,
-        empresa_nome: empresa?.nome,
-        funcionario_id: funcionario?.id || null,
-        viajante_nome: form.viajante_nome.trim(),
-        solicitante_nome: form.solicitante_nome || undefined,
-        origem: form.origem || undefined,
-        destino: form.destino || undefined,
-        data_inicio: form.data_inicio || undefined,
-        data_fim: form.data_fim || undefined,
-        centro_custo: form.centro_custo || funcionario?.centro_custo || empresa?.centro_custo_padrao,
-        valor_estimado: money(form.valor_estimado) || undefined,
-        atendimento_id: atendimento.id,
-        observacoes: form.observacoes || undefined,
-        payload: {
-          item_nome: form.item_nome,
-          serial_os: atendimento.serial_os,
-          logs: actionLogs.map((log) => log.id),
-          tech_quote_id: techQuote?.id,
-          tech_options_count: techQuote?.options?.length,
-          tech_provider: 'tech-ttravel',
-        },
-        created_by: user?.id || 'system',
-      })
-
-      if (reserva) {
-        if (!updateAtendimento(atendimento.id, {
+      if (techQuote) {
+        atendimento = (await persistDemandPatchWithCompatibility(atendimento, {
           observacoes_internas: [
             atendimento.observacoes_internas,
-            `Reserva/cotação fornecedor: ${reserva.id}.`,
-            techQuote?.id ? `Cotação Tech: ${techQuote.id}.` : '',
+            databaseQuoteId ? `Cotacao relacional: ${databaseQuoteId}.` : '',
+            techQuote.id ? `Cotacao Tech: ${techQuote.id}.` : '',
           ].filter(Boolean).join('\n'),
-        })) throw new Error('Nao foi possivel vincular o registro operacional a demanda.')
+        }, `Vinculo da cotacao relacional ${databaseQuoteId || techQuote.id}.`)).demand
       }
 
       await commitPendingRemoteStorage()
 
-      toast.success(
-        demandaVinculada
-          ? `Fluxo vinculado à ${atendimento.serial_os || demandaVinculada.serial_os}${reserva ? ` + reserva ${reserva.id}` : ''}.`
-          : `Fluxo criado: ${atendimento.serial_os || atendimento.id}${reserva ? ` + reserva ${reserva.id}` : ''}.`,
-      )
+      if (techQuote) {
+        toast.success(
+          `Cotacao confirmada pelo conector e vinculada a ${atendimento.serial_os || atendimento.id}.`,
+        )
+      } else {
+        toast.warning(
+          `Demanda ${atendimento.serial_os || atendimento.id} salva; nenhuma cotacao foi confirmada pelo fornecedor.`,
+        )
+      }
       resetForm()
       refresh()
     } catch (error: any) {
@@ -593,7 +700,7 @@ export default function ReservasPage() {
               <select
                 value={form.empresa_id}
                 onChange={(e) => {
-                  const nextEmpresa = empresas.find((item) => item.id === e.target.value)
+                  const nextEmpresa = empresasNoContexto.find((item) => item.id === e.target.value)
                   setForm((current) => ({
                     ...current,
                     empresa_id: e.target.value,
@@ -606,7 +713,7 @@ export default function ReservasPage() {
                 required
               >
                 <option value="">Selecione a empresa</option>
-                {empresas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}
+                {empresasNoContexto.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}
               </select>
             </Field>
 
@@ -689,7 +796,7 @@ export default function ReservasPage() {
             <button type="button" onClick={resetForm} className="bbt-button-ghost">Limpar</button>
             <button type="submit" disabled={busy} className="bbt-button-primary">
               {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              Preparar e criar demanda
+              Criar demanda e solicitar cotacao
             </button>
           </div>
         </form>
@@ -705,6 +812,11 @@ export default function ReservasPage() {
             </div>
 
             <div className="mt-4 space-y-2">
+              {providerCatalogError && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+                  Catálogo central indisponível. Exibindo a configuração local de compatibilidade.
+                </div>
+              )}
               {suppliers.map((supplier) => {
                 const checked = selectedSupplierIds.includes(supplier.id)
                 const href = portalUrl(supplier)
@@ -761,8 +873,11 @@ export default function ReservasPage() {
           <div className="border-b border-bbt-gray-100 p-5 dark:border-slate-700">
             <div className="flex items-center gap-2">
               <ClipboardList className="h-5 w-5 text-bbt-accent" />
-              <h2 className="font-semibold text-bbt-primary dark:text-white">Reservas/cotações preparadas</h2>
+              <h2 className="font-semibold text-bbt-primary dark:text-white">Reservas e cotações registradas</h2>
             </div>
+            <p className="mt-1 text-sm text-slate-500">
+              Resultados confirmados pelo conector e histórico legado preservado.
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -777,11 +892,39 @@ export default function ReservasPage() {
                 </tr>
               </thead>
               <tbody>
-                {reservas.map((item) => (
+                {relationalReservations.map((item) => (
+                  <RelationalReservationRow key={item.id} item={item} />
+                ))}
+                {quotes.map((item) => (
+                  <QuoteRow key={item.id} item={item} />
+                ))}
+                {reservasLegadasVisiveis.map((item) => (
                   <ReservaRow key={item.id} item={item} />
                 ))}
-                {reservas.length === 0 && (
-                  <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-400">Nenhuma reserva/cotação preparada ainda.</td></tr>
+                {(quotesLoading || reservationsLoading) && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">
+                      Carregando reservas e cotações registradas...
+                    </td>
+                  </tr>
+                )}
+                {!quotesLoading && quotesError && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-8 text-center text-sm text-amber-700">
+                      {quotesError}
+                    </td>
+                  </tr>
+                )}
+                {!reservationsLoading && reservationsError && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-8 text-center text-sm text-amber-700">
+                      {reservationsError}
+                    </td>
+                  </tr>
+                )}
+                {!quotesLoading && !reservationsLoading && !quotesError && !reservationsError
+                  && relationalReservations.length === 0 && quotes.length === 0 && reservasLegadasVisiveis.length === 0 && (
+                  <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-400">Nenhuma reserva ou cotação confirmada pelo fornecedor ainda.</td></tr>
                 )}
               </tbody>
             </table>
@@ -803,12 +946,91 @@ export default function ReservasPage() {
   )
 }
 
+function RelationalReservationRow({ item }: { item: GovernedTravelReservationSummary }) {
+  return (
+    <tr className="border-t border-bbt-gray-100 hover:bg-bbt-gray-50 dark:border-slate-700 dark:hover:bg-slate-900/30">
+      <td className="px-4 py-3">
+        <div className="font-semibold text-bbt-primary dark:text-white">
+          {serviceLabel(quoteService(item.service))} · Reserva
+        </div>
+        <div className="text-xs text-slate-500">
+          {item.provider} · {item.providerReference || item.id}
+        </div>
+      </td>
+      <td className="px-4 py-3">
+        <div className="font-medium">{item.companyName}</div>
+        <div className="text-xs text-slate-500">{item.companyId}</div>
+      </td>
+      <td className="px-4 py-3">
+        <div className="font-medium">{item.passengerName}</div>
+        <Link
+          href={`/dashboard/demandas?id=${encodeURIComponent(item.demandId)}`}
+          className="text-xs font-semibold text-bbt-accent hover:underline"
+        >
+          {item.demandNumber}
+        </Link>
+      </td>
+      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+        {formatDate(item.startAt || undefined)} até {formatDate(item.endAt || undefined)}
+      </td>
+      <td className="px-4 py-3">
+        {item.finalAmount.toLocaleString('pt-BR', {
+          style: 'currency',
+          currency: item.currency || 'BRL',
+        })}
+      </td>
+      <td className="px-4 py-3"><RelationalReservationStatusBadge status={item.status} /></td>
+    </tr>
+  )
+}
+
+function QuoteRow({ item }: { item: GovernedTravelQuoteSummary }) {
+  return (
+    <tr className="border-t border-bbt-gray-100 hover:bg-bbt-gray-50 dark:border-slate-700 dark:hover:bg-slate-900/30">
+      <td className="px-4 py-3">
+        <div className="font-semibold text-bbt-primary dark:text-white">
+          {serviceLabel(quoteService(item.service))} · Cotação
+        </div>
+        <div className="text-xs text-slate-500">
+          {item.provider} · {item.optionCount} opção(ões)
+        </div>
+      </td>
+      <td className="px-4 py-3">
+        <div className="font-medium">{item.companyName}</div>
+        <div className="text-xs text-slate-500">{item.companyId}</div>
+      </td>
+      <td className="px-4 py-3">
+        <div className="font-medium">{item.passengerName}</div>
+        <Link
+          href={`/dashboard/demandas?id=${encodeURIComponent(item.demandId)}`}
+          className="text-xs font-semibold text-bbt-accent hover:underline"
+        >
+          {item.demandNumber}
+        </Link>
+      </td>
+      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+        {formatDate(item.travelStartDate || undefined)} até {formatDate(item.travelEndDate || undefined)}
+        <div className="mt-1 text-slate-500">{item.destination || '-'}</div>
+      </td>
+      <td className="px-4 py-3">
+        {item.minimumAmount === null
+          ? '-'
+          : item.minimumAmount.toLocaleString('pt-BR', {
+              style: 'currency',
+              currency: item.currency || 'BRL',
+            })}
+      </td>
+      <td className="px-4 py-3"><QuoteStatusBadge status={item.status} /></td>
+    </tr>
+  )
+}
+
 function ReservaRow({ item }: { item: SupplierReservation }) {
   return (
     <tr className="border-t border-bbt-gray-100 hover:bg-bbt-gray-50 dark:border-slate-700 dark:hover:bg-slate-900/30">
       <td className="px-4 py-3">
         <div className="font-semibold text-bbt-primary dark:text-white">{serviceLabel(item.service)} · {capabilityLabel(item.action)}</div>
-        <div className="text-xs text-slate-500">{item.id}</div>
+        <div className="text-xs text-slate-500">{item.id} · histórico legado</div>
       </td>
       <td className="px-4 py-3">
         <div className="font-medium">{item.empresa_nome || '-'}</div>
@@ -826,6 +1048,44 @@ function ReservaRow({ item }: { item: SupplierReservation }) {
       <td className="px-4 py-3"><StatusBadge status={item.status} /></td>
     </tr>
   )
+}
+
+function RelationalReservationStatusBadge({ status }: { status: GovernedTravelReservationSummary['status'] }) {
+  const labels: Record<GovernedTravelReservationSummary['status'], string> = {
+    draft: 'Rascunho',
+    prepared: 'Preparada',
+    reserved: 'Confirmada',
+    issued: 'Emitida',
+    cancelled: 'Cancelada',
+    failed: 'Falhou',
+  }
+  const classes: Record<GovernedTravelReservationSummary['status'], string> = {
+    draft: 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200',
+    prepared: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+    reserved: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
+    issued: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300',
+    cancelled: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
+    failed: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+  }
+  return <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${classes[status]}`}>{labels[status]}</span>
+}
+
+function QuoteStatusBadge({ status }: { status: GovernedTravelQuoteSummary['status'] }) {
+  const labels: Record<GovernedTravelQuoteSummary['status'], string> = {
+    pending: 'Em processamento',
+    completed: 'Concluída',
+    selected: 'Selecionada',
+    expired: 'Expirada',
+    failed: 'Falhou',
+  }
+  const classes: Record<GovernedTravelQuoteSummary['status'], string> = {
+    pending: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+    completed: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
+    selected: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+    expired: 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200',
+    failed: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+  }
+  return <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${classes[status]}`}>{labels[status]}</span>
 }
 
 function LogRow({ log }: { log: SupplierActionLog }) {
@@ -875,6 +1135,16 @@ function mapTipoServico(service: SupplierService): TipoServico {
   if (service === 'locacao') return 'Carro'
   if (service === 'pacotes' || service === 'lazer' || service === 'transfer' || service === 'seguro') return 'Pacote'
   return 'Outro'
+}
+
+function quoteService(value: string): SupplierService {
+  if (value === 'aereo') return 'aereo'
+  if (value === 'hotelaria' || value === 'hotel') return 'hotelaria'
+  if (value === 'locacao' || value === 'carro') return 'locacao'
+  if (value === 'lazer') return 'lazer'
+  if (value === 'transfer') return 'transfer'
+  if (value === 'seguro') return 'seguro'
+  return 'pacotes'
 }
 
 function serviceFromAtendimento(tipo: TipoServico): SupplierService {
@@ -940,14 +1210,6 @@ function formFromAtendimento(
     prioridade: demanda.prioridade || current.prioridade,
     observacoes,
   }
-}
-
-function resolveStatus(action: SupplierCapability, logs: SupplierActionLog[]): SupplierReservationStatus {
-  if (logs.length > 0 && logs.every((log) => log.status === 'falha')) return 'falhou'
-  if (action === 'cotacao' || action === 'pesquisa') return 'cotacao_preparada'
-  if (action === 'emissao' || action === 'reserva') return 'reserva_preparada'
-  if (action === 'cancelamento' || action === 'remarcacao') return 'enviado_fornecedor'
-  return 'rascunho'
 }
 
 function actionLabel(action: SupplierActionLog['action']): string {

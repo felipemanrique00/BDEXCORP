@@ -10,7 +10,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request) {
-  const guard = await guardApiRequest(request, { requireAuth: true, permission: 'gerenciar_usuarios', rateLimit: { key: 'integrations-status:get', limit: 80, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, { requireAuth: true, tenantAdmin: true, rateLimit: { key: 'integrations-status:get', limit: 80, windowMs: 60_000 } })
   if (guard.response) return guard.response
 
   let database = databaseConfigured() ? 'postgres_configured' : 'not_configured'

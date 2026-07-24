@@ -1,26 +1,8 @@
-import type { WintourSourceFormat } from '@/lib/wintour-import'
+import type { WintourImportRun } from '@/lib/wintour-import-history'
 import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
 import { createEntityId } from '@/lib/ids'
 
-export interface WintourImportRun {
-  id: string
-  file_name: string
-  source_format: WintourSourceFormat
-  imported_at: string
-  imported_by_user_id: string
-  imported_by_user_name: string
-  periodo_inicio?: string
-  periodo_fim?: string
-  total_records: number
-  total_value: number
-  total_cost: number
-  total_markup: number
-  created: number
-  updated: number
-  ignored: number
-  errors: number
-  fingerprints: string[]
-}
+export type { WintourImportRun } from '@/lib/wintour-import-history'
 
 const STORAGE_KEY = 'bbt-wintour-imports-v1'
 

@@ -8,7 +8,11 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function POST(request: Request) {
-  const guard = await guardApiRequest(request, { requireAuth: true, rateLimit: { key: 'assistant-voucher-send', limit: 20, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, {
+    requireAuth: true,
+    permission: 'ver_vouchers',
+    rateLimit: { key: 'assistant-voucher-send', limit: 20, windowMs: 60_000 },
+  })
   if (guard.response) return guard.response
   const input = await readJsonBodyResult<any>(request, 128 * 1024, {})
   if (!input.ok) return NextResponse.json({ ok: false, error: input.error }, { status: input.status })

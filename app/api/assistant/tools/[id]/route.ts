@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic'
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
-    permission: 'gerenciar_usuarios',
+    tenantAdmin: true,
     rateLimit: { key: 'assistant-tools:put', limit: 40, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

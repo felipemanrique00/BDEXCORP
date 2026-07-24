@@ -7,12 +7,12 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { useStore } from '@/lib/store'
-import { canViewCompany, getCurrentUser } from '@/lib/auth'
+import { canViewCompany, getCurrentUser, hasPermission } from '@/lib/auth'
 import {
-  getVoucherEmitidoById,
-  updateVoucherEmitido,
-  deleteVoucherEmitido,
-} from '@/lib/vouchers-emitidos-storage'
+  getVoucherFromServer,
+  removeVoucherOnServer,
+  updateVoucherOnServer,
+} from '@/lib/voucher-persistence-client'
 import type { VoucherEmitido } from '@/types'
 import {
   Printer, ArrowLeft, Edit3, Trash2, MessageCircle, Mail, Copy, CheckCircle2, XCircle,
@@ -39,11 +39,19 @@ export default function VoucherViewPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    if (id) {
-      const v = getVoucherEmitidoById(id)
-      if (v) setVoucher(v)
-    }
-    setLoading(false)
+    if (!id) return
+    let active = true
+    void getVoucherFromServer(id)
+      .then((value) => {
+        if (active) setVoucher(value)
+      })
+      .catch((error) => {
+        if (active) toast.error(error instanceof Error ? error.message : 'Voucher não encontrado.')
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => { active = false }
   }, [id])
 
   if (loading) return <div className="py-12 text-center text-slate-500">Carregando...</div>
@@ -59,6 +67,9 @@ export default function VoucherViewPage() {
 
   const empresa = empresas.find((e) => e.id === voucher.empresa_id)
   const canManageVoucher = user?.role === 'master'
+    && hasPermission(user, 'operar_reservas')
+  const canRemoveVoucher = user?.role === 'master'
+    && hasPermission(user, 'operar_cancelamentos')
 
   if (!canViewCompany(user, voucher.empresa_id, empresas, gruposEmpresariais)) {
     return (
@@ -73,25 +84,37 @@ export default function VoucherViewPage() {
     window.print()
   }
 
-  function alterarStatus(novoStatus: VoucherEmitido['status']) {
+  async function alterarStatus(novoStatus: VoucherEmitido['status']) {
     if (!canManageVoucher) {
       toast.error('Você não tem permissão para alterar vouchers.')
       return
     }
-    updateVoucherEmitido(voucher!.id, { status: novoStatus })
-    setVoucher({ ...voucher!, status: novoStatus })
-    toast.success(`Status alterado para ${novoStatus}`)
+    try {
+      const updated = await updateVoucherOnServer(
+        voucher!.id,
+        { status: novoStatus },
+        voucher!.version,
+      )
+      setVoucher(updated)
+      toast.success(`Status alterado para ${novoStatus}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao alterar o status.')
+    }
   }
 
-  function excluir() {
-    if (!canManageVoucher) {
+  async function excluir() {
+    if (!canRemoveVoucher) {
       toast.error('Você não tem permissão para excluir vouchers.')
       return
     }
     if (!confirm(`Excluir voucher ${voucher!.id}?`)) return
-    deleteVoucherEmitido(voucher!.id)
-    toast.success('Voucher excluído')
-    router.push('/dashboard/vouchers')
+    try {
+      await removeVoucherOnServer(voucher!.id)
+      toast.success('Voucher excluído')
+      router.push('/dashboard/vouchers')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao excluir o voucher.')
+    }
   }
 
   function copiarLink() {
@@ -140,7 +163,7 @@ export default function VoucherViewPage() {
             <button onClick={copiarLink} className="bbt-button-ghost flex items-center gap-2 text-sm">
               <Copy className="w-4 h-4" /> Copiar Link
             </button>
-            {canManageVoucher && (
+            {canRemoveVoucher && (
               <button onClick={excluir} className="text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 px-3 py-1.5 rounded text-sm flex items-center gap-2">
                 <Trash2 className="w-4 h-4" /> Excluir
               </button>

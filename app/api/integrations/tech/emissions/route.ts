@@ -13,7 +13,7 @@ export const dynamic = 'force-dynamic'
 export async function POST(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
-    roles: ['master'],
+    tenantAdmin: true,
     permission: 'importar_planilhas',
     rateLimit: { key: 'tech-emissions:post', limit: 20, windowMs: 60_000 },
   })

@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // DETECTOR DE TIPO DE ARQUIVO — V7
 // Recebe um File e devolve o "tipo" identificado, baseado em:
 //   - Extensão
@@ -226,4 +226,3 @@ export const LABELS_TIPO: Record<TipoImportacao, { titulo: string; descricao: st
     icone: '?',
   },
 }
-

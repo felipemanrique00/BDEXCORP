@@ -1,4 +1,4 @@
-﻿'use client'
+'use client'
 import { todayISODate } from '@/lib/date'
 import { useState } from 'react'
 import { Upload, FileText, Loader2, CheckCircle2, AlertTriangle, ChevronRight, Sparkles, Hotel as HotelIcon, Users } from 'lucide-react'
@@ -10,12 +10,32 @@ import type { ResultadoParseFuncionarios, FuncionarioParsed } from '@/lib/parser
 import type { ResultadoParseHoteis, HotelParsed } from '@/lib/parser-hoteis-xlsx'
 import { useStore } from '@/lib/store'
 import { getCurrentUser } from '@/lib/auth'
-import { addAtendimento, anexarVoucherAtendimento } from '@/lib/atendimentos-storage'
-import { upsertVoucherEmitido } from '@/lib/vouchers-emitidos-storage'
+import {
+  atualizarAtendimentoNaLista,
+  criarAtendimentoParaLista,
+  getAllAtendimentos,
+  persistirAtendimentos,
+  persistirAtendimentosRecebidosDoServidor,
+} from '@/lib/atendimentos-storage'
 import { encontrarFuncionarioConfiavel, encontrarFuncionarioPorNomeInteligente, normalizarTextoIdentidade } from '@/lib/funcionario-identidade'
-import type { Empresa, Funcionario, Hotel } from '@/types'
+import type { Atendimento, Empresa, Funcionario, Hotel, VoucherEmitido } from '@/types'
 import { CONFIG_COBRANCA_PADRAO } from '@/types'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import {
+  criarIndiceDuplicatas,
+  detectarDuplicataNoIndice,
+  indexarAtendimentoDuplicado,
+} from '@/lib/import-pipeline'
+import {
+  createDemandImportBatchKey,
+  DemandClientError,
+  importDemandBatchesOnServer,
+} from '@/lib/demands-client'
+import { persistNewDemandWithCompatibility } from '@/lib/demand-persistence-client'
+import {
+  createVoucherBatchKey,
+  upsertVoucherBatchOnServer,
+} from '@/lib/voucher-persistence-client'
 
 type Fase = 'selecionar' | 'detectando' | 'extraindo' | 'preview' | 'salvando' | 'concluido'
 
@@ -154,6 +174,11 @@ export default function ImportarPage() {
       const nomeFallbackMap = new Map<string, Funcionario>(
         funcionariosAtuais.map((f) => [`${f.company_id}|${normalizarTextoIdentidade(f.nome)}`, f]),
       )
+      const atendimentosAtuais = getAllAtendimentos()
+      const proximaLista = atendimentosAtuais.slice()
+      const indicePorId = new Map(proximaLista.map((atendimento, index) => [atendimento.id, index]))
+      const indiceDuplicatas = criarIndiceDuplicatas(proximaLista)
+      const alteradasPorId = new Map<string, Atendimento>()
 
       for (const reg of registrosEditados) {
         if (registrosIgnorados.has(reg.venda_numero)) { ignorados++; continue }
@@ -177,7 +202,7 @@ export default function ImportarPage() {
         }
         const tipoServico = reg.tipo_registro === 'HTL' ? 'Hotel' : reg.tipo_registro === 'TKT' ? 'Aéreo' : reg.tipo_registro === 'CAR' ? 'Carro' : 'Outro'
         try {
-          addAtendimento({
+          const payload: Partial<Atendimento> = {
             empresa_id: empresaId, funcionario_id: funcId,
             passageiro_nome: reg.passageiro_completo, tipo_servico: tipoServico as any,
             valor_cotacao: reg.tarifa, valor_final: reg.tarifa, valor_custo: reg.a_pagar,
@@ -195,11 +220,63 @@ export default function ImportarPage() {
             detalhes_aereo: tipoServico === 'Aéreo' ? {
               cia_aerea: reg.produto, localizador: reg.forma_documento,
             } : undefined,
-          } as any)
-          criados++
+          }
+          const duplicada = detectarDuplicataNoIndice(indiceDuplicatas, {
+            venda_numero: reg.venda_numero,
+            passageiro: reg.passageiro_completo,
+            data: reg.data_venda || todayISODate(),
+            empresa_id: empresaId,
+          })
+          if (duplicada) {
+            const atualizada = atualizarAtendimentoNaLista(
+              proximaLista,
+              duplicada.id,
+              payload,
+              indicePorId,
+            )
+            if (!atualizada) throw new Error('Demanda duplicada não encontrada na lista de trabalho.')
+            alteradasPorId.set(atualizada.id, atualizada)
+            indexarAtendimentoDuplicado(indiceDuplicatas, atualizada)
+            atualizados++
+          } else {
+            const nova = criarAtendimentoParaLista(payload as any, proximaLista)
+            proximaLista.push(nova)
+            indicePorId.set(nova.id, proximaLista.length - 1)
+            indexarAtendimentoDuplicado(indiceDuplicatas, nova)
+            alteradasPorId.set(nova.id, nova)
+            criados++
+          }
         } catch (e) { console.error(e); ignorados++ }
       }
       if (!await confirmarPersistenciaImportacao()) return
+
+      const demandasAlteradas = Array.from(alteradasPorId.values())
+      if (demandasAlteradas.length) {
+        try {
+          const importacao = await importDemandBatchesOnServer(
+            demandasAlteradas,
+            'emissions',
+            createDemandImportBatchKey('emissions', demandasAlteradas),
+          )
+          const servidorPorId = new Map(importacao.demands.map((demanda) => [demanda.id, demanda]))
+          const listaSincronizada = proximaLista.map((demanda) => servidorPorId.get(demanda.id) || demanda)
+          if (!persistirAtendimentosRecebidosDoServidor(listaSincronizada)) {
+            throw new Error('O lote foi salvo, mas a projeção local não pôde ser atualizada.')
+          }
+          criados = importacao.inserted
+          atualizados = importacao.updated
+          ignorados += importacao.skipped + importacao.failures.length
+        } catch (error) {
+          if (!(error instanceof DemandClientError) || error.code !== 'DEMAND_RELATIONAL_WRITE_DISABLED') {
+            throw error
+          }
+          if (!persistirAtendimentos(proximaLista)) {
+            throw new Error('Não foi possível preparar as demandas no modo legado.')
+          }
+          if (!await confirmarPersistenciaImportacao()) return
+        }
+      }
+
       setResumoFinal({ criados, atualizados, ignorados, funcionarios: novosFuncs })
       setFase('concluido')
       toast.success(`✓ ${criados} demandas criadas`)
@@ -307,8 +384,9 @@ export default function ImportarPage() {
       const funcionarioId = func?.company_id === empresaDestino ? func.id : null
       const passageiro = resultadoVoucher.cliente_nome || 'Hóspede não informado'
       const dataAtendimento = resultadoVoucher.data_emissao || todayISODate()
+      const numeroVoucher = normalizarNumeroVoucher(resultadoVoucher.voucher_numero)
 
-      const atendimento = addAtendimento({
+      const preparada = criarAtendimentoParaLista({
         empresa_id: empresaDestino,
         funcionario_id: funcionarioId,
         passageiro_nome: passageiro,
@@ -330,6 +408,7 @@ export default function ImportarPage() {
           .slice(0, 500),
         data_atendimento: dataAtendimento,
         origem_emissao: 'voucher_pdf',
+        voucher_ids: [numeroVoucher.id],
         detalhes_hotel: {
           hotel_nome: resultadoVoucher.hotel_nome,
           cidade: resultadoVoucher.hotel_cidade,
@@ -340,15 +419,15 @@ export default function ImportarPage() {
           noites: resultadoVoucher.noites,
           localizador: resultadoVoucher.numero_confirmacao,
         },
-      } as any)
+      } as any, getAllAtendimentos())
+      const atendimento = (await persistNewDemandWithCompatibility(preparada)).demand
 
-      const numeroVoucher = normalizarNumeroVoucher(resultadoVoucher.voucher_numero)
-      const voucher = upsertVoucherEmitido({
+      const voucherPayload: VoucherEmitido = {
         id: numeroVoucher.id,
         numero: numeroVoucher.numero,
         tipo: 'Hotel',
         status: 'emitido',
-        atendimento_id: atendimento?.id,
+        atendimento_id: atendimento.id,
         empresa_id: empresaDestino,
         funcionario_id: funcionarioId,
         passageiro_nome: passageiro,
@@ -378,14 +457,17 @@ export default function ImportarPage() {
         emitido_por_user_id: user.id,
         emitido_por_user_name: user.name,
         created_at: resultadoVoucher.data_emissao ? `${resultadoVoucher.data_emissao}T00:00:00.000Z` : new Date().toISOString(),
-      })
+      }
+      const [voucher] = await upsertVoucherBatchOnServer(
+        [voucherPayload],
+        createVoucherBatchKey('voucher-pdf', [voucherPayload]),
+      )
 
       if (!voucher) throw new Error('Não foi possível salvar o voucher.')
-      if (atendimento) anexarVoucherAtendimento(atendimento.id, voucher.id)
 
       if (!await confirmarPersistenciaImportacao()) return
 
-      setResumoFinal({ criados: (atendimento ? 1 : 0) + 1, atualizados: 0, ignorados: 0, funcionarios: 0 })
+      setResumoFinal({ criados: 2, atualizados: 0, ignorados: 0, funcionarios: 0 })
       setFase('concluido')
       toast.success(`Voucher ${voucher.id} importado e vinculado às demandas.`)
     } catch (e: any) {
@@ -906,4 +988,3 @@ function PreviewHoteis({ resultado, onSalvar, onCancelar }: any) {
     </div>
   )
 }
-

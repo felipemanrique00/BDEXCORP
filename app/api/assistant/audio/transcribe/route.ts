@@ -11,7 +11,17 @@ export const dynamic = 'force-dynamic'
 const MAX_AUDIO_REQUEST_BYTES = 36 * 1024 * 1024
 
 export async function POST(request: Request) {
-  const guard = await guardApiRequest(request, { requireAuth: true, rateLimit: { key: 'assistant-audio-transcribe', limit: 30, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, {
+    requireAuth: true,
+    permission: 'usar_ia',
+    authorization: {
+      action: 'use',
+      resource: 'ai',
+      requiredPermission: 'usar_ia',
+      allowEmptyCompanyScope: true,
+    },
+    rateLimit: { key: 'assistant-audio-transcribe', limit: 30, windowMs: 60_000 },
+  })
   if (guard.response) return guard.response
 
   try {
@@ -30,7 +40,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: false, error: 'Formato de audio nao permitido.' }, { status: 415 })
       }
       const buffer = Buffer.from(await file.arrayBuffer())
-      const result = await transcribeAssistantAudio({
+      const result = await transcribeAssistantAudio(guard.principal!, {
         base64: buffer.toString('base64'),
         fileName: file.name,
         mimeType: file.type || 'audio/webm',
@@ -41,7 +51,7 @@ export async function POST(request: Request) {
     }
 
     const body = await readJsonBody<any>(request, MAX_AUDIO_REQUEST_BYTES)
-    const result = await transcribeAssistantAudio({
+    const result = await transcribeAssistantAudio(guard.principal!, {
       base64: body?.base64,
       fileName: body?.fileName,
       mimeType: body?.mimeType,

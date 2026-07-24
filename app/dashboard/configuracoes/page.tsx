@@ -3,7 +3,7 @@ import { todayISODate } from '@/lib/date'
 import { useState, useEffect } from 'react'
 import { useStore } from '@/lib/store'
 import { AI_NAME, SYSTEM_FULL_NAME } from '@/lib/branding'
-import { getCurrentUser, roleLabel } from '@/lib/auth'
+import { getCurrentUser, hasPermission, roleLabel } from '@/lib/auth'
 import {
   Settings, User as UserIcon, Database, Trash2, Download, Upload as UploadIcon,
   Palette, AlertTriangle, ListChecks, Building2, Users as UsersIcon,
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { SupplierConfigPanel } from '@/components/suppliers/supplier-config-panel'
+import { MfaSecurityCard } from '@/components/auth/mfa-security-card'
 import {
   getPrefSom, setPrefSom, getPrefNotif, setPrefNotif,
   pedirPermissaoNotificacao, notificacaoEstaAtiva, tocarSomNotificacao,
@@ -23,6 +24,24 @@ import { resetAllSystemData } from '@/lib/system-reset-client'
 
 const STORE_KEY = 'bbt-data-v4'
 const LEGACY_STORE_KEY = 'bbt-storage'
+
+interface TenantDataSummary {
+  companies: number
+  employees: number
+  hotels: number
+  demands: number
+  financialEntries: number
+  auditEvents: number
+  importJobs: number
+  integrationProviders: number
+  reservations: number
+  travelQuotes: number
+  vouchers: number
+  travelEmissions: number
+  approvalInstances: number
+  legacyStorageKeys: number
+  legacyStorageBytes: number
+}
 
 export default function ConfiguracoesPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
@@ -46,12 +65,34 @@ export default function ConfiguracoesPage() {
   const [notifAtivo, setNotifAtivo] = useState(true)
   const [permissaoNotif, setPermissaoNotif] = useState<NotificationPermission | null>(null)
   const [iaConfig, setIaConfig] = useState<boolean | null>(null)
+  const [dataSummary, setDataSummary] = useState<TenantDataSummary | null>(null)
+  const [dataSummaryError, setDataSummaryError] = useState('')
 
   useEffect(() => {
     setSomAtivo(getPrefSom())
     setNotifAtivo(getPrefNotif())
     if (typeof Notification !== 'undefined') setPermissaoNotif(Notification.permission)
     iaConfigurada().then(setIaConfig)
+    const controller = new AbortController()
+    void fetch('/api/system/data-summary', {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || !payload?.summary) {
+          throw new Error(payload?.error || 'Resumo relacional indisponivel.')
+        }
+        setDataSummary(payload.summary as TenantDataSummary)
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        setDataSummaryError(
+          error instanceof Error ? error.message : 'Resumo relacional indisponivel.',
+        )
+      })
+    return () => controller.abort()
   }, [])
   function calcularStats() {
     if (typeof window === 'undefined') return { atendimentos: 0, financeiro: 0, auditoria: 0, transferencias: 0, caixa: 0, fornecedores: 0, reservas_fornecedores: 0, vouchers: 0, emissoes: 0, aprovacoes: 0, resumos: 0 }
@@ -104,7 +145,7 @@ export default function ConfiguracoesPage() {
       JSON.stringify(data, null, 2),
       'application/json;charset=utf-8',
     )
-    toast.success('✅ Backup completo exportado')
+    toast.success('Exportação local de compatibilidade concluída.')
   }
 
   function importarBackup(e: React.ChangeEvent<HTMLInputElement>) {
@@ -147,7 +188,7 @@ export default function ConfiguracoesPage() {
         if (data.logs_tech) safeSetJSON('bbt-tech-integration-logs-v1', data.logs_tech)
         if (data.corporate_finance) safeSetJSON('bbt-corporate-finance', data.corporate_finance)
         if (data.solicitantes_empresa) safeSetJSON('bbt-solicitantes-empresa', data.solicitantes_empresa)
-        toast.success('✅ Backup restaurado! Recarregando...')
+        toast.success('Dados locais de compatibilidade importados. Recarregando...')
         setTimeout(() => window.location.reload(), 1000)
       } catch (err: any) {
         toast.error('Erro ao importar: ' + err.message)
@@ -164,8 +205,8 @@ export default function ConfiguracoesPage() {
 
   function limparAtendimentos() {
     setConfirmacao({
-      titulo: 'Apagar TODAS as demandas?',
-      mensagem: `Isso apagará permanentemente ${stats.atendimentos} demandas/atendimentos.\n\nEmpresas, funcionários, hotéis e usuários serão MANTIDOS.\n\nEssa ação não pode ser desfeita. Para confirmar, digite a palavra abaixo:`,
+      titulo: 'Limpar demandas da camada legada?',
+      mensagem: `Isso removerá ${stats.atendimentos} demandas/atendimentos mantidos na camada de compatibilidade.\n\nRegistros relacionais oficiais do PostgreSQL não serão apagados por esta ação.\n\nPara confirmar, digite a palavra abaixo:`,
       palavraConfirmacao: 'APAGAR DEMANDAS',
       onConfirmar: async () => {
         if (typeof window === 'undefined') return
@@ -174,7 +215,7 @@ export default function ConfiguracoesPage() {
         safeRemove('bbt-transferencias')
         safeRemove('bbt-mensagens-thread')
         await confirmarLimpezaCompartilhada()
-        toast.success('✅ Todas as demandas foram apagadas')
+        toast.success('Dados legados de demandas removidos.')
         setStats(calcularStats())
       },
     })
@@ -182,14 +223,14 @@ export default function ConfiguracoesPage() {
 
   function limparFinanceiro() {
     setConfirmacao({
-      titulo: 'Apagar lançamentos financeiros?',
-      mensagem: `Isso apagará ${stats.financeiro} lançamentos do contas a pagar/receber.\n\nAs demandas serão mantidas.`,
+      titulo: 'Limpar financeiro da camada legada?',
+      mensagem: `Isso removerá ${stats.financeiro} lançamentos locais de compatibilidade.\n\nLançamentos relacionais oficiais não serão apagados por esta ação.`,
       palavraConfirmacao: 'APAGAR FINANCEIRO',
       onConfirmar: async () => {
         safeRemove('bbt-financeiro')
         safeRemove('bbt-transacoes')
         await confirmarLimpezaCompartilhada()
-        toast.success('✅ Financeiro limpo')
+        toast.success('Dados financeiros legados removidos.')
         setStats(calcularStats())
       },
     })
@@ -197,13 +238,13 @@ export default function ConfiguracoesPage() {
 
   function limparAuditoria() {
     setConfirmacao({
-      titulo: 'Apagar histórico de auditoria?',
-      mensagem: `Isso apagará ${stats.auditoria} eventos do log.\n\nNada do operacional será afetado.`,
+      titulo: 'Limpar auditoria da camada legada?',
+      mensagem: `Isso removerá ${stats.auditoria} eventos locais antigos.\n\nA trilha de auditoria relacional é imutável e será preservada.`,
       palavraConfirmacao: 'APAGAR LOG',
       onConfirmar: async () => {
         safeRemove('bbt-auditoria')
         await confirmarLimpezaCompartilhada()
-        toast.success('✅ Auditoria limpa')
+        toast.success('Eventos legados de auditoria removidos.')
         setStats(calcularStats())
       },
     })
@@ -211,8 +252,8 @@ export default function ConfiguracoesPage() {
 
   function limparEmpresas() {
     setConfirmacao({
-      titulo: 'Apagar TODAS as empresas?',
-      mensagem: `Isso apagará todas as ${empresas.length} empresas, ${funcionarios.length} funcionários vinculados e suas demandas.\n\n⚠️ AÇÃO DESTRUTIVA. Faça backup antes!`,
+      titulo: 'Limpar diretório da camada legada?',
+      mensagem: `Isso removerá ${empresas.length} empresas e ${funcionarios.length} funcionários mantidos na camada de compatibilidade.\n\nEmpresas e funcionários relacionais oficiais não serão apagados por esta ação.`,
       palavraConfirmacao: 'APAGAR EMPRESAS',
       onConfirmar: async () => {
         const raw = safeGetRaw(STORE_KEY)
@@ -231,7 +272,7 @@ export default function ConfiguracoesPage() {
         }
         safeRemove('bbt-atendimentos')
         await confirmarLimpezaCompartilhada()
-        toast.success('✅ Empresas apagadas. Recarregando...')
+        toast.success('Diretório legado removido. Recarregando...')
         setTimeout(() => window.location.reload(), 1000)
       },
     })
@@ -239,8 +280,8 @@ export default function ConfiguracoesPage() {
 
   function limparHoteis() {
     setConfirmacao({
-      titulo: 'Apagar TODOS os hotéis?',
-      mensagem: `Isso apagará ${hoteis.length} hotéis do catálogo.`,
+      titulo: 'Limpar hotéis da camada legada?',
+      mensagem: `Isso removerá ${hoteis.length} hotéis mantidos na camada de compatibilidade.\n\nHotéis relacionais oficiais não serão apagados por esta ação.`,
       palavraConfirmacao: 'APAGAR HOTEIS',
       onConfirmar: async () => {
         const raw = safeGetRaw(STORE_KEY)
@@ -256,7 +297,7 @@ export default function ConfiguracoesPage() {
           }
         }
         await confirmarLimpezaCompartilhada()
-        toast.success('✅ Hotéis apagados. Recarregando...')
+        toast.success('Hotéis legados removidos. Recarregando...')
         setTimeout(() => window.location.reload(), 1000)
       },
     })
@@ -338,27 +379,34 @@ export default function ConfiguracoesPage() {
         </div>
       </div>
 
+      <MfaSecurityCard />
+
       {/* Contadores */}
       <div className="bbt-card p-6">
         <div className="flex items-center gap-2 mb-4">
           <Database className="w-5 h-5 text-bbt-accent" />
-          <h2 className="font-semibold text-bbt-primary dark:text-white">Dados do sistema</h2>
+          <h2 className="font-semibold text-bbt-primary dark:text-white">Dados oficiais do tenant</h2>
         </div>
+        {dataSummaryError && (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+            {dataSummaryError} Os números locais abaixo são apenas uma referência de compatibilidade.
+          </div>
+        )}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <CardStat icon={Building2} label="Empresas" valor={empresas.length} cor="text-purple-600" />
-          <CardStat icon={UsersIcon} label="Funcionários" valor={funcionarios.length} cor="text-blue-600" />
-          <CardStat icon={HotelIcon} label="Hotéis" valor={hoteis.length} cor="text-emerald-600" />
-          <CardStat icon={ListChecks} label="Demandas" valor={stats.atendimentos} cor="text-orange-600" />
-          <CardStat icon={FileText} label="Financeiro" valor={stats.financeiro} cor="text-green-600" />
-          <CardStat icon={History} label="Auditoria" valor={stats.auditoria} cor="text-slate-600" />
-          <CardStat icon={UploadIcon} label="Transferências" valor={stats.transferencias} cor="text-amber-600" />
-          <CardStat icon={ListChecks} label="Caixa entrada" valor={stats.caixa} cor="text-pink-600" />
-          <CardStat icon={PlugZap} label="Fornecedores" valor={stats.fornecedores} cor="text-indigo-600" />
-          <CardStat icon={PlugZap} label="Reservas prep." valor={stats.reservas_fornecedores} cor="text-cyan-600" />
-          <CardStat icon={FileText} label="Vouchers" valor={stats.vouchers} cor="text-blue-600" />
-          <CardStat icon={FileSpreadsheet} label="Emissões" valor={stats.emissoes} cor="text-violet-600" />
-          <CardStat icon={CheckCircle2} label="Aprovações" valor={stats.aprovacoes} cor="text-emerald-600" />
-          <CardStat icon={FileText} label="Relatórios salvos" valor={stats.resumos} cor="text-slate-600" />
+          <CardStat icon={Building2} label="Empresas" valor={dataSummary?.companies ?? empresas.length} cor="text-purple-600" />
+          <CardStat icon={UsersIcon} label="Funcionários" valor={dataSummary?.employees ?? funcionarios.length} cor="text-blue-600" />
+          <CardStat icon={HotelIcon} label="Hotéis" valor={dataSummary?.hotels ?? hoteis.length} cor="text-emerald-600" />
+          <CardStat icon={ListChecks} label="Demandas" valor={dataSummary?.demands ?? stats.atendimentos} cor="text-orange-600" />
+          <CardStat icon={FileText} label="Financeiro" valor={dataSummary?.financialEntries ?? stats.financeiro} cor="text-green-600" />
+          <CardStat icon={History} label="Auditoria" valor={dataSummary?.auditEvents ?? stats.auditoria} cor="text-slate-600" />
+          <CardStat icon={UploadIcon} label="Importações" valor={dataSummary?.importJobs ?? stats.transferencias} cor="text-amber-600" />
+          <CardStat icon={PlugZap} label="Fornecedores" valor={dataSummary?.integrationProviders ?? stats.fornecedores} cor="text-indigo-600" />
+          <CardStat icon={PlugZap} label="Reservas" valor={dataSummary?.reservations ?? stats.reservas_fornecedores} cor="text-cyan-600" />
+          <CardStat icon={FileSpreadsheet} label="Cotações" valor={dataSummary?.travelQuotes ?? 0} cor="text-sky-600" />
+          <CardStat icon={FileText} label="Vouchers" valor={dataSummary?.vouchers ?? stats.vouchers} cor="text-blue-600" />
+          <CardStat icon={FileSpreadsheet} label="Emissões" valor={dataSummary?.travelEmissions ?? stats.emissoes} cor="text-violet-600" />
+          <CardStat icon={CheckCircle2} label="Aprovações" valor={dataSummary?.approvalInstances ?? stats.aprovacoes} cor="text-emerald-600" />
+          <CardStat icon={Database} label="Conjuntos legados" valor={dataSummary?.legacyStorageKeys ?? 0} cor="text-slate-600" />
         </div>
       </div>
 
@@ -463,73 +511,76 @@ export default function ConfiguracoesPage() {
           <PlugZap className="h-5 w-5 text-bbt-accent" />
           <h2 className="font-semibold text-bbt-primary dark:text-white">Conexões, APIs e fornecedores</h2>
         </div>
-        <SupplierConfigPanel canEdit={user.role === 'master'} />
+        <SupplierConfigPanel
+          canManageProviders={Boolean(user?.platform_admin || user?.role_key === 'tenant_admin')}
+          canManageMappings={hasPermission(user, 'gerenciar_integracoes')}
+        />
       </div>
 
       {/* Backup */}
       <div className="bbt-card p-6 border-l-4 border-l-blue-500">
         <div className="flex items-center gap-2 mb-2">
           <Cloud className="w-5 h-5 text-blue-500" />
-          <h2 className="font-semibold text-bbt-primary dark:text-white">Backup e Restauração</h2>
+          <h2 className="font-semibold text-bbt-primary dark:text-white">Exportação de compatibilidade</h2>
         </div>
         <p className="text-sm text-slate-500 mb-4">
-          Sempre faça backup antes de limpar dados. O arquivo JSON contém TUDO e pode ser restaurado depois.
+          Este JSON contém apenas dados legados disponíveis neste navegador. O backup oficial do PostgreSQL e dos arquivos privados é executado e validado no servidor.
         </p>
         <div className="flex flex-wrap gap-2">
           <button onClick={exportBackupCompleto} className="bbt-button-primary flex items-center gap-2">
-            <Download className="w-4 h-4" /> Exportar backup completo
+            <Download className="w-4 h-4" /> Exportar dados locais
           </button>
           <label className="bbt-button-ghost flex items-center gap-2 cursor-pointer">
-            <UploadIcon className="w-4 h-4" /> Restaurar de backup
+            <UploadIcon className="w-4 h-4" /> Importar dados locais
             <input type="file" accept=".json" onChange={importarBackup} className="hidden" />
           </label>
         </div>
       </div>
 
       {/* Limpezas individuais */}
-      {user.role === 'master' && (
+      {(user.platform_admin || user.role_key === 'tenant_admin') && (
         <div className="bbt-card p-6 border-l-4 border-l-amber-500">
           <div className="flex items-center gap-2 mb-2">
             <Trash2 className="w-5 h-5 text-amber-500" />
-            <h2 className="font-semibold text-bbt-primary dark:text-white">Limpeza de Dados</h2>
+            <h2 className="font-semibold text-bbt-primary dark:text-white">Limpeza de compatibilidade legada</h2>
           </div>
           <p className="text-sm text-slate-500 mb-4">
-            Apague apenas o que você não precisa mais. Cada ação exige confirmação digitando uma palavra.
+            As ações individuais abaixo removem somente coleções antigas. Elas não substituem a limpeza relacional completa do tenant.
           </p>
 
           <div className="space-y-2">
             <BotaoLimpar
-              titulo="Apagar todas as demandas"
-              descricao={`${stats.atendimentos} demandas + financeiro vinculado serão apagados`}
+              titulo="Limpar demandas legadas"
+              descricao={`${stats.atendimentos} demandas locais + dados locais vinculados`}
               icon={ListChecks}
               onClick={limparAtendimentos}
               disabled={stats.atendimentos === 0}
             />
             <BotaoLimpar
-              titulo="Apagar lançamentos financeiros"
-              descricao={`${stats.financeiro} lançamentos do contas a pagar/receber`}
+              titulo="Limpar financeiro legado"
+              descricao={`${stats.financeiro} lançamentos locais do contas a pagar/receber`}
               icon={FileText}
               onClick={limparFinanceiro}
               disabled={stats.financeiro === 0}
             />
             <BotaoLimpar
-              titulo="Apagar histórico de auditoria"
-              descricao={`${stats.auditoria} eventos do log`}
+              titulo="Limpar auditoria legada"
+              descricao={`${stats.auditoria} eventos locais; auditoria oficial preservada`}
               icon={History}
               onClick={limparAuditoria}
               disabled={stats.auditoria === 0}
             />
             <BotaoLimpar
-              titulo="Apagar todas as empresas"
-              descricao={`${empresas.length} empresas + funcionários + demandas`}
+              titulo="Limpar diretório legado"
+              descricao={`${empresas.length} empresas locais + funcionários locais`}
               icon={Building2}
               onClick={limparEmpresas}
               disabled={empresas.length === 0}
               perigoso
             />
             <BotaoLimpar
-              titulo="Apagar todos os hotéis"
-              descricao={`${hoteis.length} hotéis do catálogo`}
+              titulo="Limpar hotéis legados"
+              descricao={`${hoteis.length} hotéis locais do catálogo`}
               icon={HotelIcon}
               onClick={limparHoteis}
               disabled={hoteis.length === 0}
@@ -537,6 +588,12 @@ export default function ConfiguracoesPage() {
           </div>
 
           <div className="mt-6 pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
+            <div className="mb-3">
+              <div className="font-semibold text-bbt-primary dark:text-white">Zerar dados oficiais do tenant</div>
+              <div className="mt-1 text-xs text-slate-500">
+                Esta operação autenticada remove os dados operacionais relacionais e a compatibilidade legada, preservando usuários, tenant e auditoria.
+              </div>
+            </div>
             <button onClick={limparAbsolutamenteTudo}
               className="w-full px-4 py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg font-bold flex items-center justify-center gap-2 transition">
               <AlertTriangle className="w-5 h-5" /> APAGAR ABSOLUTAMENTE TUDO (zerar sistema)

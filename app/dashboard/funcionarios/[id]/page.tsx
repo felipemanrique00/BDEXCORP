@@ -22,6 +22,7 @@ import {
 import { getAtendimentosByFuncionario, getEstatisticas } from '@/lib/atendimentos-storage'
 import { historicoViagensFuncionario } from '@/lib/agregacoes'
 import { STATUS_LABEL, type StatusAtendimento, type Atendimento } from '@/types'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 type Tab = 'perfil' | 'dados' | 'arquivos' | 'empresa'
 
@@ -198,7 +199,9 @@ function PerfilTab({ funcionarioId, funcionarioNome, empresaId, empresaNome, fun
   const [historico, setHistorico] = useState(() => historicoViagensFuncionario(funcionarioId, funcionarioNome, funcionarios))
 
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const { includesCompany } = useCorporateCompanyScope()
   const podeFinanceiro = hasPermission(user, 'ver_financeiro')
+    && includesCompany(empresaId, 'ver_financeiro')
 
   useEffect(() => {
     setAtendimentos(getAtendimentosByFuncionario(funcionarioId))

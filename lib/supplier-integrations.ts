@@ -275,16 +275,36 @@ export function getSupplierById(id: string): SupplierIntegration | undefined {
   return getSupplierIntegrations().find((s) => s.id === id)
 }
 
+export function filterSuppliersByService(
+  suppliers: readonly SupplierIntegration[],
+  service: SupplierService,
+): SupplierIntegration[] {
+  return [...suppliers]
+    .filter((supplier) => supplier.servicos.includes(service) && supplier.status !== 'inativo')
+    .sort(
+      (left, right) =>
+        statusWeight(right.status) - statusWeight(left.status)
+        || right.prioridade - left.prioridade
+        || left.nome.localeCompare(right.nome),
+    )
+}
+
 export function getSuppliersByService(service: SupplierService): SupplierIntegration[] {
-  return getSupplierIntegrations()
-    .filter((s) => s.servicos.includes(service) && s.status !== 'inativo')
-    .sort((a, b) => statusWeight(b.status) - statusWeight(a.status) || b.prioridade - a.prioridade)
+  return filterSuppliersByService(getSupplierIntegrations(), service)
+}
+
+export function selectSuppliersFromCatalog(
+  suppliers: readonly SupplierIntegration[],
+  service: SupplierService,
+  limit = 4,
+): SupplierIntegration[] {
+  return filterSuppliersByService(suppliers, service)
+    .filter((supplier) => supplier.capacidades.includes('cotacao') || supplier.capacidades.includes('pesquisa'))
+    .slice(0, Math.max(0, limit))
 }
 
 export function selectSuppliersForService(service: SupplierService, limit = 4): SupplierIntegration[] {
-  return getSuppliersByService(service)
-    .filter((s) => s.capacidades.includes('cotacao') || s.capacidades.includes('pesquisa'))
-    .slice(0, limit)
+  return selectSuppliersFromCatalog(getSupplierIntegrations(), service, limit)
 }
 
 export function upsertSupplierIntegration(data: Partial<SupplierIntegration> & Pick<SupplierIntegration, 'nome' | 'servicos'>): SupplierIntegration | null {
@@ -376,10 +396,14 @@ export function testarSupplierConnector(supplier: SupplierIntegration): Supplier
   })
 }
 
-export function prepararAcaoFornecedor(request: SupplierActionRequest): SupplierActionLog[] {
+export function prepararAcaoFornecedor(
+  request: SupplierActionRequest,
+  catalog?: readonly SupplierIntegration[],
+): SupplierActionLog[] {
+  const availableSuppliers = catalog ? [...catalog] : getSupplierIntegrations()
   const suppliers = request.supplier_ids?.length
-    ? getSupplierIntegrations().filter((supplier) => request.supplier_ids?.includes(supplier.id))
-    : selectSuppliersForService(request.service, 6)
+    ? availableSuppliers.filter((supplier) => request.supplier_ids?.includes(supplier.id))
+    : selectSuppliersFromCatalog(availableSuppliers, request.service, 6)
   if (!suppliers.length) {
     return [
       logSupplierAction({

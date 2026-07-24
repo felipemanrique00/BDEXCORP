@@ -12,11 +12,11 @@ const MAX_AUDIO_REQUEST_BYTES = 36 * 1024 * 1024
 
 export async function POST(request: Request) {
   if (process.env.NODE_ENV === 'production') return NextResponse.json({ ok: false }, { status: 404 })
-  const guard = await guardApiRequest(request, { requireAuth: true, permission: 'gerenciar_usuarios', rateLimit: { key: 'assistant-test-audio', limit: 10, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, { requireAuth: true, tenantAdmin: true, rateLimit: { key: 'assistant-test-audio', limit: 10, windowMs: 60_000 } })
   if (guard.response) return guard.response
   try {
     const body = await readJsonBody<any>(request, MAX_AUDIO_REQUEST_BYTES)
-    const transcription = await transcribeAssistantAudio({
+    const transcription = await transcribeAssistantAudio(guard.principal!, {
       base64: body?.base64,
       fileName: body?.fileName,
       mimeType: body?.mimeType,

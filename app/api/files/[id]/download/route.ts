@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server'
 
-import { guardApiRequest } from '@/lib/security/api-guard'
 import { writeAuditEvent } from '@/lib/server/audit-log'
-import { assertStoredFileAccess, FileAccessDeniedError } from '@/lib/server/file-access'
+import {
+  assertStoredFileAccess,
+  FileAccessDeniedError,
+  guardFileEntityRequest,
+} from '@/lib/server/file-access'
 import { readStoredFile, StoredFileNotFoundError } from '@/lib/server/file-storage'
 import { logError } from '@/lib/server/logger'
 
@@ -10,10 +13,10 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
-  const guard = await guardApiRequest(request, {
-    requireAuth: true,
-    rateLimit: { key: 'files:download', limit: 180, windowMs: 60_000 },
-  })
+  const guard = await guardFileEntityRequest(
+    request,
+    { key: 'files:download', limit: 180, windowMs: 60_000 },
+  )
   if (guard.response) return guard.response
 
   try {

@@ -4,23 +4,26 @@
  */
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore } from '@/lib/store'
-import { addAtendimento, getAllAtendimentos } from '@/lib/atendimentos-storage'
-import { calcularResumoFinanceiro } from '@/lib/financeiro'
-import { getStatusIA, type StatusIA, type ProvedorIA } from '@/lib/ia-parser'
+import { getAllAtendimentos } from '@/lib/atendimentos-storage'
+import { getStatusIA, type StatusIA } from '@/lib/ia-parser'
 import { getCurrentUser, getUserById } from '@/lib/auth'
 import { buildSystemContext, responderComIASistema, responderChatSistema, type SystemAIResponse } from '@/lib/ia-system-actions'
-import { avaliarPerguntaIA, getIAConfig } from '@/lib/ia-config-storage'
+import { avaliarPerguntaIA, getIAConfig, loadIAConfig } from '@/lib/ia-config-storage'
 import { aiErrorUserMessage } from '@/lib/ai-friendly-errors'
 import { humanizeAIText } from '@/lib/ai-humanize'
-import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import {
+  appendAiChatHistory,
+  clearAiChatHistory,
+  loadAiChatHistory,
+} from '@/lib/ai-chat-history-client'
+import type { AiChatHistoryMessage } from '@/lib/ai-chat-history'
 import { reportClientFailure } from '@/lib/client-observability'
 import {
-  buscarHoteisComIA,
-  extrairDestinoHotel,
-  hotelJaExiste,
-  sugestaoParaHotel,
-  type HotelAISuggestion,
-} from '@/lib/ia-hotel-search'
+  listAiActionProposalsClient,
+  prepareAiActionProposalClient,
+} from '@/lib/ai-action-client'
+import type { AiActionProposal } from '@/lib/ai-actions'
+import { AiActionProposalCard } from '@/components/ai/ai-action-proposal-card'
 import {
   Sparkles,
   Send,
@@ -30,19 +33,8 @@ import {
   User as UserIcon,
   Copy,
   CircleDot,
-  CheckCircle2,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import type { Hotel } from '@/types'
-
-interface Msg {
-  role: 'user' | 'assistant'
-  content: string
-  timestamp: string
-  provedor?: ProvedorIA
-}
-
-const STORAGE_HISTORICO = 'bbt-ia-chat-historico-v12'
 
 const SUGESTOES = [
   'Preciso viajar para São Paulo segunda e voltar quarta com hotel dentro da política',
@@ -58,25 +50,49 @@ const SUGESTOES = [
 ]
 
 export default function IAChatPage() {
-  const { empresas, funcionarios, hoteis, politicas, addHotel } = useStore()
+  const { empresas, funcionarios, hoteis, politicas } = useStore()
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
 
-  const [mensagens, setMensagens] = useState<Msg[]>([])
+  const [mensagens, setMensagens] = useState<AiChatHistoryMessage[]>([])
   const [input, setInput] = useState('')
   const [carregando, setCarregando] = useState(false)
   const [status, setStatus] = useState<StatusIA | null>(null)
-  const [hotelSuggestions, setHotelSuggestions] = useState<HotelAISuggestion[]>([])
+  const [actionProposals, setActionProposals] = useState<AiActionProposal[]>([])
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    try {
-      setMensagens(loadJSON<Msg[]>(STORAGE_HISTORICO, []))
-    } catch (error) {
-      reportClientFailure('ai_history_load_failed', error, { component: 'ia-chat' })
+    let active = true
+    const initialQuestion = new URLSearchParams(window.location.search).get('pergunta')?.trim()
+    if (initialQuestion) setInput(initialQuestion.slice(0, 4_000))
+    loadAiChatHistory()
+      .then((history) => {
+        if (active) setMensagens(history)
+      })
+      .catch((error) => {
+        reportClientFailure('ai_history_load_failed', error, { component: 'ia-chat' })
+        toast.error(error instanceof Error ? error.message : 'Falha ao carregar o histórico da IA.')
+      })
+    getStatusIA(true)
+      .then((nextStatus) => {
+        if (active) setStatus(nextStatus)
+      })
+      .catch((error) => {
+        reportClientFailure('ai_status_load_failed', error, { component: 'ia-chat' })
+      })
+    loadIAConfig().catch((error) => {
+      reportClientFailure('ai_config_load_failed', error, { component: 'ia-chat' })
+    })
+    listAiActionProposalsClient({ status: 'pending_confirmation', limit: 20 })
+      .then((proposals) => {
+        if (active) setActionProposals(proposals)
+      })
+      .catch((error) => {
+        reportClientFailure('ai_action_proposals_load_failed', error, { component: 'ia-chat' })
+      })
+    return () => {
+      active = false
     }
-    getStatusIA(true).then(setStatus)
   }, [])
 
   useEffect(() => {
@@ -84,15 +100,6 @@ export default function IAChatPage() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [mensagens, carregando])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try {
-      safeSetJSON(STORAGE_HISTORICO, mensagens.slice(-60))
-    } catch (error) {
-      reportClientFailure('ai_history_save_failed', error, { component: 'ia-chat' })
-    }
-  }, [mensagens])
 
   const contexto = useMemo(() => {
     if (typeof window === 'undefined') return {}
@@ -186,7 +193,8 @@ export default function IAChatPage() {
     const texto = (textoForcado ?? input).trim()
     if (!texto || carregando) return
 
-    const novaMsg: Msg = {
+    const novaMsg: AiChatHistoryMessage = {
+      id: createChatMessageId(),
       role: 'user',
       content: texto,
       timestamp: new Date().toISOString(),
@@ -197,26 +205,37 @@ export default function IAChatPage() {
     setCarregando(true)
 
     try {
+      await appendAiChatHistory([novaMsg])
+    } catch (error) {
+      reportClientFailure('ai_history_save_failed', error, { component: 'ia-chat' })
+      toast.error(error instanceof Error ? error.message : 'Não foi possível salvar a mensagem.')
+      setCarregando(false)
+      return
+    }
+
+    try {
     const iaConfig = getIAConfig()
     const avaliacao = avaliarPerguntaIA(texto, iaConfig)
     if (!avaliacao.permitido) {
-      setMensagens([
-        ...novasMsgs,
-        {
-          role: 'assistant',
-          content: avaliacao.motivo || 'Assunto bloqueado nas configurações da IA.',
-          timestamp: new Date().toISOString(),
-          provedor: 'local',
-        },
-      ])
+      const blockedMessage: AiChatHistoryMessage = {
+        id: createChatMessageId(),
+        role: 'assistant',
+        content: avaliacao.motivo || 'Assunto bloqueado nas configurações da IA.',
+        timestamp: new Date().toISOString(),
+        provedor: 'local',
+      }
+      setMensagens([...novasMsgs, blockedMessage])
+      await persistAssistantMessage(blockedMessage)
       setCarregando(false)
       return
     }
 
     const ctxSistema = buildSystemContext({ empresas, funcionarios, hoteis, politicas })
     const acao = await responderComIASistema(texto, ctxSistema, {
-      addHotel: iaConfig.permitirCadastrarHoteis && !iaConfig.exigirConfirmacaoExecucao ? addHotel : undefined,
-      createAtendimento: iaConfig.permitirCriarDemandas && !iaConfig.exigirConfirmacaoExecucao ? addAtendimento : undefined,
+      prepareAction:
+        iaConfig.permitirCadastrarHoteis || iaConfig.permitirCriarDemandas
+          ? prepareAiActionProposalClient
+          : undefined,
       currentUser: user ? { id: user.id, name: user.name } : undefined,
       politicas,
       allowInternet: iaConfig.permitirInternet,
@@ -228,83 +247,58 @@ export default function IAChatPage() {
           ctxSistema,
           { allowInternet: iaConfig.permitirInternet },
         )
+    if (respostaSistema.actionProposals?.length) {
+      setActionProposals((current) => mergeActionProposals(current, respostaSistema.actionProposals || []))
+    }
 
-    const respMsg: Msg = {
+    const respMsg: AiChatHistoryMessage = {
+      id: createChatMessageId(),
       role: 'assistant',
       content: respostaParaTextoChat(respostaSistema),
       timestamp: new Date().toISOString(),
       provedor: respostaSistema.provedor === 'sistema' ? 'local' : respostaSistema.provedor,
     }
     setMensagens([...novasMsgs, respMsg])
-    } catch (e: any) {
-      const friendly = aiErrorUserMessage(e, e?.provedor || 'IA BIA')
-      setMensagens([
-        ...novasMsgs,
-        {
-          role: 'assistant',
-          content: [
-            friendly,
-            '',
-            'Continuei em modo interno. Posso localizar dados do sistema, preparar demanda, voucher, cotacao ou resumo operacional.',
-          ].join('\n'),
-          timestamp: new Date().toISOString(),
-          provedor: 'local',
-        },
-      ])
+    await persistAssistantMessage(respMsg)
+    } catch (error) {
+      const friendly = aiErrorUserMessage(error, providerFromError(error))
+      const failureMessage: AiChatHistoryMessage = {
+        id: createChatMessageId(),
+        role: 'assistant',
+        content: [
+          friendly,
+          '',
+          'Continuei em modo interno. Posso localizar dados do sistema, preparar demanda, voucher, cotacao ou resumo operacional.',
+        ].join('\n'),
+        timestamp: new Date().toISOString(),
+        provedor: 'local',
+      }
+      setMensagens([...novasMsgs, failureMessage])
+      await persistAssistantMessage(failureMessage)
     } finally {
       setCarregando(false)
     }
   }
 
-  async function executarFluxoHotelInteligente(texto: string): Promise<string | null> {
-    if (!/(hotel|hoteis|hotéis|hospedagem|pousada|diaria|diária)/i.test(texto)) return null
-
-    let response
+  async function novaConversa() {
+    if (!confirm('Limpar todo o histórico de conversa?')) return
     try {
-      const destino = extrairDestinoHotel(texto)
-      response = await buscarHoteisComIA({
-        query: texto,
-        cidade: destino.cidade,
-        uf: destino.uf,
-        knownHotels: hoteis.map((h) => ({ nome: h.nome, cidade: h.cidade, uf: h.uf })),
-      })
-    } catch (e: any) {
-      return `${aiErrorUserMessage(e, e?.provedor || 'ia')}\n\nNão cadastrei hotel sem fonte confiável. Posso tentar novamente ou usar apenas os hotéis já cadastrados.`
+      await clearAiChatHistory()
+      setMensagens([])
+      toast.success('Histórico limpo')
+    } catch (error) {
+      reportClientFailure('ai_history_clear_failed', error, { component: 'ia-chat' })
+      toast.error(error instanceof Error ? error.message : 'Não foi possível limpar o histórico.')
     }
-
-    const novas = response.suggestions.filter(
-      (s) => !hotelJaExiste(hoteis, s.nome, s.cidade, s.uf),
-    )
-    const cadastradas: Hotel[] = []
-
-    novas.slice(0, 3).forEach((s, index) => {
-      const data = sugestaoParaHotel(s)
-      cadastradas.push(addHotel(data))
-      if (index === 0) setHotelSuggestions(response.suggestions)
-    })
-
-    setHotelSuggestions(response.suggestions)
-
-    const linhas = response.suggestions.slice(0, 5).map((s, i) => {
-      const telefone = s.telefone ? ` | tel. ${s.telefone}` : ''
-      const fonte = s.fonte_url ? ` | fonte: ${s.fonte_titulo || s.fonte_url}` : ''
-      return `${i + 1}. ${s.nome} (${s.cidade}/${s.uf})${telefone}${fonte}`
-    })
-
-    return [
-      `Busca inteligente de hospedagem: ${response.summary}`,
-      cadastradas.length > 0
-        ? `Cadastrei automaticamente ${cadastradas.length} hotel(is) novo(s) no módulo Hotéis.`
-        : 'Não cadastrei duplicados: os principais resultados já existem ou precisam de revisão.',
-      '',
-      ...linhas,
-    ].join('\n')
   }
 
-  function novaConversa() {
-    if (!confirm('Limpar todo o histórico de conversa?')) return
-    setMensagens([])
-    toast.success('Histórico limpo')
+  async function persistAssistantMessage(message: AiChatHistoryMessage): Promise<void> {
+    try {
+      await appendAiChatHistory([message])
+    } catch (error) {
+      reportClientFailure('ai_history_save_failed', error, { component: 'ia-chat' })
+      toast.error(error instanceof Error ? error.message : 'A resposta não foi salva no histórico.')
+    }
   }
 
   function copiarMsg(content: string) {
@@ -327,7 +321,7 @@ export default function IAChatPage() {
         <div className="flex items-center gap-2">
           <ProvedorPill status={status} />
           {mensagens.length > 0 && (
-            <button onClick={novaConversa} className="bbt-button-ghost text-xs">
+            <button onClick={() => void novaConversa()} className="bbt-button-ghost text-xs">
               <Trash2 className="w-3.5 h-3.5" /> Nova conversa
             </button>
           )}
@@ -385,21 +379,6 @@ export default function IAChatPage() {
                 </button>
               ))}
             </div>
-            {hotelSuggestions.length > 0 && (
-              <div className="mt-5 max-w-3xl mx-auto rounded-lg border border-bbt-accent/25 bg-bbt-accent/5 p-3 text-left">
-                <p className="text-xs font-semibold uppercase tracking-wider text-bbt-accent">
-                  Última busca de hotéis
-                </p>
-                <div className="mt-2 grid gap-2 md:grid-cols-2">
-                  {hotelSuggestions.slice(0, 4).map((hotel) => (
-                    <div key={`${hotel.nome}-${hotel.cidade}`} className="rounded-md bg-white p-2 text-xs dark:bg-slate-900">
-                      <div className="font-semibold text-bbt-primary dark:text-white">{hotel.nome}</div>
-                      <div className="text-slate-500">{hotel.cidade}/{hotel.uf} {hotel.telefone ? `· ${hotel.telefone}` : ''}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
             <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-3 max-w-3xl mx-auto text-left">
               <CtxCard label="Demandas ativas" value={String(contexto.demandas_pendentes ?? 0)} />
               <CtxCard label="Urgentes" value={String(contexto.demandas_urgentes ?? 0)} />
@@ -416,8 +395,8 @@ export default function IAChatPage() {
           </div>
         )}
 
-        {mensagens.map((m, i) => (
-          <div key={i} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+        {mensagens.map((m) => (
+          <div key={m.id} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
             <div
               className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
                 m.role === 'user'
@@ -485,6 +464,33 @@ export default function IAChatPage() {
         )}
       </div>
 
+      {actionProposals.length > 0 ? (
+        <section className="bbt-card max-h-64 overflow-y-auto p-3" aria-label="Ações da IA aguardando revisão">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-bbt-primary dark:text-white">Ações para revisar</p>
+              <p className="text-xs text-slate-500">A IA não executa alterações sem sua confirmação.</p>
+            </div>
+            <span className="rounded-md bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+              {actionProposals.filter((proposal) => proposal.status === 'pending_confirmation').length} pendente(s)
+            </span>
+          </div>
+          <div className="grid gap-2 lg:grid-cols-2">
+            {actionProposals.map((proposal) => (
+              <AiActionProposalCard
+                key={proposal.id}
+                proposal={proposal}
+                onChange={(next) => {
+                  setActionProposals((current) =>
+                    current.map((item) => (item.id === next.id ? next : item)),
+                  )
+                }}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {/* Input */}
       <div className="bbt-card p-3 flex items-end gap-2">
         <textarea
@@ -533,6 +539,30 @@ function respostaParaTextoChat(response: SystemAIResponse): string {
     })
   }
   return humanizeAIText(linhas.filter(Boolean).join('\n'))
+}
+
+function createChatMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `ai-chat:${crypto.randomUUID()}`
+  }
+  return `ai-chat:${Date.now()}:${Math.random().toString(36).slice(2, 12)}`
+}
+
+function mergeActionProposals(
+  current: AiActionProposal[],
+  incoming: AiActionProposal[],
+): AiActionProposal[] {
+  const byId = new Map(current.map((proposal) => [proposal.id, proposal]))
+  incoming.forEach((proposal) => byId.set(proposal.id, proposal))
+  return Array.from(byId.values()).sort(
+    (left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt),
+  )
+}
+
+function providerFromError(error: unknown): string {
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return 'IA BIA'
+  const provider = (error as Record<string, unknown>).provedor
+  return typeof provider === 'string' && provider.trim() ? provider : 'IA BIA'
 }
 
 function ProvedorPill({ status }: { status: StatusIA | null }) {

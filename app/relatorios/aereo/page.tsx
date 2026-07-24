@@ -4,7 +4,7 @@ import { Suspense, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
 
 import { AereoExecutivoReport } from '@/components/reports/aereo-executivo-report'
-import { canViewCompany } from '@/lib/auth'
+import { canAccessCompanyPermission } from '@/lib/auth'
 import { resolverEscopoGrupoUsuario } from '@/lib/grupos'
 import { useStore } from '@/lib/store'
 import { ReportToolbar } from '../_components/report-toolbar'
@@ -22,12 +22,12 @@ function RelatorioAereoInner() {
     [grupoId, gruposEmpresariais],
   )
   const escopoGrupo = useMemo(
-    () => resolverEscopoGrupoUsuario(user, grupo, empresas),
+    () => resolverEscopoGrupoUsuario(user, grupo, empresas, 'ver_relatorios'),
     [empresas, grupo, user],
   )
 
   if (!ready) return <div className="p-8 text-center text-sm text-slate-500">Carregando relatório aéreo...</div>
-  if (empresaId && !canViewCompany(user, empresaId, empresas, gruposEmpresariais)) {
+  if (empresaId && !canAccessCompanyPermission(user, empresaId, 'ver_relatorios', empresas, gruposEmpresariais)) {
     return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
   }
   if (grupoId && !grupo) return <div className="p-8 text-center">Grupo de empresas não encontrado.</div>

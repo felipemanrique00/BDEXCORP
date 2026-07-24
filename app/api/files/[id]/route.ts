@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server'
 
-import { guardApiRequest } from '@/lib/security/api-guard'
 import { writeAuditEvent } from '@/lib/server/audit-log'
-import { assertStoredFileMutationAccess, FileAccessDeniedError } from '@/lib/server/file-access'
+import {
+  assertStoredFileMutationAccess,
+  FileAccessDeniedError,
+  guardFileEntityRequest,
+} from '@/lib/server/file-access'
 import {
   deleteStoredFile,
   readStoredFile,
@@ -14,10 +17,10 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
-  const guard = await guardApiRequest(request, {
-    requireAuth: true,
-    rateLimit: { key: 'files:delete', limit: 30, windowMs: 60_000 },
-  })
+  const guard = await guardFileEntityRequest(
+    request,
+    { key: 'files:delete', limit: 30, windowMs: 60_000 },
+  )
   if (guard.response) return guard.response
   try {
     const { id } = await context.params

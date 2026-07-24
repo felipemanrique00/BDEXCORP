@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
+import { corporateAccessConfigurationSchema } from '@/lib/corporate-access-schema'
+import { CorporateAccessDeniedError } from '@/lib/server/corporate-access-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
@@ -26,6 +28,7 @@ const updateSchema = z.object({
   groupIds: z.array(z.string().trim().min(1).max(160)).max(1_000).optional(),
   avatar: z.string().max(2_000_000).nullable().optional(),
   active: z.boolean().optional(),
+  corporateAccess: corporateAccessConfigurationSchema.optional(),
 })
 
 const statusSchema = z.object({ active: z.boolean() })
@@ -57,6 +60,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     const bodyError = requestBodyErrorResponse(error)
     if (bodyError) return NextResponse.json({ ok: false, error: bodyError.message }, { status: bodyError.status })
     if (error instanceof z.ZodError) return NextResponse.json({ ok: false, error: 'Dados de usuario invalidos.', details: error.flatten() }, { status: 400 })
+    if (error instanceof CorporateAccessDeniedError) {
+      return NextResponse.json({ ok: false, error: error.message, code: error.code }, { status: 403 })
+    }
     if (error instanceof UserConflictError) return NextResponse.json({ ok: false, error: error.message }, { status: 409 })
     if (error instanceof UserNotFoundError) return NextResponse.json({ ok: false, error: error.message }, { status: 404 })
     throw error
@@ -82,6 +88,9 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
     })
     return NextResponse.json({ ok: true, user })
   } catch (error) {
+    if (error instanceof CorporateAccessDeniedError) {
+      return NextResponse.json({ ok: false, error: error.message, code: error.code }, { status: 403 })
+    }
     if (error instanceof UserConflictError) return NextResponse.json({ ok: false, error: error.message }, { status: 409 })
     if (error instanceof UserNotFoundError) return NextResponse.json({ ok: false, error: error.message }, { status: 404 })
     throw error

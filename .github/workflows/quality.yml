@@ -42,7 +42,6 @@ jobs:
       DATABASE_APP_PASSWORD: CI-App-Database-Password!2026
       TEST_DATABASE_URL: postgresql://bbt_ci_app:CI-App-Database-Password!2026@127.0.0.1:5432/bbt_test
       DATABASE_SSL: 'false'
-      AUTH_SECRET: ci-only-auth-secret-with-more-than-thirty-two-bytes
       SMTP_ENABLED: 'false'
       TECH_API_ENABLED: 'false'
       TECH_REPORTS_ENABLED: 'false'
@@ -58,7 +57,10 @@ jobs:
       BOOTSTRAP_ENTITLEMENTS: '{}'
       E2E_ADMIN_EMAIL: admin-ci@bbt.invalid
       E2E_ADMIN_PASSWORD: CI-Only-Password!2026
+      E2E_RUN_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
       LOAD_TENANT: bbt-ci
+      LOAD_EMAIL: load-ci@bbt.invalid
+      LOAD_PASSWORD: CI-Load-Password!2026
       LOAD_REQUESTS: '30'
       LOAD_CONCURRENCY: '5'
       LOAD_MAX_P95_MS: '3000'
@@ -70,6 +72,12 @@ jobs:
         with:
           node-version: 22.14.0
           cache: npm
+      - name: Generate ephemeral authentication keys
+        shell: bash
+        run: |
+          echo "AUTH_SECRET=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(48).toString("base64url"))')" >> "$GITHUB_ENV"
+          echo "MFA_ENCRYPTION_KEY=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64"))')" >> "$GITHUB_ENV"
+          echo "E2E_ADMIN_TOTP_SECRET=$(node -e 'const { randomInt } = require("node:crypto"); const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; process.stdout.write(Array.from({ length: 32 }, () => alphabet[randomInt(alphabet.length)]).join(""))')" >> "$GITHUB_ENV"
       - run: npm ci
       - run: npm run security:scan
       - run: npm audit --omit=dev --audit-level=high
@@ -78,6 +86,8 @@ jobs:
       - run: npm run inventory:check
       - run: npm run db:migrate
       - run: npm run db:bootstrap
+      - run: node scripts/seed-e2e-admin-mfa.mjs
+      - run: node scripts/seed-load-test-user.mjs
       - run: npm run db:status
       - run: npm run lint
       - run: npm run typecheck
@@ -96,6 +106,7 @@ jobs:
           done
           cat /tmp/bbt-app.log
           exit 1
+      - run: npm run security:smoke
       - run: npm run test:e2e
       - run: npm run test:load
       - name: Upload browser evidence on failure
@@ -134,9 +145,16 @@ jobs:
       IMAGE_MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bbt_image_test
       IMAGE_DATABASE_APP_ROLE: bbt_image_app
       IMAGE_DATABASE_APP_PASSWORD: CI-Image-Database-Password!2026
-      IMAGE_AUTH_SECRET: ci-image-auth-secret-with-more-than-thirty-two-bytes
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+      - name: Generate ephemeral authentication keys
+        shell: bash
+        run: |
+          echo "IMAGE_AUTH_SECRET=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(48).toString("base64url"))')" >> "$GITHUB_ENV"
+          echo "IMAGE_MFA_ENCRYPTION_KEY=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64"))')" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -186,7 +204,8 @@ jobs:
             --tmpfs /tmp:rw,size=256m --mount type=volume,src=bbt_image_files,dst=/var/lib/bbt/files \
             -e NODE_ENV=production -e APP_URL=http://127.0.0.1:3000 -e APP_VERSION="image-${{ github.sha }}" \
             -e ALLOW_INSECURE_LOCALHOST=true -e DATABASE_URL="$IMAGE_DATABASE_URL" -e DATABASE_SSL=false \
-            -e AUTH_SECRET="$IMAGE_AUTH_SECRET" -e STORAGE_ROOT=/var/lib/bbt/files \
+            -e AUTH_SECRET="$IMAGE_AUTH_SECRET" -e MFA_ENCRYPTION_KEY="$IMAGE_MFA_ENCRYPTION_KEY" \
+            -e MFA_ADMIN_REQUIRED=true -e STORAGE_ROOT=/var/lib/bbt/files \
             "$IMAGE_NAME"
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:3000/api/ready; then
