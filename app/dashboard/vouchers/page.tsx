@@ -6,12 +6,13 @@
 import { useState, useMemo, useEffect } from 'react'
 import Link from 'next/link'
 import { useStore } from '@/lib/store'
-import { getCurrentUser } from '@/lib/auth'
+import { getCurrentUser, hasPermission } from '@/lib/auth'
 import {
+  aplicarVouchersEmitidosDoServidor,
   getAllVouchersEmitidos,
-  deleteVoucherEmitido,
   getEstatisticasVouchers,
 } from '@/lib/vouchers-emitidos-storage'
+import { removeVoucherOnServer } from '@/lib/voucher-persistence-client'
 import type { VoucherEmitido, VoucherTipo, VoucherStatus } from '@/types'
 import {
   FileText, Plus, Search, Hotel as HotelIcon, Plane, Car, Package,
@@ -20,13 +21,22 @@ import {
 import { toast } from 'sonner'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 const VOUCHERS_PER_PAGE = 50
 
 export default function VouchersPage() {
   const { empresas } = useStore()
+  const { companyIds, includesCompany } = useCorporateCompanyScope()
+  const empresasNoContexto = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_vouchers')),
+    [empresas, includesCompany],
+  )
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const canManageVouchers = user?.role === 'master'
+    && hasPermission(user, 'operar_reservas')
+  const canRemoveVouchers = user?.role === 'master'
+    && hasPermission(user, 'operar_cancelamentos')
 
   const [reload, setReload] = useState(0)
   const [busca, setBusca] = useState('')
@@ -34,17 +44,46 @@ export default function VouchersPage() {
   const [filtroStatus, setFiltroStatus] = useState<'todos' | VoucherStatus>('todos')
   const [filtroEmpresa, setFiltroEmpresa] = useState('')
   const [pagina, setPagina] = useState(1)
+  const empresasNoContextoKey = empresasNoContexto.map((empresa) => empresa.id).sort().join('|')
+
+  useEffect(() => {
+    if (filtroEmpresa && !empresasNoContexto.some((empresa) => empresa.id === filtroEmpresa)) {
+      setFiltroEmpresa('')
+    }
+  }, [empresasNoContexto, empresasNoContextoKey, filtroEmpresa])
+
+  useEffect(() => {
+    let active = true
+    void fetch('/api/vouchers?limit=500&offset=0', { cache: 'no-store' })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok || !result?.ok || !Array.isArray(result.items)) {
+          throw new Error(result?.error || 'Falha ao carregar vouchers.')
+        }
+        if (active) {
+          aplicarVouchersEmitidosDoServidor(result.items)
+          setReload((value) => value + 1)
+        }
+      })
+      .catch((error) => {
+        if (active) toast.error(error instanceof Error ? error.message : 'Falha ao carregar vouchers.')
+      })
+    return () => { active = false }
+  }, [])
 
   const stats = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return null
-    return getEstatisticasVouchers()
-  }, [reload])
+    const voucherCompanyIds = companyIds
+      ? new Set([...companyIds].filter((companyId) => includesCompany(companyId, 'ver_vouchers')))
+      : null
+    return getEstatisticasVouchers(voucherCompanyIds)
+  }, [companyIds, includesCompany, reload])
 
   const vouchers = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
-    let v = getAllVouchersEmitidos()
+    let v = getAllVouchersEmitidos().filter((voucher) => includesCompany(voucher.empresa_id, 'ver_vouchers'))
     if (filtroTipo !== 'todos') v = v.filter((x) => x.tipo === filtroTipo)
     if (filtroStatus !== 'todos') v = v.filter((x) => x.status === filtroStatus)
     if (filtroEmpresa) v = v.filter((x) => x.empresa_id === filtroEmpresa)
@@ -58,7 +97,7 @@ export default function VouchersPage() {
       )
     }
     return v
-  }, [reload, busca, filtroTipo, filtroStatus, filtroEmpresa])
+  }, [reload, busca, filtroTipo, filtroStatus, filtroEmpresa, includesCompany])
 
   const totalPaginas = Math.max(1, Math.ceil(vouchers.length / VOUCHERS_PER_PAGE))
   const vouchersPagina = useMemo(() => {
@@ -74,15 +113,19 @@ export default function VouchersPage() {
     setPagina((atual) => Math.min(atual, totalPaginas))
   }, [totalPaginas])
 
-  function handleDeletar(v: VoucherEmitido) {
-    if (!canManageVouchers) {
+  async function handleDeletar(v: VoucherEmitido) {
+    if (!canRemoveVouchers) {
       toast.error('Você não tem permissão para excluir vouchers.')
       return
     }
     if (!confirm(`Excluir voucher ${v.id}? Esta ação não pode ser desfeita.`)) return
-    deleteVoucherEmitido(v.id)
-    toast.success('Voucher excluído.')
-    setReload((n) => n + 1)
+    try {
+      await removeVoucherOnServer(v.id)
+      toast.success('Voucher excluído.')
+      setReload((n) => n + 1)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao excluir o voucher.')
+    }
   }
 
   return (
@@ -165,7 +208,7 @@ export default function VouchersPage() {
           </select>
           <select value={filtroEmpresa} onChange={(e) => setFiltroEmpresa(e.target.value)} aria-label="Filtrar vouchers por empresa" className="bbt-input">
             <option value="">Todas as empresas</option>
-            {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+            {empresasNoContexto.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
           </select>
         </div>
       </div>
@@ -234,14 +277,14 @@ export default function VouchersPage() {
                             <Eye className="w-4 h-4" />
                           </Link>
                           {canManageVouchers && (
-                            <>
-                              <Link href={`/dashboard/vouchers/${v.id}/editar`} title="Editar" className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-700 rounded">
-                                <Edit3 className="w-4 h-4" />
-                              </Link>
-                              <button onClick={() => handleDeletar(v)} title="Excluir" className="p-1.5 hover:bg-red-100 dark:hover:bg-red-900/30 text-red-600 rounded">
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </>
+                            <Link href={`/dashboard/vouchers/${v.id}/editar`} title="Editar" className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-700 rounded">
+                              <Edit3 className="w-4 h-4" />
+                            </Link>
+                          )}
+                          {canRemoveVouchers && (
+                            <button onClick={() => handleDeletar(v)} title="Excluir" className="p-1.5 hover:bg-red-100 dark:hover:bg-red-900/30 text-red-600 rounded">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
                           )}
                         </div>
                       </td>

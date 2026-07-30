@@ -24,35 +24,27 @@ import { getEstatisticas, getAtendimentosFiltro } from '@/lib/atendimentos-stora
 import { formatCurrency } from '@/lib/utils'
 import { calcularFinanceiro, type Atendimento, type TipoServico } from '@/types'
 import { toast } from 'sonner'
-import { loadJSON, safeSetJSON } from '@/lib/storage-quota'
 import { montarMetricasRelatorio, normalizarCentroCusto } from '@/lib/relatorios'
 import { getEmpresasDoGrupo } from '@/lib/grupos'
 import { encontrarFuncionarioPorCodigo, normalizarNomePessoa, resolverFuncionarioAtendimento } from '@/lib/funcionario-identidade'
 import { buildCsv, downloadTextFile, type CsvValue } from '@/lib/browser-download'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import type { ExecutiveReportSnapshot } from '@/lib/report-snapshot'
+import {
+  loadExecutiveReportSnapshots,
+  removeExecutiveReportSnapshot,
+} from '@/lib/report-snapshot-client'
 
-interface ResumoExecutivoSalvo {
-  id: string
-  created_at: string
-  periodo: string
-  totalSpend: number
-  total_demandas: number
-  por_tipo: Record<string, number>
-  policyRate: number
-  co2: number
-  onlineAdoption?: number
-  faturamento_total?: number
-  insights?: string[]
-  recomendacoes?: string[]
-  riscos?: string[]
-}
-
-const STORAGE_RESUMOS = 'bbt-resumos-executivos-v12'
 const REPORT_LIST_BATCH_SIZE = 30
 
 export default function RelatoriosPage() {
   const { empresas, funcionarios, gruposEmpresariais, updateFuncionario } = useStore()
   const user = useMemo(() => (typeof window !== 'undefined' ? getCurrentUser() : null), [])
-  const empresasPermitidas = useMemo(() => getEmpresasPermitidas(user, empresas, gruposEmpresariais), [empresas, gruposEmpresariais, user])
+  const { includesCompany } = useCorporateCompanyScope()
+  const empresasPermitidas = useMemo(
+    () => getEmpresasPermitidas(user, empresas, gruposEmpresariais).filter((empresa) => includesCompany(empresa.id, 'ver_relatorios')),
+    [empresas, gruposEmpresariais, includesCompany, user],
+  )
   const empresasPermitidasIds = useMemo(() => new Set(empresasPermitidas.map((empresa) => empresa.id)), [empresasPermitidas])
   const empresasPermitidasPorId = useMemo(() => new Map(empresasPermitidas.map((empresa) => [empresa.id, empresa])), [empresasPermitidas])
 
@@ -66,14 +58,29 @@ export default function RelatoriosPage() {
   const [aliasCodigoFuncionario, setAliasCodigoFuncionario] = useState('')
   const [aliasNomeInformado, setAliasNomeInformado] = useState('')
   const [filtroTipo, setFiltroTipo] = useState<'todos' | TipoServico>('todos')
-  const [resumos, setResumos] = useState<ResumoExecutivoSalvo[]>([])
-  const [resumoAberto, setResumoAberto] = useState<ResumoExecutivoSalvo | null>(null)
+  const [resumos, setResumos] = useState<ExecutiveReportSnapshot[]>([])
+  const [resumoAberto, setResumoAberto] = useState<ExecutiveReportSnapshot | null>(null)
+  const [resumosLoading, setResumosLoading] = useState(true)
   const [funcionarioLimit, setFuncionarioLimit] = useState(REPORT_LIST_BATCH_SIZE)
   const [centroCustoLimit, setCentroCustoLimit] = useState(REPORT_LIST_BATCH_SIZE)
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    setResumos(loadJSON<ResumoExecutivoSalvo[]>(STORAGE_RESUMOS, []))
+    let active = true
+    loadExecutiveReportSnapshots()
+      .then((snapshots) => {
+        if (active) setResumos(snapshots)
+      })
+      .catch((error) => {
+        if (active) {
+          toast.error(error instanceof Error ? error.message : 'Falha ao carregar os resumos executivos.')
+        }
+      })
+      .finally(() => {
+        if (active) setResumosLoading(false)
+      })
+    return () => {
+      active = false
+    }
   }, [])
 
   useEffect(() => {
@@ -348,14 +355,16 @@ export default function RelatoriosPage() {
     toast.success(`CSV exportado: ${lista.length} demanda(s)`)
   }
 
-  function removerResumo(id: string) {
+  async function removerResumo(id: string) {
     if (!confirm('Remover este resumo executivo salvo?')) return
-    const novos = resumos.filter((r) => r.id !== id)
-    setResumos(novos)
-    if (typeof window !== 'undefined') {
-      safeSetJSON(STORAGE_RESUMOS, novos.slice(0, 30))
+    try {
+      await removeExecutiveReportSnapshot(id)
+      setResumos((current) => current.filter((item) => item.id !== id))
+      setResumoAberto((current) => current?.id === id ? null : current)
+      toast.success('Resumo removido.')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Falha ao remover o resumo executivo.')
     }
-    toast.success('Resumo removido.')
   }
 
   return (
@@ -490,6 +499,11 @@ export default function RelatoriosPage() {
       </div>
 
       {/* Resumos executivos salvos */}
+      {resumosLoading && (
+        <div className="bbt-card px-5 py-4 text-sm text-slate-500" role="status">
+          Carregando resumos executivos...
+        </div>
+      )}
       {resumos.length > 0 && (
         <div className="bbt-card overflow-hidden">
           <div className="px-5 py-4 border-b border-bbt-gray-100 dark:border-slate-700 flex items-center justify-between">
@@ -534,7 +548,7 @@ export default function RelatoriosPage() {
                   <Eye className="w-4 h-4" />
                 </button>
                 <button
-                  onClick={() => removerResumo(r.id)}
+                  onClick={() => void removerResumo(r.id)}
                   className="p-2 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
                   aria-label="Remover"
                 >

@@ -3,6 +3,8 @@
 interface ClientFailureContext {
   component?: string
   operation?: string
+  entityId?: string
+  relatedEntityId?: string
 }
 
 export function reportClientFailure(

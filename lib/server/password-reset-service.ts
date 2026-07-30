@@ -3,7 +3,12 @@ import 'server-only'
 import { hashPassword } from '@/lib/security/password'
 import { assertStrongPassword, type RequestSecurityMetadata } from '@/lib/server/auth-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
-import { queryDatabase, withTransaction } from '@/lib/server/database'
+import {
+  applyDatabaseSecurityContext,
+  queryDatabase,
+  withDatabaseSecurityContext,
+  withTransaction,
+} from '@/lib/server/database'
 import { sendTransactionalEmail } from '@/lib/server/email'
 import { getServerEnvironment } from '@/lib/server/environment'
 import { consumeRateLimit } from '@/lib/server/rate-limit'
@@ -34,18 +39,28 @@ export async function requestPasswordReset(
   })
   if (!emailLimit.allowed) return
 
-  const accountResult = await queryDatabase<ResetAccountRow>(
-    `select u.id as user_id, u.email::text, u.name, min(m.tenant_id::text)::uuid as tenant_id
-     from users u
-     join tenant_memberships m on m.user_id = u.id and m.status = 'active'
-     join tenants t on t.id = m.tenant_id and t.status in ('active', 'trial')
-     where u.email = $1 and u.status = 'active' and u.deleted_at is null
-     group by u.id, u.email, u.name
-     limit 1`,
+  const identityResult = await queryDatabase<Omit<ResetAccountRow, 'tenant_id'>>(
+    `select id as user_id, email::text, name
+       from users
+      where email = $1 and status = 'active' and deleted_at is null
+      limit 1`,
     [email],
   )
-  const account = accountResult.rows[0]
-  if (!account) return
+  const identity = identityResult.rows[0]
+  if (!identity) return
+  const tenantResult = await withDatabaseSecurityContext(
+    { identityUserId: identity.user_id },
+    (client) => client.query<{ tenant_id: string | null }>(
+      `select min(m.tenant_id::text)::uuid as tenant_id
+         from tenant_memberships m
+         join tenants t on t.id = m.tenant_id and t.status in ('active', 'trial')
+        where m.user_id = $1 and m.status = 'active'`,
+      [identity.user_id],
+    ),
+  )
+  const tenantId = tenantResult.rows[0]?.tenant_id || null
+  if (!tenantId) return
+  const account: ResetAccountRow = { ...identity, tenant_id: tenantId }
 
   const environment = getServerEnvironment()
   if (!environment.APP_URL) throw new Error('APP_URL obrigatorio para recuperacao de senha.')
@@ -59,9 +74,9 @@ export async function requestPasswordReset(
       [account.user_id],
     )
     return client.query<{ id: string }>(
-      `insert into password_reset_tokens (user_id, token_hash, expires_at, requested_ip)
-       values ($1, $2, $3, $4::inet) returning id`,
-      [account.user_id, tokenHash, expiresAt, normalizeIp(metadata.ipAddress)],
+      `insert into password_reset_tokens (tenant_id, user_id, token_hash, expires_at, requested_ip)
+       values ($1, $2, $3, $4, $5::inet) returning id`,
+      [account.tenant_id, account.user_id, tokenHash, expiresAt, normalizeIp(metadata.ipAddress)],
     )
   })
   const resetId = tokenResult.rows[0].id
@@ -119,15 +134,24 @@ export async function confirmPasswordReset(
       user_id: string
       tenant_id: string | null
     }>(
-      `select pr.id, pr.user_id,
-         (select min(m.tenant_id::text)::uuid from tenant_memberships m where m.user_id = pr.user_id) as tenant_id
-       from password_reset_tokens pr
-       where pr.token_hash = $1 and pr.used_at is null and pr.expires_at > now()
-       for update of pr`,
+      `select pr.id, pr.user_id, pr.tenant_id
+         from password_reset_tokens pr
+        where pr.token_hash = $1 and pr.used_at is null and pr.expires_at > now()
+        for update of pr`,
       [tokenHash],
     )
     const reset = result.rows[0]
     if (!reset) throw new InvalidPasswordResetTokenError()
+    await applyDatabaseSecurityContext(client, { identityUserId: reset.user_id })
+    const tenant = reset.tenant_id
+      ? { rows: [{ tenant_id: reset.tenant_id }] }
+      : await client.query<{ tenant_id: string | null }>(
+          `select min(m.tenant_id::text)::uuid as tenant_id
+             from tenant_memberships m
+             join tenants t on t.id = m.tenant_id and t.status in ('active', 'trial')
+            where m.user_id = $1 and m.status = 'active'`,
+          [reset.user_id],
+        )
 
     await client.query(
       `update user_credentials set
@@ -142,7 +166,57 @@ export async function confirmPasswordReset(
        where user_id = $1 and status = 'active'`,
       [reset.user_id],
     )
-    return reset
+
+    const memberships = await client.query<{ tenant_id: string }>(
+      `select distinct tenant_id
+         from tenant_memberships
+        where user_id = $1`,
+      [reset.user_id],
+    )
+    const mfaReset = {
+      mfaMethodsDisabled: 0,
+      mfaRecoveryCodesRevoked: 0,
+      mfaChallengesExpired: 0,
+    }
+    for (const membership of memberships.rows) {
+      await applyDatabaseSecurityContext(client, {
+        identityUserId: reset.user_id,
+        tenantId: membership.tenant_id,
+      })
+      const methods = await client.query(
+        `update user_mfa_methods
+            set status = 'disabled',
+                disabled_at = now(),
+                last_used_step = null
+          where tenant_id = $1
+            and user_id = $2
+            and status <> 'disabled'`,
+        [membership.tenant_id, reset.user_id],
+      )
+      const recoveryCodes = await client.query(
+        `delete from user_mfa_recovery_codes
+          where tenant_id = $1
+            and user_id = $2`,
+        [membership.tenant_id, reset.user_id],
+      )
+      const challenges = await client.query(
+        `update auth_mfa_challenges
+            set status = 'expired'
+          where tenant_id = $1
+            and user_id = $2
+            and status = 'pending'`,
+        [membership.tenant_id, reset.user_id],
+      )
+      mfaReset.mfaMethodsDisabled += methods.rowCount ?? 0
+      mfaReset.mfaRecoveryCodesRevoked += recoveryCodes.rowCount ?? 0
+      mfaReset.mfaChallengesExpired += challenges.rowCount ?? 0
+    }
+
+    return {
+      ...reset,
+      tenant_id: tenant.rows[0]?.tenant_id || null,
+      ...mfaReset,
+    }
   })
 
   await writeAuditEvent({
@@ -155,6 +229,11 @@ export async function confirmPasswordReset(
     userAgent: metadata.userAgent,
     entityType: 'password_reset',
     entityId: outcome.id,
+    metadata: {
+      mfaMethodsDisabled: outcome.mfaMethodsDisabled,
+      mfaRecoveryCodesRevoked: outcome.mfaRecoveryCodesRevoked,
+      mfaChallengesExpired: outcome.mfaChallengesExpired,
+    },
   })
 }
 

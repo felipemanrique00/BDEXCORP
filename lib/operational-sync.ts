@@ -2,15 +2,25 @@ import { todayISODate } from '@/lib/date'
 import type { Atendimento, OrigemAtendimento, TipoServico, VoucherEmitido, VoucherTipo } from '@/types'
 import {
   addAtendimento,
+  criarAtendimentoParaLista,
   getAllAtendimentos,
   getAtendimentoById,
   updateAtendimento,
 } from '@/lib/atendimentos-storage'
 import {
+  persistDemandPatchWithCompatibility,
+  persistNewDemandWithCompatibility,
+} from '@/lib/demand-persistence-client'
+import {
   getAllVouchersEmitidos,
   updateVoucherEmitido,
 } from '@/lib/vouchers-emitidos-storage'
+import { updateVoucherOnServer } from '@/lib/voucher-persistence-client'
 import { gerarLancamentosDoAtendimento, type LancamentoFinanceiro } from '@/lib/financeiro'
+import {
+  createFinancialDemandSyncKey,
+  syncFinancialEntriesFromDemandsOnServer,
+} from '@/lib/finance-persistence-client'
 
 export interface ResultadoSincronizacaoFinanceira {
   receber?: LancamentoFinanceiro
@@ -264,6 +274,28 @@ export function sincronizarFinanceiroAtendimento(atendimento: Atendimento): Resu
   return gerarLancamentosDoAtendimento(atendimento, undefined)
 }
 
+async function sincronizarFinanceiroAtendimentoGovernado(
+  atendimento: Atendimento,
+): Promise<ResultadoSincronizacaoFinanceira> {
+  if (!['finalizado', 'em_andamento', 'aguardando_cliente'].includes(atendimento.status)) {
+    return {}
+  }
+  const stateFingerprint = [
+    atendimento.updated_at || '',
+    atendimento.status,
+    atendimento.valor_venda || atendimento.valor_final || atendimento.valor_cotacao || 0,
+    atendimento.valor_custo || 0,
+  ].join('|')
+  const result = await syncFinancialEntriesFromDemandsOnServer(
+    [atendimento.id],
+    createFinancialDemandSyncKey('voucher-governed', [atendimento.id], stateFingerprint),
+  )
+  return {
+    receber: result.entries.find((entry) => entry.tipo === 'receber'),
+    pagar: result.entries.find((entry) => entry.tipo === 'pagar'),
+  }
+}
+
 export function sincronizarVoucherOperacional(
   voucher: VoucherEmitido,
   opts: { agente_user_id?: string; origem?: OrigemAtendimento } = {}
@@ -310,6 +342,65 @@ export function sincronizarVoucherOperacional(
   }
 
   return { criado: false, atualizado: false, financeiro: {} }
+}
+
+export async function sincronizarVoucherOperacionalGovernado(
+  voucher: VoucherEmitido,
+  opts: { agente_user_id?: string; origem?: OrigemAtendimento } = {},
+): Promise<ResultadoSincronizacaoVoucher> {
+  if (typeof window === 'undefined') {
+    return { criado: false, atualizado: false, financeiro: {} }
+  }
+
+  const existentes = getAllAtendimentos()
+  let atendimento = voucher.atendimento_id ? getAtendimentoById(voucher.atendimento_id) : undefined
+  if (!atendimento) atendimento = existentes.find((item) => matchAtendimentoVoucher(item, voucher))
+
+  if (atendimento) {
+    const patch = mergeAtendimentoVoucher(atendimento, voucher)
+    if (opts.agente_user_id && !atendimento.agente_user_id) patch.agente_user_id = opts.agente_user_id
+    if (opts.origem && !atendimento.origem) patch.origem = opts.origem
+    const persisted = await persistDemandPatchWithCompatibility(
+      atendimento,
+      patch,
+      `Sincronizacao do voucher ${voucher.id}`,
+    )
+    if (!voucher.atendimento_id) {
+      await updateVoucherOnServer(
+        voucher.id,
+        { atendimento_id: persisted.demand.id },
+        voucher.version,
+      )
+    }
+    return {
+      atendimento: persisted.demand,
+      criado: false,
+      atualizado: true,
+      financeiro: await sincronizarFinanceiroAtendimentoGovernado(persisted.demand),
+    }
+  }
+
+  const patch = patchAtendimentoDoVoucher(voucher)
+  const prepared = criarAtendimentoParaLista({
+    ...(patch as Omit<Atendimento, 'id' | 'created_at' | 'updated_at'>),
+    agente_user_id: opts.agente_user_id || patch.agente_user_id || 'system-unassigned',
+    origem: opts.origem || patch.origem || 'Portal',
+    valor_cotacao: patch.valor_cotacao || 0,
+    observacoes: patch.observacoes || '',
+    data_atendimento: patch.data_atendimento || hojeISO(),
+  }, existentes)
+  const persisted = await persistNewDemandWithCompatibility(prepared, true)
+  await updateVoucherOnServer(
+    voucher.id,
+    { atendimento_id: persisted.demand.id },
+    voucher.version,
+  )
+  return {
+    atendimento: persisted.demand,
+    criado: true,
+    atualizado: false,
+    financeiro: await sincronizarFinanceiroAtendimentoGovernado(persisted.demand),
+  }
 }
 
 export function sincronizarTudoOperacional(): ResultadoSincronizacaoGlobal {

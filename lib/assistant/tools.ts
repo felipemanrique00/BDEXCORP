@@ -4,21 +4,23 @@ import { z } from 'zod'
 
 import { getAssistantSettings } from '@/lib/assistant/settings'
 import { createAssistantAuditLog, createAssistantToolLog } from '@/lib/assistant/audit'
-import { ASSISTANT_KEYS, appendAssistantList, getAssistantValue, getRawAppKv, setAssistantValue } from '@/lib/assistant/storage'
+import { ASSISTANT_KEYS, appendAssistantList, getAssistantValue, setAssistantValue } from '@/lib/assistant/storage'
 import { generateVoucherDocument } from '@/lib/assistant/pdf'
+import { hasServerPermission } from '@/lib/security/api-guard'
+import { getAccessibleCompanyIds } from '@/lib/server/corporate-access-service'
+import { withTenantTransaction } from '@/lib/server/database'
+import { listRelationalDemands } from '@/lib/server/demand-service'
+import { getFinancialOverview } from '@/lib/server/finance-service'
+import { requireRequestContext, type RequestPrincipal } from '@/lib/server/request-context'
+import { listGovernedTravelReservations } from '@/lib/server/travel-governance-service'
+import { listVouchers } from '@/lib/server/voucher-service'
 import type {
   AssistantToolDefinition,
   AssistantToolResult,
   AssistantToolRunContext,
   VoucherSendLog,
 } from '@/lib/assistant/types'
-import type { Atendimento, Empresa, Funcionario, Hotel, VoucherEmitido } from '@/types'
-
-const STORAGE_DATA = 'bbt-data-v4'
-const STORAGE_ATENDIMENTOS = 'bbt-atendimentos'
-const STORAGE_VOUCHERS = 'bbt-vouchers-emitidos'
-const STORAGE_TECH_RESERVATIONS = 'bbt-tech-travel-reservations-v1'
-const STORAGE_FINANCEIRO = 'bbt-financeiro'
+import type { Permissoes, VoucherEmitido } from '@/types'
 
 export const DEFAULT_ASSISTANT_TOOLS: AssistantToolDefinition[] = [
   tool('getVoucherByCode', 'Localiza voucher por codigo, numero ou localizador.', 'read', 'vouchers', false, false),
@@ -88,16 +90,18 @@ export async function executeAssistantTool(
   context: AssistantToolRunContext,
 ): Promise<AssistantToolResult> {
   const started = Date.now()
+  const principal = requireRequestContext().principal
+  const authenticatedContext = authenticatedToolContext(principal, context)
   const tools = await getAssistantTools()
   const definition = tools.find((item) => item.id === toolId)
   if (!definition || definition.status !== 'active') {
-    return finishTool(toolId, started, context, input, { ok: false, blocked: true, error: 'Ferramenta indisponivel.' })
+    return finishTool(toolId, started, authenticatedContext, input, { ok: false, blocked: true, error: 'Ferramenta indisponivel.' })
   }
 
-  const guard = await guardTool(definition, context)
-  if (guard) return finishTool(toolId, started, context, input, guard)
-  if (definition.requiresConfirmation && !context.confirmed) {
-    return finishTool(toolId, started, context, input, {
+  const guard = await guardTool(definition, authenticatedContext, principal)
+  if (guard) return finishTool(toolId, started, authenticatedContext, input, guard)
+  if (definition.requiresConfirmation && !authenticatedContext.confirmed) {
+    return finishTool(toolId, started, authenticatedContext, input, {
       ok: false,
       requiresConfirmation: true,
       error: 'Essa acao exige confirmacao humana.',
@@ -107,32 +111,32 @@ export async function executeAssistantTool(
   try {
     switch (toolId) {
       case 'getVoucherByCode':
-        return finishTool(toolId, started, context, input, await getVoucherByCode(input))
+        return finishTool(toolId, started, authenticatedContext, input, await getVoucherByCode(input, principal))
       case 'getVoucherByCustomer':
-        return finishTool(toolId, started, context, input, await getVoucherByCustomer(input, context))
+        return finishTool(toolId, started, authenticatedContext, input, await getVoucherByCustomer(input, authenticatedContext, principal))
       case 'generateVoucherPDF':
-        return finishTool(toolId, started, context, input, await generateVoucherPdfTool(input, context))
+        return finishTool(toolId, started, authenticatedContext, input, await generateVoucherPdfTool(input, authenticatedContext, principal))
       case 'sendVoucherPDF':
-        return finishTool(toolId, started, context, input, await sendVoucherPdfTool(input, context))
+        return finishTool(toolId, started, authenticatedContext, input, await sendVoucherPdfTool(input, authenticatedContext))
       case 'getDemandsByCustomer':
-        return finishTool(toolId, started, context, input, await getDemandsByCustomer(input, context))
+        return finishTool(toolId, started, authenticatedContext, input, await getDemandsByCustomer(input, authenticatedContext, principal))
       case 'getReservationDetails':
-        return finishTool(toolId, started, context, input, await getReservationDetails(input))
+        return finishTool(toolId, started, authenticatedContext, input, await getReservationDetails(input, principal))
       case 'searchHotels':
-        return finishTool(toolId, started, context, input, await searchHotels(input))
+        return finishTool(toolId, started, authenticatedContext, input, await searchHotels(input, principal))
       case 'getFinancialSummary':
-        return finishTool(toolId, started, context, input, await getFinancialSummary(input, context))
+        return finishTool(toolId, started, authenticatedContext, input, await getFinancialSummary(input, authenticatedContext, principal))
       case 'transferToHuman':
-        return finishTool(toolId, started, context, input, await transferToHuman(input, context))
+        return finishTool(toolId, started, authenticatedContext, input, await transferToHuman(input, authenticatedContext))
       case 'createAuditLog':
-        return finishTool(toolId, started, context, input, await createAuditLogTool(input, context))
+        return finishTool(toolId, started, authenticatedContext, input, await createAuditLogTool(input, authenticatedContext))
       case 'getAvailableServices':
-        return finishTool(toolId, started, context, input, await getAvailableServices())
+        return finishTool(toolId, started, authenticatedContext, input, await getAvailableServices())
       default:
-        return finishTool(toolId, started, context, input, { ok: false, error: 'Ferramenta sem executor configurado.' })
+        return finishTool(toolId, started, authenticatedContext, input, { ok: false, error: 'Ferramenta sem executor configurado.' })
     }
   } catch (error) {
-    return finishTool(toolId, started, context, input, {
+    return finishTool(toolId, started, authenticatedContext, input, {
       ok: false,
       error: (error as Error)?.message || 'Falha ao executar ferramenta.',
     })
@@ -142,6 +146,7 @@ export async function executeAssistantTool(
 async function guardTool(
   definition: AssistantToolDefinition,
   context: AssistantToolRunContext,
+  principal: RequestPrincipal,
 ): Promise<AssistantToolResult | null> {
   const settings = await getAssistantSettings()
   if (!settings.permissions.allowedChannels.includes(context.channel)) {
@@ -158,6 +163,10 @@ async function guardTool(
   }
   if (definition.kind === 'message' && !settings.permissions.allowWhatsAppSend) {
     return { ok: false, blocked: true, error: 'Envio de mensagens/arquivos bloqueado por configuracao.' }
+  }
+  const requiredPermission = permissionForAssistantModule(definition.module)
+  if (requiredPermission && !hasServerPermission(principal.user, requiredPermission)) {
+    return { ok: false, blocked: true, error: 'Permissao insuficiente para esta consulta.' }
   }
   return null
 }
@@ -199,9 +208,15 @@ async function finishTool(
   return { ...result, auditId: audit.id }
 }
 
-async function getVoucherByCode(input: unknown): Promise<AssistantToolResult> {
+async function getVoucherByCode(
+  input: unknown,
+  principal: RequestPrincipal,
+): Promise<AssistantToolResult> {
   const params = z.object({ code: z.string().min(1) }).parse(input)
-  const vouchers = await getRawAppKv<VoucherEmitido[]>(STORAGE_VOUCHERS, [])
+  const vouchers = (await listVouchers(principal, {
+    search: params.code,
+    limit: 50,
+  })).items
   const code = normalize(params.code)
   const found = vouchers.find((voucher) =>
     [voucher.id, voucher.numero, voucher.localizador, voucher.numero_confirmacao]
@@ -211,33 +226,41 @@ async function getVoucherByCode(input: unknown): Promise<AssistantToolResult> {
   return found ? { ok: true, data: sanitizeVoucher(found) } : { ok: false, error: 'Voucher nao encontrado.' }
 }
 
-async function getVoucherByCustomer(input: unknown, context: AssistantToolRunContext): Promise<AssistantToolResult> {
+async function getVoucherByCustomer(
+  input: unknown,
+  context: AssistantToolRunContext,
+  principal: RequestPrincipal,
+): Promise<AssistantToolResult> {
   const params = z.object({ query: z.string().min(2), companyId: z.string().optional() }).parse(input)
-  const vouchers = await getRawAppKv<VoucherEmitido[]>(STORAGE_VOUCHERS, [])
-  const query = normalize(params.query)
-  const companyId = context.companyId || params.companyId
-  const matches = vouchers
-    .filter((voucher) => !companyId || voucher.empresa_id === companyId)
-    .filter((voucher) =>
-      normalize([
-        voucher.passageiro_nome,
-        ...(voucher.passageiros || []),
-        voucher.cpf,
-        voucher.id,
-        voucher.numero,
-        voucher.localizador,
-        voucher.numero_confirmacao,
-      ].filter(Boolean).join(' ')).includes(query),
-    )
-    .slice(0, 10)
-    .map(sanitizeVoucher)
-  return { ok: true, data: { total: matches.length, vouchers: matches } }
+  const result = await listVouchers(principal, {
+    companyId: params.companyId || context.companyId || undefined,
+    search: params.query,
+    limit: 10,
+  })
+  return {
+    ok: true,
+    data: {
+      total: result.total,
+      vouchers: result.items.map(sanitizeVoucher),
+    },
+  }
 }
 
-async function generateVoucherPdfTool(input: unknown, context: AssistantToolRunContext): Promise<AssistantToolResult> {
+async function generateVoucherPdfTool(
+  input: unknown,
+  context: AssistantToolRunContext,
+  principal: RequestPrincipal,
+): Promise<AssistantToolResult> {
   const params = z.object({ voucherId: z.string().min(1) }).parse(input)
-  const vouchers = await getRawAppKv<VoucherEmitido[]>(STORAGE_VOUCHERS, [])
-  const voucher = vouchers.find((item) => item.id === params.voucherId || item.numero === params.voucherId)
+  const vouchers = (await listVouchers(principal, {
+    search: params.voucherId,
+    limit: 50,
+  })).items
+  const normalizedId = normalize(params.voucherId)
+  const voucher = vouchers.find((item) => (
+    normalize(item.id) === normalizedId
+    || normalize(item.numero) === normalizedId
+  ))
   if (!voucher) return { ok: false, error: 'Voucher nao encontrado para gerar PDF.' }
   const document = await generateVoucherDocument(voucher, { createdBy: context.userId, protectSensitiveData: true })
   return { ok: true, data: document }
@@ -266,55 +289,110 @@ async function sendVoucherPdfTool(input: unknown, context: AssistantToolRunConte
   return { ok: false, error, data: log }
 }
 
-async function getDemandsByCustomer(input: unknown, context: AssistantToolRunContext): Promise<AssistantToolResult> {
+async function getDemandsByCustomer(
+  input: unknown,
+  context: AssistantToolRunContext,
+  principal: RequestPrincipal,
+): Promise<AssistantToolResult> {
   const params = z.object({ query: z.string().min(2).optional(), companyId: z.string().optional() }).parse(input)
-  const demands = await getRawAppKv<Atendimento[]>(STORAGE_ATENDIMENTOS, [])
-  const companyId = context.companyId || params.companyId
-  const query = normalize(params.query || '')
-  const matches = demands
-    .filter((item) => !companyId || item.empresa_id === companyId)
-    .filter((item) => !query || normalize([item.id, item.passageiro_nome, item.solicitante_nome, item.numero_solicitacao].filter(Boolean).join(' ')).includes(query))
-    .slice(0, 20)
+  const result = await listRelationalDemands(principal, {
+    companyId: params.companyId || context.companyId || undefined,
+    search: params.query,
+    limit: 20,
+  })
+  const matches = result.items
     .map((item) => ({
       id: item.id,
-      passageiro_nome: item.passageiro_nome,
-      tipo_servico: item.tipo_servico,
-      status: item.status,
-      prioridade: item.prioridade,
-      data_atendimento: item.data_atendimento,
-      valor_cotacao: item.valor_cotacao,
+      serial_os: item.demandNumber,
+      empresa: item.companyName,
+      passageiro_nome: item.passengerName,
+      tipo_servico: item.serviceType,
+      status: item.operationalStatus,
+      prioridade: item.priority,
+      data_viagem: item.travelStartDate,
+      valor_cotacao: item.estimatedAmount,
     }))
-  return { ok: true, data: { total: matches.length, demandas: matches } }
+  return { ok: true, data: { total: result.total, demandas: matches } }
 }
 
-async function getReservationDetails(input: unknown): Promise<AssistantToolResult> {
+async function getReservationDetails(
+  input: unknown,
+  principal: RequestPrincipal,
+): Promise<AssistantToolResult> {
   const params = z.object({ reservationId: z.string().min(1) }).parse(input)
-  const reservations = await getRawAppKv<Array<Record<string, unknown>>>(STORAGE_TECH_RESERVATIONS, [])
-  const found = reservations.find((item) =>
-    normalize([item.id, item.idOs, item.localizador, item.sistema, item.reservationId, item.codigo].filter(Boolean).join(' ')).includes(
-      normalize(params.reservationId),
-    ),
-  )
+  const reservations = (await listGovernedTravelReservations(principal, {
+    search: params.reservationId,
+    limit: 20,
+  })).items
+  const reference = normalize(params.reservationId)
+  const found = reservations.find((item) => normalize([
+    item.id,
+    item.demandNumber,
+    item.providerReference,
+  ].filter(Boolean).join(' ')).includes(reference))
   return found ? { ok: true, data: found } : { ok: false, error: 'Reserva nao encontrada.' }
 }
 
-async function searchHotels(input: unknown): Promise<AssistantToolResult> {
+async function searchHotels(
+  input: unknown,
+  principal: RequestPrincipal,
+): Promise<AssistantToolResult> {
   const params = z.object({ query: z.string().min(2), city: z.string().optional(), uf: z.string().optional() }).parse(input)
-  const data = await getRawAppKv<{ empresas?: Empresa[]; funcionarios?: Funcionario[]; hoteis?: Hotel[] }>(STORAGE_DATA, {})
-  const hotels = Array.isArray(data.hoteis) ? data.hoteis : []
-  const q = normalize([params.query, params.city, params.uf].filter(Boolean).join(' '))
-  const matches = hotels
-    .filter((hotel) => normalize([hotel.nome, hotel.cidade, hotel.uf].filter(Boolean).join(' ')).includes(q))
-    .slice(0, 20)
+  const allowedReservationCompanies = principal.corporateAccess?.companies
+    .filter((company) => company.permissions.ver_reservas)
+    .map((company) => company.companyId) || []
+  if (!allowedReservationCompanies.length) {
+    return { ok: false, blocked: true, error: 'Permissao insuficiente para consultar hoteis.' }
+  }
+  const search = `%${[params.query, params.city, params.uf].filter(Boolean).join(' ').trim().slice(0, 200)}%`
+  const matches = await withTenantTransaction(principal.tenantId, async (client) => {
+    const result = await client.query<{
+      id: string
+      name: string
+      city: string | null
+      state: string | null
+      country: string
+      category: string | null
+      billing_enabled: boolean
+      amenities: Record<string, unknown>
+    }>(
+      `select id, name, city, state, country, category, billing_enabled, amenities
+       from hotels
+       where tenant_id = $1
+         and deleted_at is null
+         and status = 'active'
+         and concat_ws(' ', name, city, state, country) ilike $2
+       order by name
+       limit 20`,
+      [principal.tenantId, search],
+    )
+    return result.rows.map((hotel) => ({
+      id: hotel.id,
+      nome: hotel.name,
+      cidade: hotel.city,
+      uf: hotel.state,
+      pais: hotel.country,
+      categoria: hotel.category,
+      faturado: hotel.billing_enabled,
+      comodidades: hotel.amenities,
+    }))
+  })
   return { ok: true, data: { total: matches.length, hoteis: matches } }
 }
 
-async function getFinancialSummary(_input: unknown, context: AssistantToolRunContext): Promise<AssistantToolResult> {
-  if (!context.userRole || !['master', 'admin_bbt', 'financeiro', 'lider'].includes(context.userRole)) {
+async function getFinancialSummary(
+  input: unknown,
+  context: AssistantToolRunContext,
+  principal: RequestPrincipal,
+): Promise<AssistantToolResult> {
+  if (!hasServerPermission(principal.user, 'ver_financeiro')) {
     return { ok: false, blocked: true, error: 'Perfil sem permissao para resumo financeiro.' }
   }
-  const financeiro = await getRawAppKv<unknown>(STORAGE_FINANCEIRO, null)
-  return { ok: true, data: summarizeFinanceiro(financeiro) }
+  const params = z.object({ companyId: z.string().optional() }).parse(input || {})
+  const overview = await getFinancialOverview(principal, {
+    companyId: params.companyId || context.companyId || undefined,
+  })
+  return { ok: true, data: overview }
 }
 
 async function transferToHuman(input: unknown, context: AssistantToolRunContext): Promise<AssistantToolResult> {
@@ -399,8 +477,29 @@ function summarize(value: unknown): string {
   return text.length > 300 ? `${text.slice(0, 300)}...` : text
 }
 
-function summarizeFinanceiro(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object') return { configured: false, message: 'Sem dados financeiros consolidados.' }
-  if (Array.isArray(value)) return { configured: true, totalRegistros: value.length }
-  return { configured: true, keys: Object.keys(value as Record<string, unknown>).slice(0, 20) }
+function authenticatedToolContext(
+  principal: RequestPrincipal,
+  context: AssistantToolRunContext,
+): AssistantToolRunContext {
+  const accessibleCompanyIds = new Set(getAccessibleCompanyIds(principal))
+  const requestedCompanyId = context.companyId || principal.user.company_id || null
+  return {
+    ...context,
+    userId: principal.user.id,
+    userName: principal.user.name,
+    userRole: principal.roleKey,
+    companyId: requestedCompanyId && accessibleCompanyIds.has(requestedCompanyId)
+      ? requestedCompanyId
+      : null,
+  }
+}
+
+function permissionForAssistantModule(module: string): keyof Permissoes | null {
+  return {
+    vouchers: 'ver_vouchers',
+    demandas: 'ver_demandas',
+    reservas: 'ver_reservas',
+    hoteis: 'ver_reservas',
+    financeiro: 'ver_financeiro',
+  }[module] as keyof Permissoes | undefined || null
 }

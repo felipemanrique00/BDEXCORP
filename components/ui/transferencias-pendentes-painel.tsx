@@ -1,51 +1,68 @@
 'use client'
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Bell, Check, X, ArrowRightLeft, Clock } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  getTransferenciasPendentes,
-  aceitarTransferencia,
-  recusarTransferencia,
-  type SolicitacaoTransferencia,
-} from '@/lib/transferencias'
+  decideDemandTransfer,
+  listDemandTransfers,
+} from '@/lib/demand-transfer-client'
+import type { DemandTransferRequest } from '@/lib/demand-transfer'
 import { getCurrentUser } from '@/lib/auth'
-import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 
 export function TransferenciasPendentesPainel() {
   const user = useMemo(
     () => (typeof window !== 'undefined' ? getCurrentUser() : null),
     [],
   )
-  const [pendentes, setPendentes] = useState<SolicitacaoTransferencia[]>([])
+  const [pendentes, setPendentes] = useState<DemandTransferRequest[]>([])
   const [aberto, setAberto] = useState(false)
   const [recusarId, setRecusarId] = useState<string | null>(null)
   const [motivoRecusa, setMotivoRecusa] = useState('')
+  const [respondendoId, setRespondendoId] = useState<string | null>(null)
+  const listRequestRef = useRef<AbortController | null>(null)
 
-  const carregar = useCallback(() => {
+  const carregar = useCallback(async () => {
     if (!user) return
-    setPendentes(getTransferenciasPendentes(user.id))
+    listRequestRef.current?.abort()
+    const controller = new AbortController()
+    listRequestRef.current = controller
+    try {
+      const transfers = await listDemandTransfers(controller.signal)
+      setPendentes(transfers.filter(
+        (transfer) => transfer.status === 'pending' && transfer.destinationUserId === user.id,
+      ))
+    } catch (error) {
+      if (!isAbortError(error) && process.env.NODE_ENV === 'development') {
+        console.warn('[demand-transfers:list]', error)
+      }
+    } finally {
+      if (listRequestRef.current === controller) listRequestRef.current = null
+    }
   }, [user])
 
   useEffect(() => {
     if (!user) return
-    carregar()
-    const t = setInterval(carregar, 15000)  // atualiza a cada 15s
-    return () => clearInterval(t)
+    void carregar()
+    const t = setInterval(() => void carregar(), 30_000)
+    return () => {
+      clearInterval(t)
+      listRequestRef.current?.abort()
+      listRequestRef.current = null
+    }
   }, [carregar, user])
 
   if (!user) return null
 
-  async function handleAceitar(sol: SolicitacaoTransferencia) {
-    if (aceitarTransferencia(sol.id, user!.id, user!.name)) {
-      try {
-        await commitPendingRemoteStorage()
-        toast.success(`Demanda de ${sol.passageiro_nome} transferida para você`)
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar a transferência.')
-      }
-      carregar()
-    } else {
-      toast.error('Erro ao aceitar transferência')
+  async function handleAceitar(sol: DemandTransferRequest) {
+    setRespondendoId(sol.id)
+    try {
+      await decideDemandTransfer(sol.id, { action: 'accept' })
+      toast.success(`Demanda de ${sol.passengerName} transferida para você`)
+      await carregar()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar a transferência.')
+    } finally {
+      setRespondendoId(null)
     }
   }
 
@@ -55,17 +72,20 @@ export function TransferenciasPendentesPainel() {
       toast.error('Justificativa precisa ter pelo menos 5 caracteres')
       return
     }
-    if (recusarTransferencia(recusarId, user!.id, user!.name, motivoRecusa.trim())) {
-      try {
-        await commitPendingRemoteStorage()
-        toast.success('Transferência recusada')
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar a recusa.')
-        return
-      }
+    setRespondendoId(recusarId)
+    try {
+      await decideDemandTransfer(recusarId, {
+        action: 'reject',
+        reason: motivoRecusa.trim(),
+      })
+      toast.success('Transferência recusada')
       setRecusarId(null)
       setMotivoRecusa('')
-      carregar()
+      await carregar()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível confirmar a recusa.')
+    } finally {
+      setRespondendoId(null)
     }
   }
 
@@ -104,15 +124,16 @@ export function TransferenciasPendentesPainel() {
                   <div key={sol.id} className="border border-bbt-gray-100 dark:border-slate-700 rounded-lg p-3">
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <div className="text-xs text-slate-500 flex items-center gap-1">
-                        <Clock className="w-3 h-3" /> {new Date(sol.solicitada_em).toLocaleString('pt-BR')}
+                        <Clock className="w-3 h-3" /> {new Date(sol.requestedAt).toLocaleString('pt-BR')}
                       </div>
                     </div>
                     <div className="text-sm">
-                      <strong>{sol.origem_user_name}</strong> quer transferir para você:
+                      <strong>{sol.sourceUserName}</strong> quer transferir para você:
                     </div>
-                    <div className="font-semibold mt-1">{sol.passageiro_nome}</div>
+                    <div className="font-semibold mt-1">{sol.passengerName}</div>
+                    <div className="text-xs text-slate-500">{sol.companyName}</div>
                     <div className="text-xs text-slate-600 dark:text-slate-400 mt-2 italic bg-bbt-gray-50 dark:bg-slate-800 p-2 rounded">
-                      "{sol.motivo}"
+                      &ldquo;{sol.reason}&rdquo;
                     </div>
                     {recusarId === sol.id ? (
                       <div className="mt-2 space-y-2">
@@ -121,7 +142,13 @@ export function TransferenciasPendentesPainel() {
                           className="bbt-input w-full text-xs" />
                         <div className="flex gap-2 justify-end">
                           <button onClick={() => { setRecusarId(null); setMotivoRecusa('') }} className="bbt-button-ghost text-xs">Cancelar</button>
-                          <button onClick={handleConfirmarRecusa} className="bbt-button-primary text-xs bg-red-500 hover:bg-red-600">Confirmar recusa</button>
+                          <button
+                            onClick={handleConfirmarRecusa}
+                            disabled={respondendoId === sol.id}
+                            className="bbt-button-primary text-xs bg-red-500 hover:bg-red-600"
+                          >
+                            Confirmar recusa
+                          </button>
                         </div>
                       </div>
                     ) : (
@@ -130,7 +157,9 @@ export function TransferenciasPendentesPainel() {
                           className="bbt-button-ghost text-xs flex items-center gap-1">
                           <X className="w-3 h-3" /> Recusar
                         </button>
-                        <button onClick={() => handleAceitar(sol)}
+                        <button
+                          onClick={() => void handleAceitar(sol)}
+                          disabled={respondendoId === sol.id}
                           className="bbt-button-primary text-xs flex items-center gap-1">
                           <Check className="w-3 h-3" /> Aceitar
                         </button>
@@ -145,4 +174,10 @@ export function TransferenciasPendentesPainel() {
       )}
     </>
   )
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === 'AbortError'
+    : error instanceof Error && error.name === 'AbortError'
 }

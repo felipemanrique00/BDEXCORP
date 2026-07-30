@@ -3,6 +3,7 @@ import { todayISODate } from '@/lib/date'
 import { useState, useMemo } from 'react'
 import { useStore } from '@/lib/store'
 import { getCurrentUser, canEditGlobal, getEmpresasPermitidas } from '@/lib/auth'
+import { useCorporateCompanyScope, useCorporateContext } from '@/components/corporate-context-provider'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { WhatsAppButton } from '@/components/ui/whatsapp-button'
@@ -16,10 +17,13 @@ import type { Empresa } from '@/types'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
 import { PageHero } from '@/components/ui/page-hero'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
+import { flushPendingRemoteStorage } from '@/lib/storage-quota'
 
 export default function EmpresasPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const isMaster = canEditGlobal(user)
+  const { includesCompany } = useCorporateCompanyScope()
+  const { refreshAccess } = useCorporateContext()
   const { empresas, gruposEmpresariais, funcionarios, addEmpresa, updateEmpresa, deleteEmpresa } = useStore()
 
   const [search, setSearch] = useState('')
@@ -28,11 +32,19 @@ export default function EmpresasPage() {
   const [confirmDelete, setConfirmDelete] = useState<Empresa | null>(null)
   const [configCobrancaEmpresa, setConfigCobrancaEmpresa] = useState<Empresa | null>(null)
 
+  async function sincronizarDiretorio(message: string) {
+    const synced = await flushPendingRemoteStorage()
+    if (!synced) {
+      toast.error('Alteracao registrada, mas ainda nao sincronizada com o servidor. A sincronizacao sera repetida automaticamente.')
+      return
+    }
+    await refreshAccess().catch(() => undefined)
+    toast.success(message)
+  }
+
   const visible = useMemo(() => {
-    const filtered =
-      isMaster
-        ? empresas
-        : getEmpresasPermitidas(user, empresas, gruposEmpresariais)
+    const filtered = (isMaster ? empresas : getEmpresasPermitidas(user, empresas, gruposEmpresariais))
+      .filter((empresa) => includesCompany(empresa.id, 'ver_empresas'))
     if (!search.trim()) return filtered
     const q = search.toLowerCase()
     return filtered.filter(
@@ -41,7 +53,7 @@ export default function EmpresasPage() {
         e.cnpj.includes(q) ||
         e.responsavel.toLowerCase().includes(q)
     )
-  }, [empresas, gruposEmpresariais, isMaster, search, user])
+  }, [empresas, gruposEmpresariais, includesCompany, isMaster, search, user])
 
   function exportCSV() {
     const headers = ['Nome', 'CNPJ', 'Grupo', 'Endereço', 'Responsável', 'E-mail', 'Telefone', 'Centro de Custo', 'Ativa']
@@ -82,7 +94,7 @@ export default function EmpresasPage() {
               className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-white text-sm hover:bg-white/15 transition border border-white/15">
               <Download className="w-4 h-4" /> Exportar CSV
             </button>
-            {isMaster && (
+            {(isMaster || user?.permissoes?.cadastrar_empresas) && (
               <button
                 onClick={() => { setEditing(null); setModalOpen(true) }}
                 className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-5 py-3 text-[#061631] font-semibold text-sm hover:brightness-105 transition shadow-lg shadow-cyan-500/20"
@@ -178,7 +190,7 @@ export default function EmpresasPage() {
                           >
                             <Eye className="w-4 h-4" />
                           </Link>
-                          {(isMaster || user?.company_id === e.id) && (
+                          {(isMaster || includesCompany(e.id, 'alterar_configuracoes') || includesCompany(e.id, 'gerenciar_empresas_grupo')) && (
                             <button
                               onClick={() => {
                                 setEditing(e)
@@ -190,7 +202,7 @@ export default function EmpresasPage() {
                               <Edit2 className="w-4 h-4" />
                             </button>
                           )}
-                          {isMaster && (
+                          {(isMaster || includesCompany(e.id, 'alterar_configuracoes')) && (
                             <button
                               onClick={() => setConfigCobrancaEmpresa(e)}
                               className="p-2 rounded-lg hover:bg-green-50 dark:hover:bg-green-900/20 text-slate-500 hover:text-green-600 transition"
@@ -199,7 +211,7 @@ export default function EmpresasPage() {
                               <DollarSign className="w-4 h-4" />
                             </button>
                           )}
-                          {isMaster && (
+                          {(isMaster || includesCompany(e.id, 'gerenciar_empresas_grupo')) && (
                             <button
                               onClick={() => setConfirmDelete(e)}
                               className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-500 hover:text-red-600 transition"
@@ -227,10 +239,10 @@ export default function EmpresasPage() {
         onSave={(data) => {
           if (editing) {
             updateEmpresa(editing.id, data)
-            toast.success('Empresa atualizada!')
+            void sincronizarDiretorio('Empresa atualizada.')
           } else {
             addEmpresa({ ...data, ativa: true } as any)
-            toast.success('Empresa cadastrada!')
+            void sincronizarDiretorio('Empresa cadastrada.')
           }
           setModalOpen(false)
         }}
@@ -242,7 +254,7 @@ export default function EmpresasPage() {
         onConfirm={() => {
           if (confirmDelete) {
             deleteEmpresa(confirmDelete.id)
-            toast.success('Empresa excluída.')
+            void sincronizarDiretorio('Empresa excluida.')
           }
         }}
         title="Excluir empresa"

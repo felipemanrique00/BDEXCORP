@@ -53,6 +53,7 @@ export async function POST(request: Request) {
       entityId: guard.principal!.tenantId,
       metadata: {
         deletedRecords: result.deletedRecords,
+        clearedTables: result.clearedTables,
         clearedKeys: result.clearedKeys,
         fileCleanupPending: result.fileCleanupPending,
       },
@@ -61,6 +62,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       deleted: result.deletedRecords,
+      clearedTables: result.clearedTables,
       clearedKeys: result.clearedKeys,
       metadata: result.metadata,
       fileCleanupPending: result.fileCleanupPending,

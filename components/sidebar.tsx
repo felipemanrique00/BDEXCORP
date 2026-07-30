@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 
 import { BBTLogo } from '@/components/branding/bbt-logo'
+import { CorporateContextSelector } from '@/components/corporate-context-selector'
 import { getCurrentUser, logout } from '@/lib/auth'
 import { getUltimaVista, NOVA_DEMANDA_EVENT } from '@/lib/notificacoes'
 import { buildSidebarMenu, type SidebarMenuItem } from '@/lib/navigation'
@@ -131,6 +132,12 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           </button>
         </div>
       </div>
+
+      {!collapsed && (
+        <div className="border-b border-white/10 px-4 py-3 md:hidden">
+          <CorporateContextSelector placement="mobile-menu" />
+        </div>
+      )}
 
       {!collapsed && (
         <div className="border-b border-white/10 px-4 py-3">

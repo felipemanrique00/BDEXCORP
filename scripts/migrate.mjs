@@ -63,9 +63,7 @@ try {
     client.release()
   }
 } catch (error) {
-  console.error('--- DETALHE DO ERRO ---')
-  console.error(error)
-  console.error('----------------------')
+  console.error(`Falha nas migrations: ${error instanceof Error ? error.message : String(error)}`)
   process.exitCode = 1
 } finally {
   await pool.end()
@@ -169,7 +167,8 @@ async function applyMigration(client, migration) {
   try {
     await client.query("set local lock_timeout = '10s'")
     await client.query("set local statement_timeout = '0'")
-    await client.query(migration.sql)
+    await ensureMigrationHelpers(client)
+    await client.query(withoutOuterTransaction(migration.sql))
     await client.query(
       'insert into schema_migrations (name, checksum) values ($1, $2)',
       [migration.name, migration.checksum],
@@ -179,4 +178,29 @@ async function applyMigration(client, migration) {
     await client.query('rollback')
     throw new Error(`${migration.name}: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+function withoutOuterTransaction(sql) {
+  return sql
+    .replace(/^\s*begin\s*;\s*/i, '')
+    .replace(/\s*commit\s*;\s*$/i, '')
+}
+
+async function ensureMigrationHelpers(client) {
+  await client.query(`
+    create or replace function tenant_rls_policy(table_name text)
+    returns void
+    language plpgsql
+    as $$
+    begin
+      execute format('alter table %I enable row level security', table_name);
+      execute format('alter table %I force row level security', table_name);
+      execute format('drop policy if exists tenant_isolation on %I', table_name);
+      execute format(
+        'create policy tenant_isolation on %I using (tenant_id = nullif(current_setting(''app.tenant_id'', true), '''')::uuid) with check (tenant_id = nullif(current_setting(''app.tenant_id'', true), '''')::uuid)',
+        table_name
+      );
+    end;
+    $$
+  `)
 }

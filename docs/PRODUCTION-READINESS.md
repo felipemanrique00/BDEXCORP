@@ -1,4 +1,8 @@
-# Production Readiness
+# Production Readiness (historico)
+
+> Este parecer de 2026-07-21 foi substituido por
+> `FINAL-PRODUCTION-READINESS.md`. Os numeros abaixo representam uma etapa
+> anterior e nao devem ser usados para aprovar a versao atual.
 
 Data da avaliacao: 2026-07-21.
 

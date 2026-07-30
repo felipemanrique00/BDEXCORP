@@ -2,19 +2,17 @@ import { NextResponse } from 'next/server'
 
 import { queryDatabase } from '@/lib/server/database'
 import { logError } from '@/lib/server/logger'
+import {
+  evaluateMigrationReadiness,
+  readMigrationInventory,
+} from '@/lib/server/migration-readiness'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const REQUIRED_MIGRATIONS = [
-  '0001_platform_core.sql',
-  '0002_travel_domain.sql',
-  '0003_file_links.sql',
-  '0004_tenant_usage.sql',
-]
-
 export async function GET() {
   try {
+    const requiredMigrations = await readMigrationInventory()
     const databaseRole = await queryDatabase<{ rolsuper: boolean; rolbypassrls: boolean }>(
       'select rolsuper, rolbypassrls from pg_roles where rolname = current_user',
     )
@@ -26,20 +24,34 @@ export async function GET() {
         { status: 503, headers: { 'Cache-Control': 'no-store, max-age=0' } },
       )
     }
-    const result = await queryDatabase<{ name: string }>(
-      'select name from schema_migrations where name = any($1::text[])',
-      [REQUIRED_MIGRATIONS],
+    const result = await queryDatabase<{ name: string; checksum: string }>(
+      'select name, checksum from schema_migrations',
     )
-    const applied = new Set(result.rows.map((row) => row.name))
-    const pending = REQUIRED_MIGRATIONS.filter((name) => !applied.has(name))
-    if (pending.length) {
+    const migrationState = evaluateMigrationReadiness(requiredMigrations, result.rows)
+    if (!migrationState.ok) {
+      const inconsistent = (
+        migrationState.extra.length > 0 ||
+        migrationState.checksumMismatches.length > 0
+      )
       return NextResponse.json(
-        { ok: false, code: 'MIGRATIONS_PENDING' },
+        {
+          ok: false,
+          code: inconsistent ? 'MIGRATIONS_INCONSISTENT' : 'MIGRATIONS_PENDING',
+          pendingCount: migrationState.missing.length,
+          extraCount: migrationState.extra.length,
+          checksumMismatchCount: migrationState.checksumMismatches.length,
+          requiredCount: requiredMigrations.length,
+          appliedCount: result.rows.length,
+        },
         { status: 503, headers: { 'Cache-Control': 'no-store, max-age=0' } },
       )
     }
     return NextResponse.json(
-      { ok: true, service: 'bbt-corporativo' },
+      {
+        ok: true,
+        service: 'bbt-corporativo',
+        schemaVersion: requiredMigrations.at(-1)?.name,
+      },
       { headers: { 'Cache-Control': 'no-store, max-age=0' } },
     )
   } catch (error) {

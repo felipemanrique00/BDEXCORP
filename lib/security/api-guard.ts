@@ -5,10 +5,20 @@ import { NextResponse } from 'next/server'
 
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import { getClientIp } from '@/lib/server/auth-service'
+import {
+  authorizationForApiRequest,
+  AuthorizationDeniedError,
+  authorizeOrThrow,
+  type AuthorizationRequest,
+} from '@/lib/server/authorization-service'
 import { getServerEnvironment } from '@/lib/server/environment'
 import { logError } from '@/lib/server/logger'
 import { consumeRateLimit, type RateLimitPolicy } from '@/lib/server/rate-limit'
-import { enterRequestContext, type RequestPrincipal } from '@/lib/server/request-context'
+import {
+  enterRequestContext,
+  runWithRequestContext,
+  type RequestPrincipal,
+} from '@/lib/server/request-context'
 import { getSessionPrincipalFromRequest } from '@/lib/server-auth'
 import type { Permissoes, User, UserRole } from '@/types'
 import { PERMISSOES_PADRAO_POR_PERFIL } from '@/types'
@@ -18,8 +28,11 @@ type PermissionName = keyof Permissoes
 interface ApiGuardOptions {
   requireAuth?: boolean
   permission?: PermissionName
+  authorization?: AuthorizationRequest
   roles?: UserRole[]
+  roleKeys?: string[]
   platformAdmin?: boolean
+  tenantAdmin?: boolean
   entitlement?: string
   rateLimit?: RateLimitPolicy
   csrf?: boolean
@@ -30,6 +43,19 @@ export interface ApiGuardResult {
   principal: RequestPrincipal | null
   requestId: string
   response?: NextResponse
+}
+
+export function runInApiGuardContext<T>(
+  guard: ApiGuardResult,
+  operation: () => T,
+): T {
+  if (!guard.principal) {
+    throw new Error('Contexto autenticado obrigatorio.')
+  }
+  return runWithRequestContext(
+    { requestId: guard.requestId, principal: guard.principal },
+    operation,
+  )
 }
 
 export async function guardApiRequest(request: Request, options: ApiGuardOptions = {}): Promise<ApiGuardResult> {
@@ -86,6 +112,11 @@ export async function guardApiRequest(request: Request, options: ApiGuardOptions
     return guardedError(requestId, 403, 'PLATFORM_ADMIN_REQUIRED', 'Acesso restrito a administracao da plataforma.', user, principal)
   }
 
+  if (options.tenantAdmin && !principal?.platformAdmin && principal?.roleKey !== 'tenant_admin') {
+    await auditDenied(request, principal, requestId, 'tenant_admin_required')
+    return guardedError(requestId, 403, 'TENANT_ADMIN_REQUIRED', 'Acesso restrito a administracao do tenant.', user, principal)
+  }
+
   if (options.permission && !hasServerPermission(user, options.permission)) {
     await auditDenied(request, principal, requestId, `permission:${options.permission}`)
     return guardedError(requestId, 403, 'PERMISSION_DENIED', 'Permissao insuficiente.', user, principal)
@@ -96,9 +127,36 @@ export async function guardApiRequest(request: Request, options: ApiGuardOptions
     return guardedError(requestId, 403, 'ROLE_DENIED', 'Perfil sem acesso a esta operacao.', user, principal)
   }
 
+  if (options.roleKeys && (!principal || !options.roleKeys.includes(principal.roleKey))) {
+    await auditDenied(request, principal, requestId, 'membership_role_denied')
+    return guardedError(requestId, 403, 'MEMBERSHIP_ROLE_DENIED', 'Perfil interno sem acesso a esta operacao.', user, principal)
+  }
+
   if (options.entitlement && !principal?.entitlements[options.entitlement]) {
     await auditDenied(request, principal, requestId, `entitlement:${options.entitlement}`)
     return guardedError(requestId, 403, 'FEATURE_NOT_AVAILABLE', 'Funcionalidade indisponivel no plano atual.', user, principal)
+  }
+
+  if (principal && mustAuthenticate) {
+    try {
+      authorizeOrThrow(
+        principal,
+        options.authorization || await authorizationForApiRequest(request, options.permission),
+      )
+    } catch (error) {
+      if (error instanceof AuthorizationDeniedError) {
+        await auditDenied(request, principal, requestId, `authorization:${error.code}`)
+        return guardedError(
+          requestId,
+          error.status,
+          error.code,
+          error.message,
+          user,
+          principal,
+        )
+      }
+      throw error
+    }
   }
 
   if (principal) enterRequestContext({ requestId, principal })

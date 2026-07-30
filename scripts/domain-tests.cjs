@@ -259,7 +259,10 @@ assertRouteUsesApiGuard('app/api/ia/search/route.ts', 'ia-search:post')
   assert.doesNotMatch(aerialReport, /\.brand-logo\{[^}]*background:white/, 'relatorio aereo HTML nao deve colar fundo branco no logo')
   assert.match(manifest, /\/brand\/bbt-corporativo-mark-192\.png/, 'PWA deve usar o icone oficial da BBT Corporativo')
   assert.doesNotMatch(manifest, /\/bbt-logo/, 'manifesto nao deve depender dos assets antigos')
-  assert.match(serviceWorker, /bbt-cache-v19-1/, 'service worker deve invalidar o cache da identidade anterior')
+  assert.match(serviceWorker, /bbt-shell-v20-1/, 'service worker deve versionar o shell seguro do portal do viajante')
+  assert.match(serviceWorker, /url\.pathname\.startsWith\('\/api\/'\)/, 'service worker nao deve interceptar respostas autenticadas da API')
+  assert.match(serviceWorker, /request\.mode === 'navigate'/, 'service worker deve oferecer fallback somente para navegacao offline')
+  assert.doesNotMatch(serviceWorker, /cache\.put\(request[^)]*\/api\//, 'service worker nao deve persistir respostas da API')
 
   for (const asset of [
     'bbt-corporativo-lockup-color.webp',
@@ -436,7 +439,7 @@ assertRouteUsesApiGuard('app/api/ia/search/route.ts', 'ia-search:post')
   )
 }
 
-for (const directory of ['app/api/travel', 'app/api/integrations/tech']) {
+for (const directory of ['app/api/travel']) {
   const pending = [path.join(root, directory)]
   while (pending.length) {
     const current = pending.pop()
@@ -445,7 +448,39 @@ for (const directory of ['app/api/travel', 'app/api/integrations/tech']) {
       if (entry.isDirectory()) pending.push(absolute)
       if (!entry.isFile() || entry.name !== 'route.ts') continue
       const source = fs.readFileSync(absolute, 'utf8')
-      assert.match(source, /roles:\s*\['master'\]/, `${path.relative(root, absolute)} deve restringir acesso a equipe interna`)
+      assert.match(source, /requireAuth:\s*true/, `${path.relative(root, absolute)} deve exigir autenticacao`)
+      assert.match(source, /permission:\s*'[a-z_]+'/, `${path.relative(root, absolute)} deve exigir permissao operacional explicita`)
+      assert.match(source, /roleKeys:\s*\[[^\]]*'tenant_admin'[^\]]*\]/, `${path.relative(root, absolute)} deve restringir acesso a perfis internos`)
+    }
+  }
+}
+
+{
+  const pending = [path.join(root, 'app/api/integrations/tech')]
+  const tenantGlobalRoutes = new Set([
+    path.join('access-company', 'route.ts'),
+    path.join('companies', 'route.ts'),
+    path.join('emissions', 'route.ts'),
+    path.join('status', 'route.ts'),
+  ])
+  while (pending.length) {
+    const current = pending.pop()
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const absolute = path.join(current, entry.name)
+      if (entry.isDirectory()) pending.push(absolute)
+      if (!entry.isFile() || entry.name !== 'route.ts') continue
+      const source = fs.readFileSync(absolute, 'utf8')
+      const relative = path.relative(path.join(root, 'app/api/integrations/tech'), absolute)
+      assert.match(source, /requireAuth:\s*true/, `${path.relative(root, absolute)} deve exigir autenticacao`)
+      if (tenantGlobalRoutes.has(relative)) {
+        assert.match(source, /tenantAdmin:\s*true/, `${path.relative(root, absolute)} deve exigir administracao global do tenant`)
+      } else {
+        assert.match(
+          source,
+          /permission:\s*'(gerenciar_integracoes|importar_planilhas)'/,
+          `${path.relative(root, absolute)} deve exigir permissao explicita e validar escopo no servico`,
+        )
+      }
     }
   }
 }
@@ -470,13 +505,16 @@ for (const directory of ['app/api/travel', 'app/api/integrations/tech']) {
   const authService = fs.readFileSync(path.join(root, 'lib/server/auth-service.ts'), 'utf8')
   const usersPage = fs.readFileSync(path.join(root, 'app/dashboard/usuarios/page.tsx'), 'utf8')
   const requestersPage = fs.readFileSync(path.join(root, 'components/empresas/solicitantes-empresa-tab.tsx'), 'utf8')
+  const requesterRoute = fs.readFileSync(path.join(root, 'app/api/solicitantes/empresa/route.ts'), 'utf8')
   assert.match(authService, /password\.length < 12/, 'servidor deve exigir senha minima de 12 caracteres')
   assert.match(authService, /!\/\[a-z\]\//, 'servidor deve exigir letra minuscula')
   assert.match(authService, /!\/\[A-Z\]\//, 'servidor deve exigir letra maiuscula')
   assert.match(authService, /!\/\\d\//, 'servidor deve exigir numero')
   assert.match(authService, /!\/\[\^A-Za-z0-9\]\//, 'servidor deve exigir simbolo')
   assert.match(usersPage, /password\.length < 12/, 'cadastro interno deve validar senha minima de 12 caracteres')
-  assert.match(requestersPage, /password\.length < 12/, 'acesso do portal deve validar senha minima de 12 caracteres')
+  assert.doesNotMatch(requestersPage, /type="password"/, 'administrador nao deve definir senha do solicitante')
+  assert.match(requestersPage, /convite seguro/i, 'acesso do portal deve utilizar convite individual')
+  assert.doesNotMatch(requesterRoute, /password:\s*envelope\.password/, 'API de solicitantes nao deve criar senha conhecida pelo administrador')
 }
 
 for (const relativePath of [
@@ -489,7 +527,7 @@ for (const relativePath of [
   'app/api/assistant/whatsapp/qrcode/route.ts',
 ]) {
   const source = fs.readFileSync(path.join(root, relativePath), 'utf8')
-  assert.match(source, /permission:\s*'gerenciar_usuarios'/, `${relativePath} deve exigir permissao administrativa`)
+  assert.match(source, /tenantAdmin:\s*true/, `${relativePath} deve exigir administracao global do tenant`)
 }
 
 {

@@ -8,10 +8,14 @@ import { parseMensagem } from '@/lib/mensagem-parser'
 import { parseMensagemComIA, parseMensagemComIAEImagem, getStatusIA, type IAParserResult, type StatusIA } from '@/lib/ia-parser'
 import { aiErrorUserMessage } from '@/lib/ai-friendly-errors'
 import { reportClientFailure } from '@/lib/client-observability'
-import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import { encontrarFuncionarioPorCPF } from '@/lib/voucher-parser'
 import { buscarFuncionariosPorNomeInteligente, encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
-import { addAtendimento, registrarLog } from '@/lib/atendimentos-storage'
+import {
+  criarAtendimentoParaLista,
+  getAllAtendimentos,
+  registrarLog,
+} from '@/lib/atendimentos-storage'
+import { persistNewDemandWithCompatibility } from '@/lib/demand-persistence-client'
 import { dispararAlertaNovaDemanda } from '@/lib/notificacoes'
 import {
   arquivoParaBase64,
@@ -465,28 +469,29 @@ export default function CaixaEntradaPage() {
       origem_emissao: 'caixa_entrada',
     }
 
-    const nova = addAtendimento(payload)
-    if (!nova) { toast.error('Erro.'); setCriandoRapido(false); return }
-
-    registrarLog({
-      user_id: user.id, user_name: user.name, acao: 'criar',
-      entidade: 'Atendimento', entidade_id: nova.id,
-      descricao: `Criou via Caixa de Entrada${parsed?.ia_usado ? ' (IA)' : ''}: ${passageiroNome}`,
-    })
-
     try {
-      await commitPendingRemoteStorage()
+      const preparada = criarAtendimentoParaLista(payload, getAllAtendimentos())
+      const persistida = await persistNewDemandWithCompatibility(preparada)
+      const nova = persistida.demand
+      registrarLog({
+        user_id: user.id, user_name: user.name, acao: 'criar',
+        entidade: 'Atendimento', entidade_id: nova.id,
+        descricao: `Criou via Caixa de Entrada${parsed?.ia_usado ? ' (IA)' : ''}: ${passageiroNome}`,
+      })
+      dispararAlertaNovaDemanda(passageiroNome, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
+      setDemandaCriada(nova)
+      if (persistida.governance?.policy.blocked) {
+        toast.warning(`Demanda ${nova.serial_os || nova.id} criada e bloqueada pela política corporativa.`)
+      } else if (persistida.governance?.approval.required) {
+        toast.info(`Demanda ${nova.serial_os || nova.id} enviada para aprovação.`)
+      } else {
+        toast.success(`Demanda ${nova.serial_os || nova.id} criada!`)
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')
-      setDemandaCriada(nova)
+    } finally {
       setCriandoRapido(false)
-      return
     }
-
-    dispararAlertaNovaDemanda(passageiroNome, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
-    setDemandaCriada(nova)
-    toast.success(`Demanda ${nova.serial_os || nova.id} criada!`)
-    setCriandoRapido(false)
   }
 
   const TIPOS: { value: TipoServico; label: string; icon: any }[] = [

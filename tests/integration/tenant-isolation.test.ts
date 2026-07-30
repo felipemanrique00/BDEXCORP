@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL
+import { testDatabaseUrl } from '../support/test-database'
+
+const databaseUrl = testDatabaseUrl()
 const describeWithDatabase = databaseUrl ? describe : describe.skip
 
 describeWithDatabase('PostgreSQL tenant isolation', () => {

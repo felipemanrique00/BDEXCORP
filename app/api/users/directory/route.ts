@@ -9,6 +9,13 @@ export const dynamic = 'force-dynamic'
 export async function GET(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    permission: 'ver_aprovacoes',
+    authorization: {
+      action: 'list',
+      resource: 'approvals',
+      requiredPermission: 'ver_aprovacoes',
+      allowEmptyCompanyScope: true,
+    },
     rateLimit: { key: 'users-directory:get', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

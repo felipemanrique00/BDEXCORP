@@ -1,13 +1,12 @@
-/* BBT Corporativo - Service Worker V19
+/* BBT Corporativo - Service Worker V20
  *
- * Estratégia: network-first com fallback de cache.
- * Cache leve do shell (logo, manifest, página de login) pra abertura
- * instantânea quando offline.
- *
- * Não cacheia /api/* nem /_next/data/*  (sempre tenta network).
+ * Authenticated HTML, API responses and documents are never cached.
+ * Offline traveler data is opt-in and stored separately by the application.
  */
-const CACHE_VERSION = 'bbt-cache-v19-1'
+const CACHE_VERSION = 'bbt-shell-v20-1'
+const OFFLINE_PAGE = '/offline.html'
 const CORE_ASSETS = [
+  OFFLINE_PAGE,
   '/manifest.webmanifest',
   '/brand/bbt-corporativo-mark.png',
   '/brand/bbt-corporativo-mark-192.png',
@@ -16,12 +15,11 @@ const CORE_ASSETS = [
   '/brand/bbt-corporativo-mark-white.webp',
   '/brand/bbt-corporativo-lockup-color.webp',
   '/brand/bbt-corporativo-lockup-white.webp',
-  '/brand/bbt-corporativo-report-v2.webp',
 ]
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_VERSION).then((cache) => cache.addAll(CORE_ASSETS).catch(() => {}))
+    caches.open(CACHE_VERSION).then((cache) => cache.addAll(CORE_ASSETS))
   )
   self.skipWaiting()
 })
@@ -30,7 +28,9 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
-        keys.filter((k) => k.startsWith('bbt-cache-') && k !== CACHE_VERSION).map((k) => caches.delete(k))
+        keys
+          .filter((key) => key.startsWith('bbt-') && key !== CACHE_VERSION)
+          .map((key) => caches.delete(key))
       )
     )
   )
@@ -38,26 +38,43 @@ self.addEventListener('activate', (event) => {
 })
 
 self.addEventListener('fetch', (event) => {
-  const req = event.request
-  if (req.method !== 'GET') return
+  const request = event.request
+  if (request.method !== 'GET') return
 
-  const url = new URL(req.url)
+  const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
-  // Não cacheia API nem dados internos do Next
-  if (url.pathname.startsWith('/api/')) return
-  if (url.pathname.startsWith('/_next/data/')) return
+  if (
+    url.pathname.startsWith('/api/')
+    || url.pathname.startsWith('/_next/data/')
+    || url.pathname.startsWith('/relatorios/')
+  ) {
+    return
+  }
 
-  // Network-first com fallback de cache
-  event.respondWith(
-    fetch(req)
-      .then((response) => {
-        // Salva clone no cache pros estáticos básicos
-        if (response.ok && (CORE_ASSETS.includes(url.pathname) || url.pathname.startsWith('/_next/static/'))) {
-          const clone = response.clone()
-          caches.open(CACHE_VERSION).then((cache) => cache.put(req, clone)).catch(() => {})
-        }
-        return response
-      })
-      .catch(() => caches.match(req).then((cached) => cached || caches.match('/brand/bbt-corporativo-mark.png')))
-  )
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request).catch(() => caches.match(OFFLINE_PAGE))
+    )
+    return
+  }
+
+  if (url.pathname.startsWith('/_next/static/')) {
+    event.respondWith(cacheFirst(request))
+    return
+  }
+
+  if (CORE_ASSETS.includes(url.pathname)) {
+    event.respondWith(cacheFirst(request))
+  }
 })
+
+async function cacheFirst(request) {
+  const cached = await caches.match(request)
+  if (cached) return cached
+  const response = await fetch(request)
+  if (response.ok) {
+    const cache = await caches.open(CACHE_VERSION)
+    await cache.put(request, response.clone())
+  }
+  return response
+}

@@ -11,9 +11,9 @@ import { runTravelAgent, shouldHandleTravelAgent } from '@/lib/ai-travel-orchest
 import { deveUsarPesquisaTempoReal, pesquisarWebComIA } from '@/lib/ia-web-search'
 import { AI_NAME } from '@/lib/branding'
 import { encontrarFuncionarioConfiavel, encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
+import type { AiActionProposal, PrepareAiAction } from '@/lib/ai-actions'
 import {
   getSupplierIntegrations,
-  prepararAcaoFornecedor,
   selectSuppliersForService,
   supplierSummaryForAI,
   type SupplierService,
@@ -51,12 +51,12 @@ export interface SystemAIResponse {
   links?: SystemAILink[]
   cards?: SystemAICard[]
   sources?: Array<{ title?: string; uri?: string }>
+  actionProposals?: AiActionProposal[]
   provedor?: ProvedorIA | 'sistema'
 }
 
-interface SystemAIOps {
-  addHotel?: (hotel: Omit<Hotel, 'id'>) => void
-  createAtendimento?: (data: Omit<Atendimento, 'id' | 'created_at' | 'updated_at'>) => Atendimento | null
+export interface SystemAIOps {
+  prepareAction?: PrepareAiAction
   currentUser?: { id: string; name?: string }
   politicas?: PoliticaCargo[]
   allowInternet?: boolean
@@ -313,22 +313,6 @@ function fluxoFornecedor(pergunta: string, ctx: SystemAIContext): SystemAIRespon
   const lista = fornecedores.length ? fornecedores : all.slice(0, 10)
 
   const wantsAction = /(cotar|cotacao|cotação|reservar|reserva|emitir|emissao|emissão|status|testar|consultar|pesquisar)/.test(q)
-  const actionLogs = wantsAction && service
-    ? prepararAcaoFornecedor({
-        service,
-        action: /emitir|emissao|emissão/.test(q)
-          ? 'emissao'
-          : /reservar|reserva/.test(q)
-          ? 'reserva'
-          : /status|testar/.test(q)
-          ? 'status'
-          : 'cotacao',
-        destino: extrairDestino(pergunta) || undefined,
-        data_inicio: extrairData(pergunta) || undefined,
-        payload: { pergunta },
-      })
-    : []
-
   const ativos = all.filter((s) => s.status === 'ativo').length
   const apiPendentes = all.filter((s) => s.modo === 'api' && s.status === 'pendente_configuracao').length
 
@@ -339,11 +323,11 @@ function fluxoFornecedor(pergunta: string, ctx: SystemAIContext): SystemAIRespon
     message: [
       `Tenho ${all.length} fornecedor(es) configurados no hub: ${ativos} ativo(s) e ${apiPendentes} aguardando credenciais/API.`,
       service ? `Para ${serviceLabelIA(service)}, vou priorizar: ${lista.map((s) => s.nome).slice(0, 6).join(', ')}.` : '',
-      actionLogs.length
-        ? `Preparei ${actionLogs.length} acao(oes) operacional(is) em Reservas e cotacoes para voce revisar e seguir.`
+      wantsAction
+        ? 'Identifiquei o fluxo e os fornecedores elegiveis. Abra Reservas e cotacoes para revisar dados, disponibilidade e valores antes de executar.'
         : 'Posso preparar cotacao, reserva, emissao, voucher, importacao e consulta de status conforme a capacidade de cada fornecedor.',
       '',
-      'Quando houver API contratada, a execucao fica automatica. Quando o fornecedor operar por portal, deixo o rascunho pronto e abro o fluxo assistido para o operador confirmar sem inventar tarifa ou reserva.',
+      'Nenhuma reserva, emissao ou operacao foi criada por esta consulta. Toda acao com efeito exige confirmacao humana e validacao no servidor.',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -367,13 +351,13 @@ async function fluxoCriarDemanda(pergunta: string, ctx: SystemAIContext, ops: Sy
     return null
   }
 
-  if (!ops.createAtendimento || !ops.currentUser) {
+  if (!ops.prepareAction) {
     return {
       handled: true,
       title: 'Criar demanda',
-      badge: 'Ação disponível',
+      badge: 'Confirmação necessária',
       message:
-        'Consigo interpretar a demanda e abrir o cadastro. Para salvar automaticamente, use o popup rápido da IA no dashboard, que tem acesso de gravação ao sistema.',
+        'Consigo interpretar e preparar a demanda, mas a execução segura não está disponível nesta tela. Abra a Central IA para revisar e confirmar a operação.',
       links: [{ label: 'Abrir Caixa de Entrada', href: '/dashboard/caixa-entrada', kind: 'primary' }],
       provedor: 'sistema',
     }
@@ -406,7 +390,7 @@ async function fluxoCriarDemanda(pergunta: string, ctx: SystemAIContext, ops: Sy
 
   const tipo = normalizarTipoServicoIA(parsed.tipo_servico || inferirTipoServico(pergunta))
   const passageiro = parsed.passageiro_nome || funcionario?.nome || extrairNomeGenerico(pergunta) || 'Passageiro não informado'
-  const atendimento = ops.createAtendimento({
+  const demanda = {
     empresa_id: empresa.id,
     funcionario_id: funcionario?.id || null,
     passageiro_nome: passageiro,
@@ -415,7 +399,7 @@ async function fluxoCriarDemanda(pergunta: string, ctx: SystemAIContext, ops: Sy
     valor_final: parsed.valor_diaria || 0,
     valor_custo: 0,
     valor_venda: parsed.valor_diaria || 0,
-    agente_user_id: ops.currentUser.id,
+    agente_user_id: ops.currentUser?.id || '',
     status: 'pendente',
     prioridade: parsed.urgente ? 'urgente' : 'media',
     origem: 'Outro',
@@ -459,35 +443,31 @@ async function fluxoCriarDemanda(pergunta: string, ctx: SystemAIContext, ops: Sy
             data_volta: parsed.data_volta || parsed.data_checkout || undefined,
           }
         : undefined,
-  })
-
-  if (!atendimento) {
-    return {
-      handled: true,
-      title: 'Falha ao criar demanda',
-      message: 'Interpretei a solicitação, mas o navegador não conseguiu gravar no banco local.',
-      provedor: parsed.provedor || 'sistema',
-    }
   }
+  const proposal = await ops.prepareAction({
+    actionType: 'create_demand',
+    companyId: empresa.id,
+    summary: `Criar demanda de ${passageiro}`,
+    payload: { demand: demanda, submit: true },
+    expiresInMinutes: 30,
+  })
 
   return {
     handled: true,
-    title: `Demanda criada`,
-    badge: 'IA gravou no sistema',
+    title: 'Demanda preparada',
+    badge: 'Aguardando sua confirmação',
     message: [
-      `Criei a demanda de **${atendimento.passageiro_nome}**.`,
+      `Preparei a demanda de **${passageiro}**.`,
       `Empresa: ${empresa.nome}.`,
-      `Tipo: ${atendimento.tipo_servico}. Prioridade: ${atendimento.prioridade}.`,
+      `Tipo: ${tipo}. Prioridade: ${parsed.urgente ? 'urgente' : 'media'}.`,
       parsed.cidade_destino ? `Destino: ${parsed.cidade_destino}.` : '',
       parsed.data_checkin || parsed.data_ida ? `Data principal: ${formatarDataBR(parsed.data_checkin || parsed.data_ida || '')}.` : '',
-      'Ela já entra na base unificada de demandas e fica disponível para busca da IA e criação de voucher.',
+      'Revise os dados abaixo. Nada será gravado até você confirmar; o servidor validará empresa, permissão, política e identidade novamente.',
     ]
       .filter(Boolean)
       .join('\n'),
-    links: [
-      { label: 'Abrir demandas', href: '/dashboard/demandas', kind: 'primary' },
-      { label: 'Criar voucher', href: `/dashboard/vouchers/novo?atendimento=${atendimento.id}`, kind: 'secondary' },
-    ],
+    links: [{ label: 'Abrir demandas', href: '/dashboard/demandas', kind: 'secondary' }],
+    actionProposals: [proposal],
     provedor: parsed.provedor || 'sistema',
   }
 }
@@ -805,14 +785,20 @@ async function fluxoHotelInteligente(pergunta: string, ctx: SystemAIContext, ops
   }
 
   const novas = response.suggestions.filter((s) => !hotelJaExiste(ctx.hoteis, s.nome, s.cidade, s.uf))
-  const deveCadastrar = Boolean(ops.addHotel) && /(cadastre|cadastrar|incluir|demanda|hospedagem|preciso|nao tem|não tem|sem hotel)/i.test(pergunta)
-  const cadastradas: HotelAISuggestion[] = []
-  if (deveCadastrar) {
-    novas.slice(0, 3).forEach((s) => {
-      ops.addHotel?.(sugestaoParaHotel(s))
-      cadastradas.push(s)
-    })
-  }
+  const deveCadastrar = Boolean(ops.prepareAction)
+    && /(cadastre|cadastrar|incluir|demanda|hospedagem|preciso|nao tem|não tem|sem hotel)/i.test(pergunta)
+  const actionProposals = deveCadastrar
+    ? await Promise.all(
+        novas.slice(0, 3).map((suggestion) =>
+          ops.prepareAction!({
+            actionType: 'create_hotel',
+            summary: `Cadastrar hotel ${suggestion.nome}`,
+            payload: sugestaoParaHotel(suggestion),
+            expiresInMinutes: 30,
+          }),
+        ),
+      )
+    : []
 
   return {
     handled: true,
@@ -820,10 +806,10 @@ async function fluxoHotelInteligente(pergunta: string, ctx: SystemAIContext, ops
     badge: response.source === 'gemini-google' ? 'Gemini Google Search' : response.source === 'openai-web' ? 'GPT-5.2 Web Search' : 'Catalogo cadastrado',
     message: [
       response.summary,
-      cadastradas.length
-        ? `Cadastrei automaticamente ${cadastradas.length} hotel(is) novo(s) no modulo Hoteis.`
+      actionProposals.length
+        ? `Preparei ${actionProposals.length} cadastro(s) de hotel para sua revisão. Nenhum hotel foi gravado ainda.`
         : novas.length
-        ? 'Encontrei opcoes novas. Para cadastrar automaticamente, peça: "cadastre esses hoteis".'
+        ? 'Encontrei opcoes novas. Para preparar o cadastro, peça: "cadastre esses hoteis".'
         : 'Nao cadastrei duplicados; os principais resultados ja parecem existir na base.',
     ].join('\n'),
     links: [{ label: 'Ver em Hoteis', href: `/dashboard/hoteis?busca=${encodeURIComponent(destino || nomeHotel || pergunta)}`, kind: 'primary' }],
@@ -834,6 +820,7 @@ async function fluxoHotelInteligente(pergunta: string, ctx: SystemAIContext, ops
       href: h.fonte_url || `/dashboard/hoteis?busca=${encodeURIComponent(h.nome)}`,
     })),
     sources: response.citations,
+    actionProposals,
     provedor: response.source === 'gemini-google' ? 'gemini' : response.source === 'openai-web' ? 'openai' : 'sistema',
   }
 }

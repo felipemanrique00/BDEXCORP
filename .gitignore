@@ -14,6 +14,7 @@ build/
 .bbt-storage/
 .server-backups/
 .server-runtime/
+.runtime/
 .DS_Store
 *.log
 *.tsbuildinfo

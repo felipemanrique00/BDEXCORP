@@ -22,9 +22,9 @@ describe('storage hydration plan', () => {
     expect(result).toEqual(expect.arrayContaining([
       'bbt-data-v4',
       'bbt-atendimentos',
-      'bbt-transferencias',
       'bbt-vouchers-emitidos',
     ]))
+    expect(result).not.toContain('bbt-transferencias')
     expect(result).not.toContain('bbt-corporate-finance')
   })
 
@@ -49,12 +49,24 @@ describe('storage hydration plan', () => {
     expect(new Set(result)).toEqual(new Set(RESETTABLE_SHARED_STORAGE_KEYS))
   })
 
-  it('loads assistant data only in assistant modules', () => {
+  it('keeps server-managed assistant data out of browser hydration', () => {
     const regular = storageKeysForDashboardPath('/dashboard/usuarios')
     const assistant = storageKeysForDashboardPath('/dashboard/ia-chat')
 
     expect(regular).not.toContain('bbt-assistant-conversations-v1')
-    expect(assistant).toContain('bbt-assistant-conversations-v1')
+    expect(assistant.some((key) => key.startsWith('bbt-assistant-'))).toBe(false)
+    expect(assistant.some((key) => key.startsWith('bbt-ai-agent-'))).toBe(false)
+    expect(assistant).not.toContain('bbt-ia-chat-historico-v12')
+    expect(assistant).not.toContain('bbt-ia-config-v12')
+    expect(assistant).not.toContain('bbt-resumos-executivos-v12')
+    expect(assistant).not.toContain('bbt-travel-desk-v11')
     expect(assistant).toContain('bbt-atendimentos')
+  })
+
+  it('keeps server-managed communication history out of dashboard hydration', () => {
+    const dashboard = storageKeysForDashboardPath('/dashboard')
+
+    expect(dashboard).not.toContain('bbt-mensagens-thread')
+    expect(dashboard).not.toContain('bbt-travel-desk-v11')
   })
 })

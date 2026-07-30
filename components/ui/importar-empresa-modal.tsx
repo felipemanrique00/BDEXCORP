@@ -5,21 +5,47 @@ import { Modal } from '@/components/ui/modal'
 import { toast } from 'sonner'
 import {
   Upload, FileSpreadsheet, FileText as FileIcon, Loader2, CheckCircle2,
-  AlertTriangle, ChevronRight, Sparkles, X, RotateCcw,
+  AlertTriangle, ChevronRight, Sparkles, RotateCcw,
 } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { getCurrentUser, getAgentesBBT } from '@/lib/auth'
-import { addAtendimento, updateAtendimento, getAllAtendimentos } from '@/lib/atendimentos-storage'
+import {
+  atualizarAtendimentoNaLista,
+  criarAtendimentoParaLista,
+  getAllAtendimentos,
+  persistirAtendimentos,
+  persistirAtendimentosRecebidosDoServidor,
+  updateAtendimento,
+} from '@/lib/atendimentos-storage'
 import {
   iniciarTransacao, commitarTransacao, registrarEvento, reverterTransacao,
   registrarExecutorRollback,
 } from '@/lib/audit'
 import {
-  resolverFuncionario, detectarDuplicata, adicionarItemFila,
+  criarIndiceDuplicatas,
+  detectarDuplicataNoIndice,
+  indexarAtendimentoDuplicado,
+  resolverFuncionario,
 } from '@/lib/import-pipeline'
+import {
+  createDemandImportBatchKey,
+  DemandClientError,
+  importDemandBatchesOnServer,
+  rollbackDemandImportOnServer,
+} from '@/lib/demands-client'
 import { parsePDFEmissoes } from '@/lib/emissoes-pdf-parser'
 import { parsePlanilhaEmissoes } from '@/lib/emissoes-parser'
-import { gerarLancamentosDoAtendimento } from '@/lib/financeiro'
+import {
+  gerarLancamentosDoAtendimento,
+  listarAtendimentosComLancamentosLiquidados,
+  removerLancamentosNaoLiquidadosPorAtendimentos,
+} from '@/lib/financeiro'
+import {
+  createFinancialDemandSyncKey,
+  FinanceClientError,
+  loadFinancialEntriesFromServer,
+  syncFinancialEntriesFromDemandsOnServer,
+} from '@/lib/finance-persistence-client'
 import { commitPendingRemoteStorage, loadJSON, safeSetJSON } from '@/lib/storage-quota'
 import {
   normalizarNome, normalizarValor, normalizarData, normalizarTipoServico,
@@ -84,6 +110,10 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
     ignoradas: number
     erros: number
     tx_id?: string
+    import_job_ids?: string[]
+    created_demand_ids?: string[]
+    relational?: boolean
+    financial_relational?: boolean
   } | null>(null)
 
   function reset() {
@@ -141,6 +171,7 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
 
       // Pré-análise
       const existentes = getAllAtendimentos()
+      const indiceDuplicatas = criarIndiceDuplicatas(existentes)
       let novas = 0, duplicadas = 0, sem_passageiro = 0
       let funcionarios_resolvidos = 0, funcionarios_nao_resolvidos = 0
       let valor_total = 0
@@ -150,7 +181,7 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
         if (!passageiro) { sem_passageiro++; continue }
 
         const venda = l.venda_numero
-        const dup = detectarDuplicata(existentes, {
+        const dup = detectarDuplicataNoIndice(indiceDuplicatas, {
           venda_numero: venda,
           passageiro,
           data: normalizarData(l.data_venda || ''),
@@ -183,13 +214,13 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
     if (!user || !dadosBrutos) return
     setFase('importando')
 
-    const txId = iniciarTransacao({
-      user_id: user.id,
-      user_name: user.name,
-      descricao: `Importação ${empresa.nome} (${dadosBrutos.length} linhas)`,
-    })
-
     const existentes = getAllAtendimentos()
+    const proximaLista = existentes.slice()
+    const indicePorId = new Map(proximaLista.map((atendimento, index) => [atendimento.id, index]))
+    const indiceDuplicatas = criarIndiceDuplicatas(proximaLista)
+    const alteradasPorId = new Map<string, Atendimento>()
+    const anterioresPorId = new Map<string, Atendimento>()
+    const criadasIds = new Set<string>()
     const agentes = getAgentesBBT()
 
     let criadas = 0, atualizadas = 0, ignoradas = 0, erros = 0
@@ -231,7 +262,7 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
         }
 
         const venda = l.venda_numero
-        const dup = detectarDuplicata(existentes, {
+        const dup = detectarDuplicataNoIndice(indiceDuplicatas, {
           venda_numero: venda,
           passageiro,
           data: dataVenda,
@@ -269,40 +300,26 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
         }
 
         if (dup) {
-          const estadoAnterior = { ...dup }
-          const ok = updateAtendimento(dup.id, payload)
-          if (ok) {
-            registrarEvento({
-              user_id: user.id,
-              user_name: user.name,
-              acao: 'atualizar',
-              entidade: 'Atendimento',
-              entidade_id: dup.id,
-              descricao: `Atualizado via importação: ${passageiro}`,
-              tx_id: txId,
-              estado_anterior: estadoAnterior,
-              estado_novo: payload,
-            })
+          if (!anterioresPorId.has(dup.id)) anterioresPorId.set(dup.id, { ...dup })
+          const atualizado = atualizarAtendimentoNaLista(
+            proximaLista,
+            dup.id,
+            payload,
+            indicePorId,
+          )
+          if (atualizado) {
+            alteradasPorId.set(atualizado.id, atualizado)
+            indexarAtendimentoDuplicado(indiceDuplicatas, atualizado)
             atualizadas++
           } else { erros++ }
         } else {
-          const novo = addAtendimento(payload as any)
-          if (novo) {
-            registrarEvento({
-              user_id: user.id,
-              user_name: user.name,
-              acao: 'importar',
-              entidade: 'Atendimento',
-              entidade_id: novo.id,
-              descricao: `Criado via importação: ${passageiro}`,
-              tx_id: txId,
-            })
-            // Gera lançamentos financeiros se finalizado
-            if (novo.status === 'finalizado') {
-              gerarLancamentosDoAtendimento(novo, empresa)
-            }
-            criadas++
-          } else { erros++ }
+          const novo = criarAtendimentoParaLista(payload as any, proximaLista)
+          proximaLista.push(novo)
+          indicePorId.set(novo.id, proximaLista.length - 1)
+          indexarAtendimentoDuplicado(indiceDuplicatas, novo)
+          alteradasPorId.set(novo.id, novo)
+          criadasIds.add(novo.id)
+          criadas++
         }
       } catch (e) {
         console.error('Erro processando linha:', e)
@@ -310,9 +327,120 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
       }
     }
 
-    commitarTransacao(txId, { criadas, atualizadas, ignoradas, erros })
+    const demandasAlteradas = Array.from(alteradasPorId.values())
+    if (!demandasAlteradas.length) {
+      setResultado({ criadas, atualizadas, ignoradas, erros })
+      setFase('concluido')
+      onCompleto?.({ criadas, atualizadas, ignoradas })
+      return
+    }
 
     try {
+      await commitPendingRemoteStorage()
+      const importacao = await importDemandBatchesOnServer(
+        demandasAlteradas,
+        'company_import',
+        createDemandImportBatchKey('company_import', demandasAlteradas),
+      )
+      const servidorPorId = new Map(importacao.demands.map((demanda) => [demanda.id, demanda]))
+      const listaSincronizada = proximaLista.map((demanda) => servidorPorId.get(demanda.id) || demanda)
+      for (const demanda of importacao.demands) {
+        if (!indicePorId.has(demanda.id)) listaSincronizada.push(demanda)
+      }
+      if (!persistirAtendimentosRecebidosDoServidor(listaSincronizada)) {
+        throw new Error('O servidor confirmou o lote, mas a projeção local não pôde ser atualizada.')
+      }
+
+      const novasConfirmadas = importacao.demands.filter((demanda) =>
+        criadasIds.has(demanda.id) && demanda.status === 'finalizado'
+      )
+      let financialRelational = false
+      if (novasConfirmadas.length) {
+        const ids = novasConfirmadas.map((demanda) => demanda.id)
+        const stateFingerprint = novasConfirmadas
+          .map((demanda) => [
+            demanda.id,
+            demanda.updated_at || '',
+            demanda.status,
+            demanda.valor_venda || demanda.valor_final || demanda.valor_cotacao || 0,
+            demanda.valor_custo || 0,
+          ].join('|'))
+          .sort()
+          .join('\n')
+        try {
+          await syncFinancialEntriesFromDemandsOnServer(
+            ids,
+            createFinancialDemandSyncKey('company-import', ids, stateFingerprint),
+          )
+          financialRelational = true
+        } catch (error) {
+          if (
+            !(error instanceof FinanceClientError)
+            || error.code !== 'FINANCE_RELATIONAL_WRITE_DISABLED'
+          ) {
+            throw error
+          }
+          novasConfirmadas.forEach((demanda) =>
+            gerarLancamentosDoAtendimento(demanda, empresa)
+          )
+          await commitPendingRemoteStorage()
+        }
+      }
+
+      const resumo = {
+        criadas: importacao.inserted,
+        atualizadas: importacao.updated,
+        ignoradas: ignoradas + importacao.skipped,
+        erros: erros + importacao.failures.length,
+      }
+      setResultado({
+        ...resumo,
+        import_job_ids: importacao.jobIds,
+        created_demand_ids: Array.from(criadasIds),
+        relational: true,
+        financial_relational: financialRelational,
+      })
+      setFase('concluido')
+      onCompleto?.(resumo)
+      return
+    } catch (error) {
+      if (!(error instanceof DemandClientError) || error.code !== 'DEMAND_RELATIONAL_WRITE_DISABLED') {
+        toast.error(error instanceof Error ? error.message : 'A importação não foi confirmada no servidor.')
+        setFase('preview')
+        return
+      }
+    }
+
+    const txId = iniciarTransacao({
+      user_id: user.id,
+      user_name: user.name,
+      descricao: `Importação ${empresa.nome} (${dadosBrutos.length} linhas)`,
+    })
+    if (!persistirAtendimentos(proximaLista)) {
+      toast.error('Não foi possível preparar a importação no modo legado.')
+      setFase('preview')
+      return
+    }
+    for (const demanda of demandasAlteradas) {
+      const criada = criadasIds.has(demanda.id)
+      registrarEvento({
+        user_id: user.id,
+        user_name: user.name,
+        acao: criada ? 'importar' : 'atualizar',
+        entidade: 'Atendimento',
+        entidade_id: demanda.id,
+        descricao: `${criada ? 'Criado' : 'Atualizado'} via importação: ${demanda.passageiro_nome}`,
+        tx_id: txId,
+        estado_anterior: criada ? undefined : anterioresPorId.get(demanda.id),
+        estado_novo: demanda,
+      })
+    }
+    commitarTransacao(txId, { criadas, atualizadas, ignoradas, erros })
+    try {
+      await commitPendingRemoteStorage()
+      demandasAlteradas
+        .filter((demanda) => criadasIds.has(demanda.id) && demanda.status === 'finalizado')
+        .forEach((demanda) => gerarLancamentosDoAtendimento(demanda, empresa))
       await commitPendingRemoteStorage()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'A importação não foi confirmada no servidor.')
@@ -320,13 +448,67 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
       return
     }
 
-    setResultado({ criadas, atualizadas, ignoradas, erros, tx_id: txId })
+    setResultado({
+      criadas,
+      atualizadas,
+      ignoradas,
+      erros,
+      tx_id: txId,
+      created_demand_ids: Array.from(criadasIds),
+      relational: false,
+    })
     setFase('concluido')
     onCompleto?.({ criadas, atualizadas, ignoradas })
   }
 
   async function desfazerImportacao() {
-    if (!resultado?.tx_id || !user) return
+    if (!resultado || !user) return
+    if (resultado.relational && resultado.import_job_ids?.length) {
+      if (!resultado.financial_relational) {
+        const liquidados = listarAtendimentosComLancamentosLiquidados(
+          resultado.created_demand_ids || [],
+        )
+        if (liquidados.length) {
+          toast.error('Não é possível desfazer: há lançamento pago ou parcialmente pago nesse lote.')
+          return
+        }
+      }
+      try {
+        const reversao = await rollbackDemandImportOnServer(
+          resultado.import_job_ids,
+          `Reversão solicitada por ${user.name} na importação da empresa ${empresa.nome}.`,
+        )
+        const removidos = new Set(reversao.removedDemandIds)
+        const restaurados = new Map(reversao.demands.map((demanda) => [demanda.id, demanda]))
+        const listaAtual = getAllAtendimentos()
+          .filter((demanda) => !removidos.has(demanda.id))
+          .map((demanda) => restaurados.get(demanda.id) || demanda)
+        const idsAtuais = new Set(listaAtual.map((demanda) => demanda.id))
+        for (const demanda of reversao.demands) {
+          if (!idsAtuais.has(demanda.id)) listaAtual.push(demanda)
+        }
+        if (!persistirAtendimentosRecebidosDoServidor(listaAtual)) {
+          throw new Error('A reversão foi confirmada, mas a projeção local não pôde ser atualizada.')
+        }
+        if (resultado.financial_relational) {
+          await loadFinancialEntriesFromServer()
+        } else {
+          removerLancamentosNaoLiquidadosPorAtendimentos(reversao.removedDemandIds)
+          await commitPendingRemoteStorage()
+        }
+        toast.success(`Reversão concluída: ${reversao.removed} removida(s), ${reversao.restored} restaurada(s).`)
+        onCompleto?.({
+          criadas: -reversao.removed,
+          atualizadas: reversao.restored,
+          ignoradas: 0,
+        })
+        onClose()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Não foi possível desfazer a importação.')
+      }
+      return
+    }
+    if (!resultado.tx_id) return
     const r = reverterTransacao(resultado.tx_id, user.id, user.name)
     try {
       await commitPendingRemoteStorage()
@@ -423,7 +605,7 @@ export function ImportarEmpresaModal({ open, onClose, empresa, onCompleto }: Pro
             <Stat label="Erros" valor={resultado.erros} cor={resultado.erros > 0 ? 'text-red-600' : 'text-slate-400'} />
           </div>
           <div className="flex gap-2 justify-end pt-3 border-t border-bbt-gray-100 dark:border-slate-700">
-            {resultado.tx_id && (
+            {(resultado.tx_id || resultado.import_job_ids?.length) && (
               <button
                 onClick={desfazerImportacao}
                 className="bbt-button-ghost text-red-600 hover:bg-red-50 flex items-center gap-2"

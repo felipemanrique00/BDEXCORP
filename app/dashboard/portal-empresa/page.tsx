@@ -11,7 +11,7 @@ import { addDaysISODate, todayISODate } from '@/lib/date'
  *  - Layout mobile-first, cards com hover, animações suaves
  *  - Conectado: usa store, atendimentos, vouchers, financeiro, ESG, alertas
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { toast } from 'sonner'
 import {
@@ -25,8 +25,9 @@ import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 
-import { canEditGlobal, getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
-import { addAtendimento, getAllAtendimentos } from '@/lib/atendimentos-storage'
+import { canEditGlobal, getCurrentUser, getEmpresasPermitidas, hasPermission } from '@/lib/auth'
+import { getAllAtendimentos } from '@/lib/atendimentos-storage'
+import { persistNewDemandWithCompatibility } from '@/lib/demand-persistence-client'
 import {
   atualizarCarteiraEmpresa,
   criarCartaoCorporativo,
@@ -34,7 +35,17 @@ import {
   registrarMovimentoCarteira,
   resumoCarteiraEmpresa,
 } from '@/lib/corporate-finance'
+import {
+  CORPORATE_FINANCE_RELATIONAL_WRITE_DISABLED,
+  CorporateFinanceClientError,
+  configureCorporateWalletOnServer,
+  createCorporateCardOnServer,
+  createCorporateFinanceOperationKey,
+  createCorporateWalletMovementOnServer,
+  loadCorporateFinanceFromServer,
+} from '@/lib/corporate-finance-client'
 import { getAllLancamentos } from '@/lib/financeiro'
+import { loadFinancialEntriesFromServer } from '@/lib/finance-persistence-client'
 import { getSolicitantePorEmail, getSolicitantesPorEmpresa } from '@/lib/solicitantes-storage'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { getOperationalAlerts } from '@/lib/operational-alerts'
@@ -52,6 +63,7 @@ import type { Atendimento, CartaoCorporativo, Empresa, Prioridade, TipoServico }
 import { filtrarPeriodo, montarMetricasRelatorio, montarRelatorioOperacional } from '@/lib/relatorios'
 import { createEntityId } from '@/lib/ids'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { useCorporateCompanyScope, useCorporateContext } from '@/components/corporate-context-provider'
 
 type Aba = 'home' | 'empresa' | 'viagens' | 'pedidos' | 'vouchers' | 'financeiro' | 'carteira' | 'relatorios' | 'pegada'
 type EscopoPortal = 'empresa' | 'grupo'
@@ -97,6 +109,8 @@ function montarResumoCarteiraEscopo(empresas: Array<Pick<Empresa, 'id'>>) {
 
 export default function PortalEmpresaPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const { context: corporateContext, selectContext } = useCorporateContext()
+  const { includesCompany } = useCorporateCompanyScope()
   const isGlobalMaster = canEditGlobal(user)
   const isInternalUser = user?.role === 'master'
   const { empresas, funcionarios, politicas, gruposEmpresariais } = useStore()
@@ -111,9 +125,24 @@ export default function PortalEmpresaPage() {
     [empresas, gruposEmpresariais, user],
   )
   const gruposVisiveis = useMemo(
-    () => gruposEmpresariais.filter((grupo) => getEmpresasDoGrupo(grupo.id, empresasVisiveis, gruposEmpresariais).length > 0),
-    [empresasVisiveis, gruposEmpresariais],
+    () => gruposEmpresariais.filter((grupo) => {
+      const corporateGroup = user?.corporate_access?.groups.find((access) => access.groupId === grupo.id)
+      return getEmpresasDoGrupo(grupo.id, empresasVisiveis, gruposEmpresariais).length > 0 &&
+        (!user?.corporate_access || corporateGroup?.canViewConsolidated === true)
+    }),
+    [empresasVisiveis, gruposEmpresariais, user?.corporate_access],
   )
+
+  useEffect(() => {
+    if (!corporateContext) return
+    if (corporateContext.type === 'group') {
+      setEscopo('grupo')
+      setGrupoId(corporateContext.id)
+    } else {
+      setEscopo('empresa')
+      setEmpresaId(corporateContext.id)
+    }
+  }, [corporateContext])
 
   useEffect(() => {
     if (!empresaId && empresasVisiveis[0]) setEmpresaId(empresasVisiveis[0].id)
@@ -173,9 +202,48 @@ export default function PortalEmpresaPage() {
       ? getSolicitantePorEmail(user.company_id, user.email)
       : null
   const solicitanteBloqueado = solicitanteAtual?.status === 'bloqueado'
-  const podeCriarPedido = (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_criar_demanda) && escopo === 'empresa'
-  const podeVerVouchers = isInternalUser || !solicitanteAtual || solicitanteAtual.pode_ver_vouchers
-  const podeVerFinanceiro = isInternalUser || Boolean(solicitanteAtual?.pode_ver_financeiro)
+  const podeCriarPedido = hasPermission(user, 'criar_demandas') && includesCompany(empresaId, 'criar_demandas') &&
+    (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_criar_demanda) && escopo === 'empresa'
+  const podeVerVouchers = hasPermission(user, 'ver_vouchers') && empresasEscopo.some((empresa) => (
+    includesCompany(empresa.id, 'ver_vouchers')
+  )) &&
+    (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_ver_vouchers)
+  const podeVerFinanceiro = hasPermission(user, 'ver_financeiro') && empresasEscopo.some((empresa) => (
+    includesCompany(empresa.id, 'ver_financeiro')
+  )) &&
+    (isInternalUser || !solicitanteAtual || Boolean(solicitanteAtual.pode_ver_financeiro))
+  const empresaIdsFinanceiro = useMemo(
+    () => new Set(empresasEscopo
+      .filter((empresa) => includesCompany(empresa.id, 'ver_financeiro'))
+      .map((empresa) => empresa.id)),
+    [empresasEscopo, includesCompany],
+  )
+  const empresaIdsFinanceiroKey = [...empresaIdsFinanceiro].sort().join('|')
+
+  useEffect(() => {
+    if (!podeVerFinanceiro || !empresaIdsFinanceiroKey) return
+    let active = true
+    void Promise.allSettled([
+      loadFinancialEntriesFromServer(),
+      loadCorporateFinanceFromServer(),
+    ])
+      .then((results) => {
+        if (!active) return
+        results.forEach((result) => {
+          if (result.status === 'rejected') {
+            toast.error(
+              result.reason instanceof Error
+                ? result.reason.message
+                : 'Falha ao carregar o financeiro do portal.',
+            )
+          }
+        })
+        setReload((value) => value + 1)
+      })
+    return () => {
+      active = false
+    }
+  }, [empresaIdsFinanceiroKey, podeVerFinanceiro])
 
   const atendimentos = useMemo(
     () => getAllAtendimentos().filter((a) => empresaIdsEscopo.has(a.empresa_id)),
@@ -188,14 +256,14 @@ export default function PortalEmpresaPage() {
     [empresaIdsEscopo, reload],
   )
   const lancamentos = useMemo(
-    () => getAllLancamentos().filter((l) => Boolean(l.empresa_id) && empresaIdsEscopo.has(l.empresa_id!)),
+    () => getAllLancamentos().filter((l) => Boolean(l.empresa_id) && empresaIdsFinanceiro.has(l.empresa_id!)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [empresaIdsEscopo, reload],
+    [empresaIdsFinanceiro, reload],
   )
   const carteira = useMemo(
-    () => montarResumoCarteiraEscopo(empresasEscopo),
+    () => montarResumoCarteiraEscopo(empresasEscopo.filter((empresa) => empresaIdsFinanceiro.has(empresa.id))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [empresasEscopo, reload],
+    [empresaIdsFinanceiro, empresasEscopo, reload],
   )
   const alertas = useMemo(
     () => getOperationalAlerts({ atendimentos, vouchers }),
@@ -329,7 +397,12 @@ export default function PortalEmpresaPage() {
                   <select
                     id="portal-scope"
                     value={escopo}
-                    onChange={(e) => setEscopo(e.target.value as EscopoPortal)}
+                    onChange={(e) => {
+                      const next = e.target.value as EscopoPortal
+                      setEscopo(next)
+                      if (next === 'grupo' && gruposVisiveis[0]) selectContext('group', gruposVisiveis[0].id)
+                      if (next === 'empresa' && empresasVisiveis[0]) selectContext('company', empresasVisiveis[0].id)
+                    }}
                     className="mt-1 h-10 w-full rounded-lg border border-white/15 bg-white/10 px-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40"
                   >
                     <option value="empresa" className="bg-[#071747]">Empresa</option>
@@ -344,7 +417,10 @@ export default function PortalEmpresaPage() {
                     <select
                       id="portal-entity"
                       value={grupoId}
-                      onChange={(e) => setGrupoId(e.target.value)}
+                      onChange={(e) => {
+                        setGrupoId(e.target.value)
+                        selectContext('group', e.target.value)
+                      }}
                       className="mt-1 h-10 w-full rounded-lg border border-white/15 bg-white/10 px-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40"
                     >
                       {gruposVisiveis.map((grupo) => (
@@ -355,7 +431,10 @@ export default function PortalEmpresaPage() {
                     <select
                       id="portal-entity"
                       value={empresaId}
-                      onChange={(e) => setEmpresaId(e.target.value)}
+                      onChange={(e) => {
+                        setEmpresaId(e.target.value)
+                        selectContext('company', e.target.value)
+                      }}
                       className="mt-1 h-10 w-full rounded-lg border border-white/15 bg-white/10 px-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40"
                     >
                       {empresasVisiveis.map((empresa) => (
@@ -1146,9 +1225,7 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
           : { detalhes_pacote: { destino: destino.trim(), data_ida: dataInicio, data_volta: dataFim, descricao: observacoes } }),
         created_at: new Date().toISOString(),
       }
-      const atendimento = addAtendimento(novo)
-      if (!atendimento) throw new Error('Falha ao preparar o pedido.')
-      await commitPendingRemoteStorage()
+      const atendimento = (await persistNewDemandWithCompatibility(novo)).demand
       toast.success('Pedido enviado! A BBT já recebeu.')
       setPassageiro(''); setOrigem(''); setDestino(''); setDataInicio(''); setDataFim(''); setObservacoes(''); setFuncId(''); setFuncCodigo('')
       onSaved()
@@ -1655,6 +1732,9 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
 
 function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onChanged }: any) {
   const currentUser = typeof window !== 'undefined' ? getCurrentUser() : null
+  const { includesCompany } = useCorporateCompanyScope()
+  const podeEditar = includesCompany(empresaId, 'editar_financeiro')
+  const pendingOperationKeys = useRef(new Map<string, string>())
   const carteira = resumo?.carteira
   const cartoes = (resumo?.cartoes || []) as CartaoCorporativo[]
   const faturas = resumo?.faturas || []
@@ -1695,60 +1775,127 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
     onChanged?.()
   }
 
-  async function ativarCarteira() {
-    const base = garantirCarteiraEmpresa(empresaId)
-    const ok = atualizarCarteiraEmpresa(base.id, {
-      status: 'ativa',
-      pix_habilitado: false,
-      cartao_habilitado: false,
-      limite_credito: Math.max(0, limiteCredito),
-      limite_pix_diario: Math.max(0, limitePix),
-      limite_cartao_mensal: Math.max(0, limiteCartao),
-      provedor: 'pendente',
-      conta_virtual: undefined,
-    })
-    if (!ok) {
-      toast.error('Não foi possível salvar a carteira. Verifique o armazenamento do navegador.')
-      return
-    }
+  function requireEditAccess(): boolean {
+    if (podeEditar) return true
+    toast.error('Seu acesso a esta empresa e somente para consulta financeira.')
+    return false
+  }
+
+  function operationKey(slot: string): string {
+    const existing = pendingOperationKeys.current.get(slot)
+    if (existing) return existing
+    const created = createCorporateFinanceOperationKey(slot, empresaId)
+    pendingOperationKeys.current.set(slot, created)
+    return created
+  }
+
+  function clearOperationKey(slot: string): void {
+    pendingOperationKeys.current.delete(slot)
+  }
+
+  function shouldUseLegacy(error: unknown): boolean {
+    return error instanceof CorporateFinanceClientError
+      && error.code === CORPORATE_FINANCE_RELATIONAL_WRITE_DISABLED
+  }
+
+  async function commitLegacy(message: string): Promise<boolean> {
     try {
       await commitPendingRemoteStorage()
+      return true
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o controle financeiro no servidor.')
-      return
+      toast.error(error instanceof Error ? error.message : message)
+      return false
+    }
+  }
+
+  async function ativarCarteira() {
+    if (!requireEditAccess()) return
+    try {
+      await configureCorporateWalletOnServer({
+        company_id: empresaId,
+        status: 'ativa',
+        pix_habilitado: false,
+        cartao_habilitado: false,
+        limite_credito: Math.max(0, limiteCredito),
+        limite_pix_diario: Math.max(0, limitePix),
+        limite_cartao_mensal: Math.max(0, limiteCartao),
+        provedor: 'pendente',
+        conta_virtual: undefined,
+        expectedVersion: carteira?.version,
+      })
+    } catch (error) {
+      if (shouldUseLegacy(error)) {
+        const base = garantirCarteiraEmpresa(empresaId)
+        const ok = atualizarCarteiraEmpresa(base.id, {
+          status: 'ativa',
+          pix_habilitado: false,
+          cartao_habilitado: false,
+          limite_credito: Math.max(0, limiteCredito),
+          limite_pix_diario: Math.max(0, limitePix),
+          limite_cartao_mensal: Math.max(0, limiteCartao),
+          provedor: 'pendente',
+          conta_virtual: undefined,
+        })
+        if (!ok) {
+          toast.error('Não foi possível salvar a carteira.')
+          return
+        }
+        if (!await commitLegacy(
+          'Falha ao confirmar o controle financeiro no servidor.',
+        )) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o controle financeiro no servidor.')
+        return
+      }
     }
     toast.success('Controle interno salvo. Nenhuma conta bancária foi criada.')
     refresh()
   }
 
   async function registrarAporte() {
+    if (!requireEditAccess()) return
     if (valorAporte <= 0) {
       toast.error('Informe um valor de aporte maior que zero.')
       return
     }
-    const movimento = registrarMovimentoCarteira({
-      company_id: empresaId,
-      tipo: 'credito',
-      origem: 'manual',
-      valor: valorAporte,
-      descricao: 'Credito externo conciliado no controle interno',
-    })
-    if (!movimento) {
-      toast.error('Não foi possível registrar o aporte.')
-      return
-    }
+    const slot = `credit:${empresaId}:${valorAporte}`
     try {
-      await commitPendingRemoteStorage()
+      await createCorporateWalletMovementOnServer({
+        company_id: empresaId,
+        tipo: 'credito',
+        origem: 'manual',
+        valor: valorAporte,
+        descricao: 'Credito externo conciliado no controle interno',
+        idempotencyKey: operationKey(slot),
+        confirmed: true,
+      })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o credito no servidor.')
-      return
+      if (shouldUseLegacy(error)) {
+        const movimento = registrarMovimentoCarteira({
+          company_id: empresaId,
+          tipo: 'credito',
+          origem: 'manual',
+          valor: valorAporte,
+          descricao: 'Credito externo conciliado no controle interno',
+        })
+        if (!movimento) {
+          toast.error('Não foi possível registrar o aporte.')
+          return
+        }
+        if (!await commitLegacy('Falha ao confirmar o credito no servidor.')) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o credito no servidor.')
+        return
+      }
     }
+    clearOperationKey(slot)
     setValorAporte(0)
     toast.success('Credito conciliado registrado no controle interno.')
     refresh()
   }
 
   async function registrarPix() {
+    if (!requireEditAccess()) return
     if (pixValor <= 0) {
       toast.error('Informe um valor de Pix maior que zero.')
       return
@@ -1762,23 +1909,38 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
       toast.error('Valor maior que saldo + limite disponível.')
       return
     }
-    const movimento = registrarMovimentoCarteira({
-      company_id: empresaId,
-      tipo: 'debito',
-      origem: 'manual',
-      valor: pixValor,
-      descricao: pixDescricao || 'Débito externo conciliado',
-    })
-    if (!movimento) {
-      toast.error('Não foi possível registrar o débito conciliado.')
-      return
-    }
+    const description = pixDescricao || 'Debito externo conciliado'
+    const slot = `debit:${empresaId}:${pixValor}:${description}`
     try {
-      await commitPendingRemoteStorage()
+      await createCorporateWalletMovementOnServer({
+        company_id: empresaId,
+        tipo: 'debito',
+        origem: 'manual',
+        valor: pixValor,
+        descricao: description,
+        idempotencyKey: operationKey(slot),
+        confirmed: true,
+      })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o debito no servidor.')
-      return
+      if (shouldUseLegacy(error)) {
+        const movimento = registrarMovimentoCarteira({
+          company_id: empresaId,
+          tipo: 'debito',
+          origem: 'manual',
+          valor: pixValor,
+          descricao: description,
+        })
+        if (!movimento) {
+          toast.error('Não foi possível registrar o débito conciliado.')
+          return
+        }
+        if (!await commitLegacy('Falha ao confirmar o debito no servidor.')) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o debito no servidor.')
+        return
+      }
     }
+    clearOperationKey(slot)
     setPixValor(0)
     setPixDescricao('Débito externo conciliado')
     toast.success('Débito já realizado registrado no controle interno.')
@@ -1786,32 +1948,48 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
   }
 
   async function criarCartao(tipo?: CartaoCorporativo['tipo']) {
+    if (!requireEditAccess()) return
     const limite = Number(cardForm.limite || 0)
     if (limite <= 0) {
       toast.error('Informe o limite do cartão.')
       return
     }
     const funcionario = funcionariosEmpresa.find((f: any) => f.id === cardForm.funcionario_id)
-    const card = criarCartaoCorporativo({
-      company_id: empresaId,
-      tipo: tipo || cardForm.tipo,
-      apelido: cardForm.apelido || (tipo === 'fisico' ? 'Cartão físico' : 'Cartão virtual'),
-      limite,
-      portador_nome: cardForm.portador_nome || funcionario?.nome || empresaNome,
-      funcionario_id: cardForm.funcionario_id || null,
-      merchant_lock: cardForm.merchant_lock || undefined,
-      criado_por_user_id: currentUser?.id,
-      ultimos4: cardForm.ultimos4,
-      bandeira: cardForm.bandeira,
-    })
+    let card: CartaoCorporativo | null = null
+    try {
+      card = await createCorporateCardOnServer({
+        company_id: empresaId,
+        tipo: tipo || cardForm.tipo,
+        apelido: cardForm.apelido || (tipo === 'fisico' ? 'Cartão físico' : 'Cartão virtual'),
+        limite,
+        portador_nome: cardForm.portador_nome || funcionario?.nome || empresaNome,
+        funcionario_id: cardForm.funcionario_id || null,
+        merchant_lock: cardForm.merchant_lock || undefined,
+        ultimos4: cardForm.ultimos4,
+        bandeira: cardForm.bandeira,
+      })
+    } catch (error) {
+      if (shouldUseLegacy(error)) {
+        card = criarCartaoCorporativo({
+          company_id: empresaId,
+          tipo: tipo || cardForm.tipo,
+          apelido: cardForm.apelido || (tipo === 'fisico' ? 'Cartão físico' : 'Cartão virtual'),
+          limite,
+          portador_nome: cardForm.portador_nome || funcionario?.nome || empresaNome,
+          funcionario_id: cardForm.funcionario_id || null,
+          merchant_lock: cardForm.merchant_lock || undefined,
+          criado_por_user_id: currentUser?.id,
+          ultimos4: cardForm.ultimos4,
+          bandeira: cardForm.bandeira,
+        })
+        if (card && !await commitLegacy('Falha ao confirmar o cartao no servidor.')) return
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o cartao no servidor.')
+        return
+      }
+    }
     if (!card) {
       toast.error('Informe os quatro últimos dígitos de um cartão já emitido.')
-      return
-    }
-    try {
-      await commitPendingRemoteStorage()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o cartao no servidor.')
       return
     }
     toast.success(`${card.tipo === 'fisico' ? 'Cartão físico' : 'Cartão virtual'} registrado para ${card.portador_nome || empresaNome}.`)
@@ -1821,6 +1999,11 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
 
   return (
     <div className="space-y-4">
+      {!podeEditar && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
+          Acesso financeiro em modo de consulta para esta empresa.
+        </div>
+      )}
       <section className="relative overflow-hidden rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-blue-50 p-5 dark:border-emerald-900/40 dark:from-slate-900 dark:via-slate-900 dark:to-blue-950">
         <div className="absolute right-0 top-0 h-44 w-44 rounded-full bg-emerald-300/20 blur-3xl" />
         <div className="relative grid gap-5 xl:grid-cols-[1fr_440px]">
@@ -1846,11 +2029,11 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
               <MiniStat label="Limite cartão/mês" value={formatCurrency(carteira?.limite_cartao_mensal || 0)} />
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
-              <button type="button" onClick={ativarCarteira} className="bbt-button-primary flex-1">
+              <button type="button" disabled={!podeEditar} onClick={ativarCarteira} className="bbt-button-primary flex-1 disabled:cursor-not-allowed disabled:opacity-50">
                 <Wallet className="h-4 w-4" />
                 Ativar/atualizar
               </button>
-              <button type="button" onClick={() => document.getElementById('registro-cartao')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="bbt-button-outline flex-1">
+              <button type="button" disabled={!podeEditar} onClick={() => document.getElementById('registro-cartao')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="bbt-button-outline flex-1 disabled:cursor-not-allowed disabled:opacity-50">
                 <CreditCard className="h-4 w-4" />
                 Registrar cartão
               </button>
@@ -1870,16 +2053,16 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
           </div>
           <div className="grid gap-3 md:grid-cols-3">
             <Field label="Limite de crédito">
-              <input type="number" min={0} value={limiteCredito} onChange={(e) => setLimiteCredito(Number(e.target.value || 0))} className="bbt-input" />
+              <input type="number" min={0} disabled={!podeEditar} value={limiteCredito} onChange={(e) => setLimiteCredito(Number(e.target.value || 0))} className="bbt-input" />
             </Field>
             <Field label="Limite Pix diário">
-              <input type="number" min={0} value={limitePix} onChange={(e) => setLimitePix(Number(e.target.value || 0))} className="bbt-input" />
+              <input type="number" min={0} disabled={!podeEditar} value={limitePix} onChange={(e) => setLimitePix(Number(e.target.value || 0))} className="bbt-input" />
             </Field>
             <Field label="Limite cartão mensal">
-              <input type="number" min={0} value={limiteCartao} onChange={(e) => setLimiteCartao(Number(e.target.value || 0))} className="bbt-input" />
+              <input type="number" min={0} disabled={!podeEditar} value={limiteCartao} onChange={(e) => setLimiteCartao(Number(e.target.value || 0))} className="bbt-input" />
             </Field>
           </div>
-          <button type="button" onClick={ativarCarteira} className="bbt-button-primary mt-4">
+          <button type="button" disabled={!podeEditar} onClick={ativarCarteira} className="bbt-button-primary mt-4 disabled:cursor-not-allowed disabled:opacity-50">
             <CheckCircle2 className="h-4 w-4" />
             Salvar limites
           </button>
@@ -1896,19 +2079,19 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Aporte manual">
               <div className="flex gap-2">
-                <input type="number" min={0} value={valorAporte} onChange={(e) => setValorAporte(Number(e.target.value || 0))} className="bbt-input" />
-                <button type="button" onClick={registrarAporte} className="bbt-button-outline whitespace-nowrap">Creditar</button>
+                <input type="number" min={0} disabled={!podeEditar} value={valorAporte} onChange={(e) => setValorAporte(Number(e.target.value || 0))} className="bbt-input" />
+                <button type="button" disabled={!podeEditar} onClick={registrarAporte} className="bbt-button-outline whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50">Creditar</button>
               </div>
             </Field>
             <Field label="Débito externo">
               <div className="flex gap-2">
-                <input type="number" min={0} value={pixValor} onChange={(e) => setPixValor(Number(e.target.value || 0))} className="bbt-input" />
-                <button type="button" onClick={registrarPix} className="bbt-button-outline whitespace-nowrap">Registrar</button>
+                <input type="number" min={0} disabled={!podeEditar} value={pixValor} onChange={(e) => setPixValor(Number(e.target.value || 0))} className="bbt-input" />
+                <button type="button" disabled={!podeEditar} onClick={registrarPix} className="bbt-button-outline whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50">Registrar</button>
               </div>
             </Field>
           </div>
           <Field label="Descrição e referência">
-            <input value={pixDescricao} onChange={(e) => setPixDescricao(e.target.value)} className="bbt-input" />
+            <input value={pixDescricao} disabled={!podeEditar} onChange={(e) => setPixDescricao(e.target.value)} className="bbt-input" />
           </Field>
         </div>
       </div>
@@ -1924,16 +2107,16 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
           </div>
           <div className="space-y-3">
             <Field label="Tipo">
-              <select value={cardForm.tipo} onChange={(e) => setCardForm({ ...cardForm, tipo: e.target.value as CartaoCorporativo['tipo'] })} className="bbt-input">
+              <select value={cardForm.tipo} disabled={!podeEditar} onChange={(e) => setCardForm({ ...cardForm, tipo: e.target.value as CartaoCorporativo['tipo'] })} className="bbt-input">
                 <option value="virtual">Virtual</option>
                 <option value="fisico">Físico</option>
               </select>
             </Field>
             <Field label="Apelido">
-              <input value={cardForm.apelido} onChange={(e) => setCardForm({ ...cardForm, apelido: e.target.value })} className="bbt-input" placeholder="Ex: Hotel diretoria" />
+              <input value={cardForm.apelido} disabled={!podeEditar} onChange={(e) => setCardForm({ ...cardForm, apelido: e.target.value })} className="bbt-input" placeholder="Ex: Hotel diretoria" />
             </Field>
             <Field label="Portador / viajante">
-              <select value={cardForm.funcionario_id} onChange={(e) => {
+              <select value={cardForm.funcionario_id} disabled={!podeEditar} onChange={(e) => {
                 const funcionario = funcionariosEmpresa.find((f: any) => f.id === e.target.value)
                 setCardForm({ ...cardForm, funcionario_id: e.target.value, portador_nome: funcionario?.nome || cardForm.portador_nome })
               }} className="bbt-input">
@@ -1944,11 +2127,11 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
               </select>
             </Field>
             <Field label="Nome impresso">
-              <input value={cardForm.portador_nome} onChange={(e) => setCardForm({ ...cardForm, portador_nome: e.target.value })} className="bbt-input" placeholder={empresaNome} />
+              <input value={cardForm.portador_nome} disabled={!podeEditar} onChange={(e) => setCardForm({ ...cardForm, portador_nome: e.target.value })} className="bbt-input" placeholder={empresaNome} />
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Bandeira">
-                <select value={cardForm.bandeira} onChange={(e) => setCardForm({ ...cardForm, bandeira: e.target.value as NonNullable<CartaoCorporativo['bandeira']> })} className="bbt-input">
+                <select value={cardForm.bandeira} disabled={!podeEditar} onChange={(e) => setCardForm({ ...cardForm, bandeira: e.target.value as NonNullable<CartaoCorporativo['bandeira']> })} className="bbt-input">
                   <option value="Visa">Visa</option>
                   <option value="Mastercard">Mastercard</option>
                   <option value="Elo">Elo</option>
@@ -1956,18 +2139,18 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
                 </select>
               </Field>
               <Field label="Quatro últimos dígitos">
-                <input inputMode="numeric" maxLength={4} value={cardForm.ultimos4} onChange={(e) => setCardForm({ ...cardForm, ultimos4: e.target.value.replace(/\D/g, '').slice(0, 4) })} className="bbt-input" placeholder="0000" />
+                <input inputMode="numeric" maxLength={4} disabled={!podeEditar} value={cardForm.ultimos4} onChange={(e) => setCardForm({ ...cardForm, ultimos4: e.target.value.replace(/\D/g, '').slice(0, 4) })} className="bbt-input" placeholder="0000" />
               </Field>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Limite">
-                <input type="number" min={0} value={cardForm.limite} onChange={(e) => setCardForm({ ...cardForm, limite: Number(e.target.value || 0) })} className="bbt-input" />
+                <input type="number" min={0} disabled={!podeEditar} value={cardForm.limite} onChange={(e) => setCardForm({ ...cardForm, limite: Number(e.target.value || 0) })} className="bbt-input" />
               </Field>
               <Field label="Uso permitido">
-                <input value={cardForm.merchant_lock} onChange={(e) => setCardForm({ ...cardForm, merchant_lock: e.target.value })} className="bbt-input" placeholder="Hotel, aéreo..." />
+                <input value={cardForm.merchant_lock} disabled={!podeEditar} onChange={(e) => setCardForm({ ...cardForm, merchant_lock: e.target.value })} className="bbt-input" placeholder="Hotel, aéreo..." />
               </Field>
             </div>
-            <button type="button" onClick={() => criarCartao()} className="bbt-button-primary w-full">
+            <button type="button" disabled={!podeEditar} onClick={() => criarCartao()} className="bbt-button-primary w-full disabled:cursor-not-allowed disabled:opacity-50">
               <Plus className="h-4 w-4" />
               Registrar cartão
             </button>

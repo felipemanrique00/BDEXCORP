@@ -139,6 +139,15 @@ export function safeSetJSON(key: string, value: JsonValue): boolean {
   }
 }
 
+export function applyDomainApiValueLocally(key: SharedStorageKey, value: JsonValue): boolean {
+  if (typeof window === 'undefined') return false
+  storageMutationGeneration += 1
+  delete pendingRemoteEntries[key]
+  pendingRemoteDeletes.delete(key)
+  hydratedRemoteKeys.add(key)
+  return writeLocalOnly(key, valueToRaw(value))
+}
+
 export function safeSetRaw(key: string, value: string): boolean {
   if (typeof window === 'undefined') return false
   const previousRaw = safeGetRaw(key)
@@ -313,6 +322,11 @@ export function clearLocalSharedStorageForSessionChange(): void {
   if (typeof window === 'undefined') return
   resetClientStorageSyncState()
   clearSharedLocalStorage()
+  void import('@/lib/traveler/offline-store')
+    .then(({ clearTravelerOfflineDatabase }) => clearTravelerOfflineDatabase())
+    .catch((error) => {
+      reportClientFailure('traveler_offline_session_cleanup_failed', error)
+    })
 }
 
 export function prepareSharedStorageForSystemReset(): void {
@@ -609,6 +623,8 @@ async function clearBrowserOnlySystemData(): Promise<void> {
 
   const { clearAllVoucherFiles } = await import('@/lib/vouchers-storage')
   await clearAllVoucherFiles()
+  const { clearTravelerOfflineDatabase } = await import('@/lib/traveler/offline-store')
+  await clearTravelerOfflineDatabase()
 }
 
 async function applyRemoteClearMetadata(metadata: unknown): Promise<void> {

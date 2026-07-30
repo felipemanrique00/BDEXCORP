@@ -17,6 +17,7 @@ import { toast } from 'sonner'
 import Link from 'next/link'
 import type { Funcionario, Cargo } from '@/types'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 const CARGOS: Cargo[] = ['Diretor', 'Gerente', 'Colaborador']
 const FUNCIONARIOS_PER_PAGE = 100
@@ -65,6 +66,7 @@ function FuncionariosInner() {
     updateFuncionario,
     deleteFuncionario,
   } = useStore()
+  const { includesCompany } = useCorporateCompanyScope()
 
   const [search, setSearch] = useState('')
   const [cargoFilter, setCargoFilter] = useState<Cargo | 'Todos'>('Todos')
@@ -74,7 +76,17 @@ function FuncionariosInner() {
   const [confirmDelete, setConfirmDelete] = useState<Funcionario | null>(null)
   const [pagina, setPagina] = useState(1)
   const empresasPermitidas = getEmpresasPermitidas(user, empresas, gruposEmpresariais)
+    .filter((empresa) => includesCompany(empresa.id, 'ver_funcionarios'))
   const empresasPermitidasKey = empresasPermitidas.map((empresa) => empresa.id).sort().join('|')
+
+  useEffect(() => {
+    if (
+      empresaFilter !== 'Todas'
+      && !empresasPermitidas.some((empresa) => empresa.id === empresaFilter)
+    ) {
+      setEmpresaFilter('Todas')
+    }
+  }, [empresaFilter, empresasPermitidas, empresasPermitidasKey])
 
   const visible = useMemo(() => {
     const empresasPermitidasIds = new Set(empresasPermitidasKey.split('|').filter(Boolean))

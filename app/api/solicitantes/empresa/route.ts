@@ -1,150 +1,198 @@
-import { randomUUID } from 'node:crypto'
-
 import { NextResponse } from 'next/server'
+import { z } from 'zod'
 
-import { getStorageEntries, setStorageEntries } from '@/lib/server-db'
+import { requesterCompanyIdentifierSchema, requesterPayloadSchema } from '@/lib/requesters/schema'
 import { guardApiRequest, hasServerPermission } from '@/lib/security/api-guard'
 import { readJsonBodyResult } from '@/lib/security/request-body'
-import { empresasPermitidasParaUsuario } from '@/lib/grupos'
-import { writeAuditEvent } from '@/lib/server/audit-log'
+import { mergeUserCorporateAccess } from '@/lib/server/corporate-access-admin-service'
+import { CorporateAccessDeniedError } from '@/lib/server/corporate-access-service'
+import {
+  listCompanyRequesters,
+  RequesterServiceError,
+  upsertCompanyRequester,
+  validateRequesterMutation,
+} from '@/lib/server/requester-service'
 import {
   createTenantUser,
   getTenantUser,
-  updateTenantUser,
   UserConflictError,
+  UserInvitationUnavailableError,
 } from '@/lib/server/user-service'
-import type { SolicitanteEmpresa, User } from '@/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const SOLICITANTES_KEY = 'bbt-solicitantes-empresa'
+const mutationEnvelopeSchema = z.object({
+  id: z.string().trim().min(1).max(160).optional(),
+  editingId: z.string().trim().min(1).max(160).optional(),
+  solicitante: z.unknown().optional(),
+  criarAcesso: z.boolean().default(false),
+}).passthrough()
+
+export async function GET(request: Request) {
+  const guard = await guardApiRequest(request, {
+    requireAuth: true,
+    permission: 'ver_solicitantes',
+    rateLimit: { key: 'solicitantes-empresa:get', limit: 120, windowMs: 60_000 },
+  })
+  if (guard.response) return guard.response
+
+  try {
+    const companyId = requesterCompanyIdentifierSchema.parse(
+      new URL(request.url).searchParams.get('companyId'),
+    )
+    const requesters = await listCompanyRequesters(guard.principal!, companyId)
+    return NextResponse.json(
+      { ok: true, solicitantes: requesters },
+      { headers: { 'X-Request-Id': guard.requestId } },
+    )
+  } catch (error) {
+    return requesterErrorResponse(error, guard.requestId)
+  }
+}
 
 export async function POST(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    permission: 'gerenciar_solicitantes',
     rateLimit: { key: 'solicitantes-empresa:post', limit: 40, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
-  const input = await readJsonBodyResult<any>(request, 256 * 1024, {})
-  if (!input.ok) return NextResponse.json({ ok: false, error: input.error }, { status: input.status })
+  const input = await readJsonBodyResult<unknown>(request, 256 * 1024)
+  if (!input.ok) {
+    return NextResponse.json(
+      { ok: false, error: input.error, requestId: guard.requestId },
+      { status: input.status, headers: { 'X-Request-Id': guard.requestId } },
+    )
+  }
 
   try {
-    const body = input.body
-    const payload = normalizeSolicitantePayload(body?.solicitante || body)
-    const editingId = String(body?.id || body?.editingId || '').trim()
-    const criarAcesso = Boolean(body?.criarAcesso)
-    const password = String(body?.password || '')
+    const envelope = mutationEnvelopeSchema.parse(input.body)
+    const payload = requesterPayloadSchema.parse(envelope.solicitante ?? input.body)
+    const editingId = envelope.id || envelope.editingId
+    const validated = await validateRequesterMutation(guard.principal!, payload, editingId)
+    let userId = validated.payload.user_id
+    let invitationWarning: { code: string; message: string } | null = null
 
-    if (!payload.company_id) return NextResponse.json({ ok: false, error: 'Empresa obrigatoria.' }, { status: 400 })
-    if (!payload.nome) return NextResponse.json({ ok: false, error: 'Nome obrigatorio.' }, { status: 400 })
-    if (!payload.email || !/.+@.+\..+/.test(payload.email)) {
-      return NextResponse.json({ ok: false, error: 'E-mail invalido.' }, { status: 400 })
-    }
-
-    const entries = await getStorageEntries()
-    if (!canManageCompanyAccess(guard.user, payload.company_id, entries)) {
-      return NextResponse.json({ ok: false, error: 'Permissao insuficiente para esta empresa.' }, { status: 403 })
-    }
-    const solicitantes = Array.isArray(entries[SOLICITANTES_KEY]) ? (entries[SOLICITANTES_KEY] as SolicitanteEmpresa[]) : []
-
-    let userId = payload.user_id || null
-    if (criarAcesso) {
+    if (envelope.criarAcesso) {
       if (!hasServerPermission(guard.user, 'gerenciar_usuarios')) {
-        return NextResponse.json({ ok: false, error: 'Permissao para gerenciar usuarios obrigatoria.' }, { status: 403 })
-      }
-      if (password.length < 12) {
-        return NextResponse.json({ ok: false, error: 'A senha deve ter pelo menos 12 caracteres.' }, { status: 400 })
+        return NextResponse.json(
+          { ok: false, error: 'Permissao para gerenciar usuarios obrigatoria.', requestId: guard.requestId },
+          { status: 403, headers: { 'X-Request-Id': guard.requestId } },
+        )
       }
 
-      const existingUser = userId ? await getTenantUser(guard.principal!, userId) : null
-      const portalUser = existingUser
-        ? await updateTenantUser(guard.principal!, existingUser.id, {
-            email: payload.email,
-            name: payload.nome,
-            password,
-            role: 'colaborador',
-            companyId: payload.company_id,
-            active: payload.status !== 'bloqueado',
-          })
-        : await createTenantUser(guard.principal!, {
-            email: payload.email,
-            name: payload.nome,
-            password,
-            role: 'colaborador',
-            companyId: payload.company_id,
-            active: payload.status !== 'bloqueado',
-          })
-      userId = portalUser.id
+      try {
+        const corporateAccess = requesterCorporateAccess(validated.payload)
+        const existingUser = userId ? await getTenantUser(guard.principal!, userId) : null
+        const portalUser = existingUser
+          ? await updateExistingRequesterAccess(guard.principal!, existingUser.id, corporateAccess)
+          : (await createTenantUser(guard.principal!, {
+              email: validated.payload.email,
+              name: validated.payload.nome,
+              role: 'colaborador',
+              companyId: validated.payload.company_id,
+              active: validated.payload.status !== 'bloqueado',
+              corporateAccess,
+            })).user
+        userId = portalUser.id
+      } catch (error) {
+        if (!(error instanceof UserInvitationUnavailableError)) throw error
+        invitationWarning = {
+          code: 'REQUESTER_SAVED_INVITATION_PENDING',
+          message: 'Solicitante salvo, mas o convite nao foi enviado porque o SMTP ainda nao esta configurado.',
+        }
+      }
     }
 
-    const now = new Date().toISOString()
-    const existingIndex = editingId
-      ? solicitantes.findIndex((item) => item.id === editingId)
-      : solicitantes.findIndex((item) => item.company_id === payload.company_id && item.email.toLowerCase() === payload.email.toLowerCase())
-
-    const saved: SolicitanteEmpresa = {
-      ...(existingIndex >= 0 ? solicitantes[existingIndex] : {}),
-      ...payload,
-      user_id: userId,
-      id: existingIndex >= 0 ? solicitantes[existingIndex].id : `sol_${randomUUID()}`,
-      created_at: existingIndex >= 0 ? solicitantes[existingIndex].created_at : now,
-      updated_at: now,
-    }
-
-    if (existingIndex >= 0) solicitantes[existingIndex] = saved
-    else solicitantes.push(saved)
-
-    await setStorageEntries({ [SOLICITANTES_KEY]: solicitantes })
-
-    await writeAuditEvent({
-      action: existingIndex >= 0 ? 'requester.update' : 'requester.create',
-      result: 'success',
-      entityType: 'requester',
-      entityId: saved.id,
-      metadata: { companyId: saved.company_id, portalAccess: criarAcesso, userId },
-    })
-
-    return NextResponse.json({
-      ok: true,
-      solicitante: saved,
-      solicitantes: solicitantes.filter((item) => item.company_id === payload.company_id),
-    })
+    const result = await upsertCompanyRequester(
+      guard.principal!,
+      { ...validated.payload, user_id: userId },
+      validated.editingId || undefined,
+    )
+    return NextResponse.json(
+      {
+        ok: true,
+        solicitante: result.requester,
+        solicitantes: result.requesters,
+        warning: invitationWarning,
+      },
+      {
+        status: result.created ? 201 : 200,
+        headers: { 'X-Request-Id': guard.requestId },
+      },
+    )
   } catch (error) {
-    if (error instanceof UserConflictError) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 409 })
-    }
-    console.error('[solicitantes:empresa]', error)
-    return NextResponse.json({ ok: false, error: 'Falha ao salvar solicitante.' }, { status: 500 })
+    return requesterErrorResponse(error, guard.requestId)
   }
 }
 
-function normalizeSolicitantePayload(input: any): Omit<SolicitanteEmpresa, 'id' | 'created_at' | 'updated_at'> {
+function requesterCorporateAccess(payload: z.infer<typeof requesterPayloadSchema>) {
   return {
-    company_id: String(input?.company_id || '').trim(),
-    user_id: input?.user_id || null,
-    funcionario_id: input?.funcionario_id || null,
-    nome: String(input?.nome || '').trim(),
-    email: String(input?.email || '').trim().toLowerCase(),
-    telefone: String(input?.telefone || '').trim(),
-    cargo: String(input?.cargo || '').trim(),
-    departamento: String(input?.departamento || '').trim(),
-    centro_custo: String(input?.centro_custo || '').trim(),
-    status: input?.status === 'bloqueado' || input?.status === 'pendente' ? input.status : 'ativo',
-    pode_criar_demanda: input?.pode_criar_demanda !== false,
-    pode_ver_vouchers: input?.pode_ver_vouchers !== false,
-    pode_ver_financeiro: Boolean(input?.pode_ver_financeiro),
-    limite_por_solicitacao: Number(input?.limite_por_solicitacao || 0),
-    observacoes: input?.observacoes ? String(input.observacoes) : undefined,
+    groupGrants: [],
+    companyGrants: [{
+      companyId: payload.company_id,
+      profile: 'requester' as const,
+      permissionOverrides: {
+        criar_demandas: payload.pode_criar_demanda,
+        ver_vouchers: payload.pode_ver_vouchers,
+        ver_financeiro: payload.pode_ver_financeiro,
+      },
+      status: payload.status === 'bloqueado' ? 'suspended' as const : 'active' as const,
+      validFrom: null,
+      validUntil: null,
+    }],
+    defaultContext: { type: 'company' as const, id: payload.company_id },
   }
 }
 
-function canManageCompanyAccess(user: User | null, companyId: string, entries: Record<string, unknown>): boolean {
-  if (!user) return false
-  const persisted = entries['bbt-data-v4'] as any
-  const state = persisted?.state || persisted || {}
-  const empresas = Array.isArray(state.empresas) ? state.empresas : []
-  const grupos = Array.isArray(state.gruposEmpresariais) ? state.gruposEmpresariais : []
-  if (user.role === 'company_admin' && user.company_id !== companyId) return false
-  return empresasPermitidasParaUsuario(user, empresas, grupos).some((empresa) => empresa.id === companyId)
+async function updateExistingRequesterAccess(
+  principal: Parameters<typeof mergeUserCorporateAccess>[0],
+  userId: string,
+  corporateAccess: ReturnType<typeof requesterCorporateAccess>,
+) {
+  await mergeUserCorporateAccess(principal, userId, corporateAccess, {
+    preserveExistingDefault: true,
+  })
+  const user = await getTenantUser(principal, userId)
+  if (!user) throw new UserConflictError('Usuario existente fora do escopo autorizado.')
+  return user
+}
+
+function requesterErrorResponse(error: unknown, requestId: string): NextResponse {
+  if (error instanceof z.ZodError) {
+    return NextResponse.json(
+      { ok: false, error: 'Dados do solicitante invalidos.', details: error.flatten(), requestId },
+      { status: 400, headers: { 'X-Request-Id': requestId } },
+    )
+  }
+  if (error instanceof CorporateAccessDeniedError) {
+    return NextResponse.json(
+      { ok: false, error: error.message, code: error.code, requestId },
+      { status: 403, headers: { 'X-Request-Id': requestId } },
+    )
+  }
+  if (error instanceof RequesterServiceError) {
+    return NextResponse.json(
+      { ok: false, error: error.message, code: error.code, requestId },
+      { status: error.status, headers: { 'X-Request-Id': requestId } },
+    )
+  }
+  if (error instanceof UserConflictError) {
+    return NextResponse.json(
+      { ok: false, error: error.message, requestId },
+      { status: 409, headers: { 'X-Request-Id': requestId } },
+    )
+  }
+  if (error instanceof UserInvitationUnavailableError) {
+    return NextResponse.json(
+      { ok: false, error: error.message, requestId },
+      { status: 503, headers: { 'X-Request-Id': requestId } },
+    )
+  }
+  console.error('[solicitantes:empresa]', error)
+  return NextResponse.json(
+    { ok: false, error: 'Falha ao processar solicitante.', requestId },
+    { status: 500, headers: { 'X-Request-Id': requestId } },
+  )
 }

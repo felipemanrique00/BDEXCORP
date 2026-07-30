@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
-import { guardApiRequest } from '@/lib/security/api-guard'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import {
   assertFileEntityAccess,
   assertFileEntityMutationAccess,
   FileAccessDeniedError,
+  guardFileEntityRequest,
 } from '@/lib/server/file-access'
 import {
   createStoredPdf,
@@ -29,10 +29,10 @@ const querySchema = z.object({
 })
 
 export async function GET(request: Request) {
-  const guard = await guardApiRequest(request, {
-    requireAuth: true,
-    rateLimit: { key: 'files:list', limit: 120, windowMs: 60_000 },
-  })
+  const guard = await guardFileEntityRequest(
+    request,
+    { key: 'files:list', limit: 120, windowMs: 60_000 },
+  )
   if (guard.response) return guard.response
 
   try {
@@ -53,10 +53,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const guard = await guardApiRequest(request, {
-    requireAuth: true,
-    rateLimit: { key: 'files:upload', limit: 30, windowMs: 60_000 },
-  })
+  const guard = await guardFileEntityRequest(
+    request,
+    { key: 'files:upload', limit: 30, windowMs: 60_000 },
+  )
   if (guard.response) return guard.response
 
   const maxBytes = getServerEnvironment().MAX_UPLOAD_BYTES

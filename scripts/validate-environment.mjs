@@ -16,6 +16,7 @@ required('MIGRATION_DATABASE_URL')
 required('DATABASE_APP_ROLE')
 required('DATABASE_APP_PASSWORD')
 required('AUTH_SECRET')
+required('MFA_ENCRYPTION_KEY')
 validateHttpsUrl('APP_URL')
 validatePostgresUrl('DATABASE_URL')
 validatePostgresUrl('MIGRATION_DATABASE_URL')
@@ -37,6 +38,12 @@ try {
 
 if (String(values.AUTH_SECRET || '').length < 32 || /change[_-]?me|example|default|secret/i.test(String(values.AUTH_SECRET || ''))) {
   errors.push('AUTH_SECRET deve ter ao menos 32 caracteres aleatorios e nao pode ser um valor padrao.')
+}
+if (!validMfaEncryptionKey(String(values.MFA_ENCRYPTION_KEY || ''))) {
+  errors.push('MFA_ENCRYPTION_KEY deve conter exatamente 32 bytes em Base64.')
+}
+if (String(values.MFA_ADMIN_REQUIRED || 'true').trim().toLowerCase() !== 'true') {
+  errors.push('MFA_ADMIN_REQUIRED deve permanecer habilitado.')
 }
 if (booleanValue('SMTP_ENABLED')) {
   required('SMTP_HOST')
@@ -123,6 +130,16 @@ function validateUrl(key, httpsOnly = false) {
     if (httpsOnly && ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)) throw new Error()
   } catch {
     errors.push(`${key} deve ser uma URL ${httpsOnly ? 'HTTPS publica' : 'valida'}.`)
+  }
+}
+
+function validMfaEncryptionKey(value) {
+  if (!value) return false
+  try {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+    return Buffer.from(normalized, 'base64').length === 32
+  } catch {
+    return false
   }
 }
 

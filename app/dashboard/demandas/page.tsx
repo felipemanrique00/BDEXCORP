@@ -26,17 +26,42 @@ import { NovaDemandaModal } from '@/components/ui/nova-demanda-modal'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
 import { marcarUltimaVista } from '@/lib/notificacoes'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import {
+  DemandClientError,
+  listDemandsFromServer,
+  updateDemandAssignmentOnServer,
+  updateDemandStatusOnServer,
+  type DemandDomainRollout,
+  type RelationalDemandClientItem,
+} from '@/lib/demands-client'
+import { requestDemandTransfer } from '@/lib/demand-transfer-client'
 
 type Aba = 'fila' | 'minhas' | 'alertas' | 'operacao' | 'balanceamento' | 'kanban' | 'status'
 
 const OPERATION_PAGE_SIZE = 30
 const KANBAN_INITIAL_LIMIT = 30
+const DEFAULT_DEMAND_ROLLOUT: DemandDomainRollout = {
+  domainKey: 'demands',
+  readMode: 'shadow',
+  writeMode: 'dual',
+  status: 'active',
+  version: 1,
+  pilotCompanyIds: [],
+}
 
 export default function DemandasPage() {
   const router = useRouter()
   const { empresas } = useStore()
+  const { includesCompany } = useCorporateCompanyScope()
+  const empresasNoContexto = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_demandas')),
+    [empresas, includesCompany],
+  )
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeVerTudo = hasPermission(user, 'ver_produtividade_todos')
+  const podeVerTudo = hasPermission(user, 'ver_produtividade_todos') || Boolean(user?.corporate_profile && hasPermission(user, 'ver_demandas'))
+  const podeRepassarDireto = hasPermission(user, 'ver_produtividade_todos')
+    || hasPermission(user, 'gerenciar_usuarios')
 
   const [aba, setAba] = useState<Aba>('operacao')
   const [reload, setReload] = useState(0)
@@ -45,15 +70,65 @@ export default function DemandasPage() {
   const [tipoFiltro, setTipoFiltro] = useState<'todos' | 'Hotel' | 'Aéreo' | 'Carro' | 'Pacote'>('todos')
   const [filtroPrioridade, setFiltroPrioridade] = useState<'todas' | Prioridade>('todas')
   const [repasseModal, setRepasseModal] = useState<Atendimento | null>(null)
+  const [repasseMotivo, setRepasseMotivo] = useState('')
+  const [repasseSavingId, setRepasseSavingId] = useState<string | null>(null)
   const [editando, setEditando] = useState<Atendimento | null>(null)
   const [novaDemandaModal, setNovaDemandaModal] = useState(false)
   const [demandaPage, setDemandaPage] = useState(1)
   const [voucherPage, setVoucherPage] = useState(1)
   const [kanbanLimit, setKanbanLimit] = useState(KANBAN_INITIAL_LIMIT)
+  const [relationalItems, setRelationalItems] = useState<RelationalDemandClientItem[]>([])
+  const [demandRollout, setDemandRollout] = useState<DemandDomainRollout>(DEFAULT_DEMAND_ROLLOUT)
+  const [relationalLoading, setRelationalLoading] = useState(true)
+  const [relationalError, setRelationalError] = useState<string | null>(null)
+  const empresasNoContextoKey = empresasNoContexto.map((empresa) => empresa.id).sort().join('|')
+  const relationalById = useMemo(
+    () => new Map(relationalItems.map((item) => [item.id, item])),
+    [relationalItems],
+  )
+  const allAtendimentos = useMemo(() => {
+    void reload
+    if (typeof window === 'undefined') return []
+    const merged = new Map(getAllAtendimentos().map((item) => [item.id, item]))
+    relationalItems.forEach((item) => {
+      if (relationalReadEnabledForCompany(demandRollout, item.companyId)) {
+        merged.set(item.id, item.demand)
+      }
+    })
+    return [...merged.values()]
+  }, [demandRollout, relationalItems, reload])
+
+  useEffect(() => {
+    if (filtroEmpresa && !empresasNoContexto.some((empresa) => empresa.id === filtroEmpresa)) {
+      setFiltroEmpresa('')
+    }
+  }, [empresasNoContexto, empresasNoContextoKey, filtroEmpresa])
+
+  useEffect(() => {
+    let active = true
+    setRelationalLoading(true)
+    listDemandsFromServer({ limit: 200 })
+      .then((result) => {
+        if (!active) return
+        setRelationalItems(result.items)
+        setDemandRollout(result.rollout)
+        setRelationalError(null)
+      })
+      .catch((error) => {
+        if (!active) return
+        setRelationalError(error instanceof Error ? error.message : 'Falha ao carregar a fila relacional.')
+      })
+      .finally(() => {
+        if (active) setRelationalLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [reload, empresasNoContextoKey])
 
   // V9: Marca última demanda vista pra zerar badge da sidebar
   useEffect(() => {
-    const todosAtendimentos = getAllAtendimentos()
+    const todosAtendimentos = allAtendimentos.filter((atendimento) => includesCompany(atendimento.empresa_id, 'ver_demandas'))
     const todas = todosAtendimentos
       .filter((a) => ['pendente', 'em_andamento', 'aguardando_cliente'].includes(a.status))
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
@@ -68,7 +143,7 @@ export default function DemandasPage() {
         setEditando(demandaAlvo)
       }
     }
-  }, [])
+  }, [allAtendimentos, includesCompany])
 
   const agentes = useMemo(() => {
     void reload
@@ -79,7 +154,7 @@ export default function DemandasPage() {
   const atendimentos = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
-    const all = getAllAtendimentos()
+    const all = allAtendimentos.filter((atendimento) => includesCompany(atendimento.empresa_id, 'ver_demandas'))
 
     // Quando aba é 'status' (kanban por status), mostra TODAS, mesmo finalizadas
     let filtrados = aba === 'status'
@@ -97,7 +172,7 @@ export default function DemandasPage() {
       const q = busca.toLowerCase()
       filtrados = filtrados.filter((a) =>
         a.passageiro_nome.toLowerCase().includes(q) ||
-        empresas.find((e) => e.id === a.empresa_id)?.nome.toLowerCase().includes(q) ||
+        empresasNoContexto.find((e) => e.id === a.empresa_id)?.nome.toLowerCase().includes(q) ||
         (a.numero_solicitacao || '').toLowerCase().includes(q) ||
         (a.serial_os || '').toLowerCase().includes(q) ||
         a.id.toLowerCase().includes(q) ||
@@ -112,28 +187,28 @@ export default function DemandasPage() {
       _dias: diasAteCheckin(a),
       _score: scorePrioridade(a),
     }))
-  }, [reload, filtroEmpresa, tipoFiltro, filtroPrioridade, busca, empresas, podeVerTudo, user, aba])
+  }, [reload, filtroEmpresa, tipoFiltro, filtroPrioridade, busca, empresasNoContexto, includesCompany, podeVerTudo, user, aba, allAtendimentos])
 
   const analise = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return { sugestoes: [], carga_por_agente: {} }
-    return analisarRepasses(getAllAtendimentos())
-  }, [reload])
+    return analisarRepasses(allAtendimentos.filter((atendimento) => includesCompany(atendimento.empresa_id, 'ver_demandas')))
+  }, [reload, includesCompany, allAtendimentos])
 
   const alertas = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
     return getOperationalAlerts({
-      atendimentos: getAllAtendimentos(),
-      vouchers: getAllVouchersEmitidos(),
-      empresas,
+      atendimentos: allAtendimentos.filter((atendimento) => includesCompany(atendimento.empresa_id, 'ver_demandas')),
+      vouchers: getAllVouchersEmitidos().filter((voucher) => includesCompany(voucher.empresa_id, 'ver_vouchers')),
+      empresas: empresasNoContexto,
     })
-  }, [reload, empresas])
+  }, [reload, empresasNoContexto, includesCompany, allAtendimentos])
 
   const vouchersOperacao = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
-    let list = getAllVouchersEmitidos()
+    let list = getAllVouchersEmitidos().filter((voucher) => includesCompany(voucher.empresa_id, 'ver_vouchers'))
     if (filtroEmpresa) list = list.filter((v) => v.empresa_id === filtroEmpresa)
     if (tipoFiltro !== 'todos') list = list.filter((v) => v.tipo === tipoFiltro)
     if (busca.trim()) {
@@ -148,7 +223,7 @@ export default function DemandasPage() {
       )
     }
     return list
-  }, [reload, filtroEmpresa, tipoFiltro, busca])
+  }, [reload, filtroEmpresa, tipoFiltro, busca, includesCompany])
 
   const minhas = useMemo(() => {
     return atendimentos.filter((a) => a.agente_user_id === user?.id).sort((a: any, b: any) => b._score - a._score)
@@ -182,8 +257,61 @@ export default function DemandasPage() {
 
   function refresh() { setReload((n) => n + 1) }
 
+  function upsertRelationalItem(item: RelationalDemandClientItem) {
+    setRelationalItems((current) => {
+      const index = current.findIndex((candidate) => candidate.id === item.id)
+      if (index === -1) return [item, ...current]
+      const next = current.slice()
+      next[index] = item
+      return next
+    })
+  }
+
+  async function resolveRelationalItem(
+    demandId: string,
+    companyId: string,
+  ): Promise<RelationalDemandClientItem | null> {
+    if (!relationalWriteEnabledForCompany(demandRollout, companyId)) return null
+    const current = relationalById.get(demandId)
+    if (current) return current
+    const result = await listDemandsFromServer({ search: demandId, limit: 10 })
+    const exact = result.items.find((item) => item.id === demandId) || null
+    if (exact) upsertRelationalItem(exact)
+    return exact
+  }
+
+  function reportDemandMutationFailure(error: unknown) {
+    if (error instanceof DemandClientError && error.code === 'STALE_DEMAND_VERSION') {
+      toast.error('A demanda foi alterada por outra pessoa. A fila sera atualizada.')
+      refresh()
+      return
+    }
+    toast.error(error instanceof Error ? error.message : 'Nao foi possivel atualizar a demanda.')
+  }
+
   async function handlePegar(a: Atendimento) {
     if (!user) return
+    if (!includesCompany(a.empresa_id, 'criar_demandas')) {
+      toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
+      return
+    }
+    try {
+      const relational = await resolveRelationalItem(a.id, a.empresa_id)
+      if (relational) {
+        const result = await updateDemandAssignmentOnServer(a.id, {
+          assigneeUserId: user.id,
+          expectedVersion: relational.version,
+          reason: `Aceite manual da fila por ${user.name}`,
+          idempotencyKey: demandOperationKey(a.id, 'take'),
+        })
+        upsertRelationalItem(result.item)
+        toast.success(`Demanda "${a.passageiro_nome}" agora e sua`)
+        return
+      }
+    } catch (error) {
+      reportDemandMutationFailure(error)
+      return
+    }
     if (pegarDemanda(a, user.id, user.name)) {
       try {
         await commitPendingRemoteStorage()
@@ -200,25 +328,94 @@ export default function DemandasPage() {
 
   async function handleRepassar(a: Atendimento, novoAgenteId: string) {
     if (!user) return
+    if (!includesCompany(a.empresa_id, 'criar_demandas')) {
+      toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
+      return
+    }
     const ag = agentes.find((x) => x.id === novoAgenteId)
     if (!ag) return
-    if (executarRepasse(a, ag.id, ag.name, user.id, user.name, repasseModal ? 'Repasse manual' : 'Redistribuição')) {
-      try {
-        await commitPendingRemoteStorage()
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o repasse no servidor.')
+    const informedReason = repasseMotivo.trim()
+    const reason = informedReason || (repasseModal ? 'Repasse manual' : 'Redistribuicao operacional')
+    setRepasseSavingId(novoAgenteId)
+    try {
+      const relational = await resolveRelationalItem(a.id, a.empresa_id)
+      if (relational) {
+        if (!podeRepassarDireto) {
+          if (a.agente_user_id !== user.id) {
+            toast.error('Somente o responsável atual pode solicitar o repasse desta demanda.')
+            return
+          }
+          if (informedReason.length < 5) {
+            toast.error('Informe o motivo do repasse com pelo menos 5 caracteres.')
+            return
+          }
+          await requestDemandTransfer({
+            demandId: a.id,
+            destinationUserId: ag.id,
+            reason: informedReason,
+            expectedDemandVersion: relational.version,
+          })
+          toast.success(`Solicitação de repasse enviada para ${ag.name}`)
+          setRepasseModal(null)
+          setRepasseMotivo('')
+          return
+        }
+        const result = await updateDemandAssignmentOnServer(a.id, {
+          assigneeUserId: ag.id,
+          expectedVersion: relational.version,
+          reason,
+          idempotencyKey: demandOperationKey(a.id, 'transfer'),
+        })
+        upsertRelationalItem(result.item)
+        toast.success(`Repassado para ${ag.name}`)
+        setRepasseModal(null)
+        setRepasseMotivo('')
         return
       }
-      toast.success(`Repassado para ${ag.name}`)
-      setRepasseModal(null)
-      refresh()
+      if (executarRepasse(a, ag.id, ag.name, user.id, user.name, repasseModal ? 'Repasse manual' : 'Redistribuição')) {
+        try {
+          await commitPendingRemoteStorage()
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o repasse no servidor.')
+          return
+        }
+        toast.success(`Repassado para ${ag.name}`)
+        setRepasseModal(null)
+        setRepasseMotivo('')
+        refresh()
+      }
+    } catch (error) {
+      reportDemandMutationFailure(error)
+    } finally {
+      setRepasseSavingId(null)
     }
   }
 
   async function handleAplicarSugestao(sug: any) {
     if (!user) return
+    if (!includesCompany(sug.atendimento?.empresa_id, 'criar_demandas')) {
+      toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
+      return
+    }
     const ag = agentes.find((x) => x.id === sug.agente_sugerido)
     if (!ag) return
+    try {
+      const relational = await resolveRelationalItem(sug.atendimento.id, sug.atendimento.empresa_id)
+      if (relational) {
+        const result = await updateDemandAssignmentOnServer(sug.atendimento.id, {
+          assigneeUserId: ag.id,
+          expectedVersion: relational.version,
+          reason: String(sug.motivo || 'Rebalanceamento operacional'),
+          idempotencyKey: demandOperationKey(sug.atendimento.id, 'rebalance'),
+        })
+        upsertRelationalItem(result.item)
+        toast.success(`Demanda "${sug.atendimento.passageiro_nome}" atribuida a ${ag.name}`)
+        return
+      }
+    } catch (error) {
+      reportDemandMutationFailure(error)
+      return
+    }
     if (executarRepasse(sug.atendimento, ag.id, ag.name, user.id, user.name, sug.motivo)) {
       try {
         await commitPendingRemoteStorage()
@@ -233,6 +430,27 @@ export default function DemandasPage() {
 
   async function handleAlterarStatus(a: Atendimento, status: StatusAtendimento) {
     if (a.status === status) return
+    if (!includesCompany(a.empresa_id, 'criar_demandas')) {
+      toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
+      return
+    }
+    try {
+      const relational = await resolveRelationalItem(a.id, a.empresa_id)
+      if (relational) {
+        const result = await updateDemandStatusOnServer(a.id, {
+          status,
+          expectedVersion: relational.version,
+          reason: `Alteracao operacional para ${STATUS_LABEL[status]}`,
+          idempotencyKey: demandOperationKey(a.id, `status-${status}`),
+        })
+        upsertRelationalItem(result.item)
+        toast.success(`Status alterado para ${STATUS_LABEL[status]}`)
+        return
+      }
+    } catch (error) {
+      reportDemandMutationFailure(error)
+      return
+    }
     if (updateAtendimento(a.id, { status })) {
       try {
         await commitPendingRemoteStorage()
@@ -250,18 +468,46 @@ export default function DemandasPage() {
   async function aplicarTodasSugestoes() {
     if (!user) return
     let ok = 0
+    let failed = 0
+    let legacyChanged = false
     for (const sug of analise.sugestoes.slice(0, 20)) {
+      if (!includesCompany(sug.atendimento?.empresa_id, 'criar_demandas')) continue
       const ag = agentes.find((x) => x.id === sug.agente_sugerido)
       if (!ag) continue
-      if (executarRepasse(sug.atendimento, ag.id, ag.name, user.id, user.name, sug.motivo)) ok++
+      try {
+        const relational = await resolveRelationalItem(sug.atendimento.id, sug.atendimento.empresa_id)
+        if (relational) {
+          const result = await updateDemandAssignmentOnServer(sug.atendimento.id, {
+            assigneeUserId: ag.id,
+            expectedVersion: relational.version,
+            reason: String(sug.motivo || 'Rebalanceamento operacional'),
+            idempotencyKey: demandOperationKey(sug.atendimento.id, 'rebalance-bulk'),
+          })
+          upsertRelationalItem(result.item)
+          ok += 1
+          continue
+        }
+        if (executarRepasse(sug.atendimento, ag.id, ag.name, user.id, user.name, sug.motivo)) {
+          ok += 1
+          legacyChanged = true
+        }
+      } catch {
+        failed += 1
+      }
     }
-    try {
-      await commitPendingRemoteStorage()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar as redistribuicoes no servidor.')
-      return
+    if (legacyChanged) {
+      try {
+        await commitPendingRemoteStorage()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar as redistribuicoes no servidor.')
+        return
+      }
     }
-    toast.success(`${ok} demandas redistribuídas`)
+    if (failed > 0) {
+      toast.warning(`${ok} demanda(s) redistribuída(s); ${failed} precisa(m) ser atualizada(s) e revisada(s).`)
+    } else {
+      toast.success(`${ok} demanda(s) redistribuída(s).`)
+    }
     refresh()
   }
 
@@ -296,11 +542,21 @@ export default function DemandasPage() {
             </button>
             <button onClick={refresh}
               className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-white text-sm hover:bg-white/15 transition border border-white/15">
-              <RefreshCw className="w-4 h-4" /> Atualizar
+              <RefreshCw className={`w-4 h-4 ${relationalLoading ? 'animate-spin' : ''}`} /> Atualizar
             </button>
           </div>
         </div>
       </section>
+
+      {relationalError && (
+        <div role="alert" className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-semibold">Sincronização operacional indisponível</p>
+            <p className="mt-0.5 break-words text-xs opacity-80">{relationalError}</p>
+          </div>
+        </div>
+      )}
 
       {/* Abas */}
       <div className="bbt-tabs overflow-x-auto">
@@ -327,7 +583,7 @@ export default function DemandasPage() {
           </div>
           <select value={filtroEmpresa} onChange={(e) => setFiltroEmpresa(e.target.value)} className="bbt-input max-w-xs">
             <option value="">Todas empresas</option>
-            {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+            {empresasNoContexto.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
           </select>
         </div>
         <div className="flex flex-wrap gap-2 items-center">
@@ -675,7 +931,12 @@ export default function DemandasPage() {
       )}
 
       {/* Modal de repasse manual */}
-      <Modal open={!!repasseModal} onClose={() => setRepasseModal(null)}
+      <Modal
+        open={!!repasseModal}
+        onClose={() => {
+          setRepasseModal(null)
+          setRepasseMotivo('')
+        }}
         title={repasseModal ? `Repassar: ${repasseModal.passageiro_nome}` : ''}
         size="md">
         {repasseModal && (
@@ -686,18 +947,49 @@ export default function DemandasPage() {
               <div className="text-xs">Agente atual: {agentes.find((x) => x.id === repasseModal.agente_user_id)?.name || 'Sem agente'}</div>
             </div>
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">Repassar para:</label>
+              <label
+                htmlFor="repasse-motivo"
+                className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400"
+              >
+                Motivo do repasse {!podeRepassarDireto && <span className="text-red-500">*</span>}
+              </label>
+              <textarea
+                id="repasse-motivo"
+                value={repasseMotivo}
+                onChange={(event) => setRepasseMotivo(event.target.value)}
+                rows={3}
+                maxLength={2000}
+                placeholder={podeRepassarDireto
+                  ? 'Contexto opcional para a trilha operacional'
+                  : 'Explique por que a demanda deve ser transferida'}
+                className="bbt-input w-full resize-y"
+              />
+              {!podeRepassarDireto && (
+                <p className="mt-1 text-xs text-slate-500">
+                  O novo responsável precisa aceitar a solicitação antes da troca.
+                </p>
+              )}
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
+                {podeRepassarDireto ? 'Repassar para:' : 'Solicitar repasse para:'}
+              </label>
               <div className="space-y-1 max-h-80 overflow-y-auto">
                 {agentes.filter((u) => u.id !== repasseModal.agente_user_id).map((ag) => {
                   const carga = analise.carga_por_agente[ag.id]
                   return (
-                    <button key={ag.id} onClick={() => handleRepassar(repasseModal, ag.id)}
+                    <button
+                      key={ag.id}
+                      onClick={() => void handleRepassar(repasseModal, ag.id)}
+                      disabled={repasseSavingId !== null}
                       className="w-full flex items-center justify-between p-2 rounded-lg border border-bbt-gray-100 dark:border-slate-700 hover:bg-bbt-accent/5 hover:border-bbt-accent text-left transition">
                       <div>
                         <div className="text-sm font-medium">{ag.name}</div>
                         <div className="text-[10px] text-slate-500">{carga?.total || 0} demandas · {carga?.urgentes || 0} urgentes</div>
                       </div>
-                      <ArrowRightLeft className="w-4 h-4 text-bbt-accent" />
+                      {repasseSavingId === ag.id
+                        ? <RefreshCw className="w-4 h-4 animate-spin text-bbt-accent" />
+                        : <ArrowRightLeft className="w-4 h-4 text-bbt-accent" />}
                     </button>
                   )
                 })}
@@ -961,4 +1253,27 @@ function DemHeroMetric({ icon: Icon, label, value, highlight }: { icon: any; lab
       <div className="text-xl font-bold">{value}</div>
     </div>
   )
+}
+
+function demandOperationKey(demandId: string, operation: string): string {
+  const nonce = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `demand:${operation}:${demandId.slice(-36)}:${nonce}`.slice(0, 200)
+}
+
+function relationalReadEnabledForCompany(rollout: DemandDomainRollout, companyId: string): boolean {
+  return rollout.status === 'active'
+    && rollout.readMode === 'relational'
+    && rolloutAppliesToCompany(rollout, companyId)
+}
+
+function relationalWriteEnabledForCompany(rollout: DemandDomainRollout, companyId: string): boolean {
+  return rollout.status === 'active'
+    && rollout.writeMode !== 'legacy'
+    && rolloutAppliesToCompany(rollout, companyId)
+}
+
+function rolloutAppliesToCompany(rollout: DemandDomainRollout, companyId: string): boolean {
+  return rollout.pilotCompanyIds.length === 0 || rollout.pilotCompanyIds.includes(companyId)
 }

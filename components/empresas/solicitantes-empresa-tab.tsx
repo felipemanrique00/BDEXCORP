@@ -22,10 +22,9 @@ import {
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import {
+  aplicarSolicitantesEmpresaDoServidor,
   getSolicitantesPorEmpresa,
-  removerSolicitanteEmpresa,
 } from '@/lib/solicitantes-storage'
-import { safeSetJSON } from '@/lib/storage-quota'
 import type { Empresa, Funcionario, SolicitanteEmpresa } from '@/types'
 
 interface Props {
@@ -40,6 +39,7 @@ export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props
   const [editing, setEditing] = useState<SolicitanteEmpresa | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<SolicitanteEmpresa | null>(null)
   const [search, setSearch] = useState('')
+  const [loadingRemote, setLoadingRemote] = useState(true)
 
   const solicitantes = useMemo(() => {
     const all = getSolicitantesPorEmpresa(empresa.id)
@@ -55,27 +55,65 @@ export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props
 
   function refresh() { setReload((n) => n + 1) }
 
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoadingRemote(true)
+    void fetch(`/api/solicitantes/empresa?companyId=${encodeURIComponent(empresa.id)}`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok || !result?.ok) {
+          throw new Error(result?.error || 'Falha ao carregar solicitantes.')
+        }
+        if (Array.isArray(result.solicitantes)) {
+          aplicarSolicitantesEmpresaDoServidor(empresa.id, result.solicitantes)
+          setReload((value) => value + 1)
+        }
+      })
+      .catch((error) => {
+        if (error?.name !== 'AbortError') toast.error(error?.message || 'Falha ao carregar solicitantes.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingRemote(false)
+      })
+    return () => controller.abort()
+  }, [empresa.id])
+
   function copiarAcesso(s: SolicitanteEmpresa) {
     if (typeof window === 'undefined') return
     const texto = [
       'Acesso ao Portal BBT Corporativo',
       `Link: ${window.location.origin}/login`,
       `E-mail: ${s.email}`,
-      'Senha: definida no cadastro (peça reset à BBT se esqueceu).',
+      'Senha: definida individualmente pelo usuário no convite ou na recuperação de acesso.',
     ].join('\n')
     navigator.clipboard?.writeText(texto)
     toast.success('Dados de acesso copiados.')
   }
 
-  function remove() {
+  async function remove() {
     if (!confirmDelete) return
-    if (removerSolicitanteEmpresa(confirmDelete.id)) {
+    const target = confirmDelete
+    setConfirmDelete(null)
+    try {
+      const response = await fetch(
+        `/api/solicitantes/empresa/${encodeURIComponent(target.id)}?companyId=${encodeURIComponent(empresa.id)}`,
+        { method: 'DELETE' },
+      )
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok || !result?.ok) {
+        throw new Error(result?.error || 'Não foi possível remover o solicitante.')
+      }
+      if (Array.isArray(result.solicitantes)) {
+        aplicarSolicitantesEmpresaDoServidor(empresa.id, result.solicitantes)
+      }
       toast.success('Solicitante removido.')
       refresh()
-    } else {
-      toast.error('Não foi possível remover.')
+    } catch (error: any) {
+      toast.error(error?.message || 'Não foi possível remover o solicitante.')
     }
-    setConfirmDelete(null)
   }
 
   return (
@@ -113,7 +151,11 @@ export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props
       </div>
 
       <div className="bbt-card overflow-hidden">
-        {solicitantes.length === 0 ? (
+        {loadingRemote && solicitantes.length === 0 ? (
+          <div className="p-10 text-center text-slate-400">
+            <div className="text-sm">Carregando solicitantes...</div>
+          </div>
+        ) : solicitantes.length === 0 ? (
           <div className="p-10 text-center text-slate-400">
             <UserRound className="w-10 h-10 mx-auto mb-2 opacity-40" />
             <div className="text-sm">Nenhum solicitante cadastrado.</div>
@@ -258,8 +300,7 @@ function SolicitanteForm({
   const [podeVouchers, setPodeVouchers] = useState(editing?.pode_ver_vouchers ?? true)
   const [podeFinanceiro, setPodeFinanceiro] = useState(editing?.pode_ver_financeiro ?? false)
   const [limite, setLimite] = useState(editing?.limite_por_solicitacao || 0)
-  const [criarAcesso, setCriarAcesso] = useState(!editing?.user_id)
-  const [password, setPassword] = useState('')
+  const [criarAcesso, setCriarAcesso] = useState(Boolean(editing?.user_id) || !editing)
   const [salvando, setSalvando] = useState(false)
 
   useEffect(() => {
@@ -276,8 +317,7 @@ function SolicitanteForm({
     setPodeVouchers(editing?.pode_ver_vouchers ?? true)
     setPodeFinanceiro(editing?.pode_ver_financeiro ?? false)
     setLimite(editing?.limite_por_solicitacao || 0)
-    setCriarAcesso(!editing?.user_id)
-    setPassword('')
+    setCriarAcesso(Boolean(editing?.user_id) || !editing)
     setSalvando(false)
   }, [open, editing, empresa])
 
@@ -306,11 +346,6 @@ function SolicitanteForm({
 
     setSalvando(true)
 
-    if (criarAcesso && password.length < 12) {
-      setSalvando(false)
-      return toast.error('Senha de pelo menos 12 caracteres é obrigatória para criar ou redefinir o acesso.')
-    }
-
     const payload = {
       company_id: empresa.id,
       user_id: editing?.user_id || null,
@@ -336,7 +371,6 @@ function SolicitanteForm({
           id: editing?.id,
           solicitante: payload,
           criarAcesso,
-          password,
         }),
       })
       const result = await response.json().catch(() => ({}))
@@ -344,13 +378,19 @@ function SolicitanteForm({
         throw new Error(result?.error || 'Falha ao salvar solicitante.')
       }
 
-      if (Array.isArray(result.solicitantes)) safeSetJSON('bbt-solicitantes-empresa', result.solicitantes)
+      if (Array.isArray(result.solicitantes)) {
+        aplicarSolicitantesEmpresaDoServidor(empresa.id, result.solicitantes)
+      }
 
-      toast.success(
-        criarAcesso && !editing
-          ? `Solicitante salvo. Login em ${typeof window !== 'undefined' ? window.location.origin : ''}/login com ${emailT}.`
-          : editing ? 'Solicitante atualizado.' : 'Solicitante cadastrado.',
-      )
+      if (result.warning?.message) {
+        toast.warning(result.warning.message)
+      } else {
+        toast.success(
+          result.solicitante?.user_id && criarAcesso && !editing?.user_id
+            ? `Solicitante salvo. Um convite seguro foi enviado para ${emailT}.`
+            : editing ? 'Solicitante atualizado.' : 'Solicitante cadastrado.',
+        )
+      }
       onClose()
     } catch (error: any) {
       toast.error(error?.message || 'Falha ao salvar solicitante.')
@@ -440,22 +480,18 @@ function SolicitanteForm({
             <KeyRound className="w-3.5 h-3.5" /> Login no portal
           </div>
           <Toggle
-            label={editing?.user_id ? 'Já tem login criado (ative para resetar)' : 'Criar login imediato'}
+            label={editing?.user_id
+              ? 'Sincronizar permissões do login existente'
+              : 'Enviar convite seguro para criar o login'}
             checked={criarAcesso}
             onChange={setCriarAcesso}
           />
           {criarAcesso && (
-            <Field label="Senha inicial *">
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Mínimo 12 caracteres — deve ser trocada no primeiro acesso"
-                minLength={12}
-                autoComplete="new-password"
-                className="bbt-input"
-              />
-            </Field>
+            <p className="rounded border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900 dark:border-cyan-800 dark:bg-cyan-950/30 dark:text-cyan-100">
+              {editing?.user_id
+                ? 'As permissões abaixo serão aplicadas à conta individual já vinculada.'
+                : 'A pessoa receberá um link temporário e definirá a própria senha. A senha não será conhecida pela agência.'}
+            </p>
           )}
           {!criarAcesso && !editing?.user_id && (
             <div className="text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/50 rounded p-2">

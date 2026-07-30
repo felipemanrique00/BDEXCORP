@@ -120,7 +120,11 @@ export async function processAssistantMessage(input: AssistantProcessInput): Pro
     toolsCalled.push({ id: 'getFinancialSummary', ok: result.ok, error: result.error, requiresConfirmation: result.requiresConfirmation })
     response = result.ok ? formatFinancialResponse(result.data) : result.error || settings.unknownMessage
   } else if (intent === 'human') {
-    const result = await executeAssistantTool('transferToHuman', { reason: input.text, priority: 'normal' }, { ...context, confirmed: input.confirmed ?? true })
+    const result = await executeAssistantTool(
+      'transferToHuman',
+      { reason: input.text, priority: 'normal' },
+      { ...context, confirmed: input.confirmed === true },
+    )
     toolsCalled.push({ id: 'transferToHuman', ok: result.ok, error: result.error, requiresConfirmation: result.requiresConfirmation })
     response = result.ok ? settings.humanHandoffMessage : result.error || settings.errorMessage
   } else {

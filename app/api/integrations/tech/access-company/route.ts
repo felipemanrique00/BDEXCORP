@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic'
 const bodySchema = z.object({ companyId: z.union([z.string(), z.number()]) })
 
 export async function POST(request: Request) {
-  const guard = await guardApiRequest(request, { requireAuth: true, roles: ['master'], rateLimit: { key: 'tech-access-company:post', limit: 30, windowMs: 60_000 } })
+  const guard = await guardApiRequest(request, { requireAuth: true, tenantAdmin: true, rateLimit: { key: 'tech-access-company:post', limit: 30, windowMs: 60_000 } })
   if (guard.response) return guard.response
   const input = await readJsonBodyResult<unknown>(request, 16 * 1024)
   if (!input.ok) return NextResponse.json({ ok: false, error: input.error }, { status: input.status })

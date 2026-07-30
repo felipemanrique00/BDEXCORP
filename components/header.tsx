@@ -1,29 +1,25 @@
 'use client'
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
   Search, Moon, Sun, LogOut, Settings, ChevronDown,
   Building2, Users, Hotel as HotelIcon, UserCircle2,
-  FileText, ListChecks, Loader2, Sparkles, Download,
-  Menu,
+  FileText, ListChecks, Loader2, Sparkles, Download, Menu,
+  Network, Plane, TicketCheck, ShieldCheck, Workflow,
 } from 'lucide-react'
 import { SYSTEM_NAME, SYSTEM_TAGLINE } from '@/lib/branding'
 import { getCurrentUser, hasPermission, logout, roleLabel, perfilBBTLabel } from '@/lib/auth'
-import { useStore } from '@/lib/store'
 import { TransferenciasPendentesPainel } from '@/components/ui/transferencias-pendentes-painel'
-import { getAllAtendimentos } from '@/lib/atendimentos-storage'
-import { getAllVouchersEmitidos } from '@/lib/vouchers-emitidos-storage'
 import { safeSetRaw } from '@/lib/storage-quota'
-import {
-  buscarHoteisComIA,
-  extrairDestinoHotel,
-  hotelJaExiste,
-  sugestaoParaHotel,
-} from '@/lib/ia-hotel-search'
-import Fuse from 'fuse.js'
+import { searchUniversalClient } from '@/lib/universal-search-client'
+import type {
+  UniversalSearchItem,
+  UniversalSearchKind,
+} from '@/lib/universal-search-contract'
 import type { User } from '@/types'
 import { toast } from 'sonner'
+import { CorporateContextSelector } from '@/components/corporate-context-selector'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
@@ -40,14 +36,13 @@ export function Header({ onOpenNavigation }: HeaderProps) {
   const [darkMode, setDarkMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
-  const [iaSearching, setIaSearching] = useState(false)
+  const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const [searchResults, setSearchResults] = useState<UniversalSearchItem[]>([])
   const [profileOpen, setProfileOpen] = useState(false)
-  const [searchRevision, setSearchRevision] = useState(0)
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const profileRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLDivElement>(null)
-
-  const { empresas, funcionarios, hoteis, addHotel } = useStore()
 
   useEffect(() => { setUser(getCurrentUser()) }, [])
 
@@ -76,6 +71,37 @@ export function Header({ onOpenNavigation }: HeaderProps) {
     window.addEventListener('appinstalled', () => setInstallPrompt(null), { once: true })
     return () => window.removeEventListener('beforeinstallprompt', handler)
   }, [])
+
+  useEffect(() => {
+    const query = searchQuery.trim()
+    if (query.length < 2) {
+      setSearching(false)
+      setSearchError('')
+      setSearchResults([])
+      return
+    }
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setSearching(true)
+      setSearchError('')
+      searchUniversalClient(query, { signal: controller.signal, limit: 12 })
+        .then((result) => setSearchResults(result.items))
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === 'AbortError') return
+          setSearchResults([])
+          setSearchError(error instanceof Error ? error.message : 'Falha ao executar a busca.')
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSearching(false)
+        })
+    }, 250)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [searchQuery])
 
   const toggleDark = () => {
     const next = !darkMode
@@ -107,85 +133,20 @@ export function Header({ onOpenNavigation }: HeaderProps) {
     }
   }
 
-  type SearchItem = { id: string; type: 'empresa' | 'funcionario' | 'hotel' | 'demanda' | 'voucher'; nome: string; sub: string; href: string }
-  const searchItems: SearchItem[] = useMemo(() => {
-    void searchRevision
-    const out: SearchItem[] = []
-    empresas.forEach((e) => out.push({ id: e.id, type: 'empresa', nome: e.nome, sub: e.cnpj, href: `/dashboard/empresas/${e.id}` }))
-    funcionarios.forEach((f) => {
-      const emp = empresas.find((e) => e.id === f.company_id)?.nome || ''
-      out.push({ id: f.id, type: 'funcionario', nome: f.nome, sub: `${f.cargo}${emp ? ' · ' + emp : ''}`, href: `/dashboard/funcionarios/${f.id}` })
-    })
-    hoteis.forEach((h) => out.push({ id: String(h.id), type: 'hotel', nome: h.nome, sub: `${h.cidade} · ${h.uf}`, href: `/dashboard/hoteis/${h.id}` }))
-    getAllAtendimentos().forEach((a) => {
-      const destino =
-        a.detalhes_hotel?.hotel_nome ||
-        a.detalhes_hotel?.cidade ||
-        a.detalhes_aereo?.destino ||
-        a.detalhes_carro?.cidade_retirada ||
-        a.detalhes_pacote?.destino ||
-        a.tipo_servico
-      out.push({
-        id: a.id,
-        type: 'demanda',
-        nome: a.passageiro_nome,
-        sub: `${a.tipo_servico} · ${destino} · ${a.status}`,
-        href: '/dashboard/demandas',
-      })
-    })
-    getAllVouchersEmitidos().forEach((v) => {
-      out.push({
-        id: v.id,
-        type: 'voucher',
-        nome: `${v.numero} · ${v.passageiro_nome}`,
-        sub: `${v.tipo} · ${v.fornecedor_nome} · ${v.status}`,
-        href: `/dashboard/vouchers/${v.id}`,
-      })
-    })
-    return out
-  }, [empresas, funcionarios, hoteis, searchRevision])
-
-  const fuse = useMemo(() => new Fuse(searchItems, { keys: ['nome', 'sub'], threshold: 0.38, ignoreLocation: true, includeScore: true }), [searchItems])
-  const results = useMemo(() => searchQuery.trim() ? fuse.search(searchQuery).slice(0, 8).map((r) => r.item) : [], [fuse, searchQuery])
-  const podeBuscaIA = useMemo(() => /(hotel|hoteis|hotéis|hospedagem|pousada|diaria|diária|campo|cidade|ms|go|sp|rj|df)/i.test(searchQuery), [searchQuery])
-  const podeCadastrarHoteis = user?.role === 'master' && hasPermission(user, 'cadastrar_hoteis')
+  const podeBuscaIA = /(hotel|hoteis|hotéis|hospedagem|pousada|diaria|diária|cidade|destino)/i.test(searchQuery)
+    && Boolean(user && hasPermission(user, 'usar_ia'))
 
   function goTo(href: string) {
     setSearchOpen(false); setSearchQuery('')
     router.push(href)
   }
 
-  async function buscarCadastrarComIA() {
+  function openBiaSearch() {
     const query = searchQuery.trim()
-    if (!query || iaSearching) return
-    if (!podeCadastrarHoteis) {
-      toast.error('Você não tem permissão para cadastrar hotéis.')
-      return
-    }
-
-    setIaSearching(true)
-    try {
-      const destino = extrairDestinoHotel(query)
-      const response = await buscarHoteisComIA({
-        query,
-        cidade: destino.cidade,
-        uf: destino.uf,
-        knownHotels: hoteis.map((h) => ({ nome: h.nome, cidade: h.cidade, uf: h.uf })),
-      })
-      const novos = response.suggestions.filter((s) => !hotelJaExiste(hoteis, s.nome, s.cidade, s.uf)).slice(0, 4)
-      novos.forEach((s) => addHotel(sugestaoParaHotel(s)))
-      toast.success(
-        novos.length > 0
-          ? `${novos.length} hotel(is) cadastrado(s) pela IA.`
-          : 'A IA encontrou hotéis, mas não cadastrei duplicados.',
-      )
-      setSearchOpen(false)
-      router.push(`/dashboard/hoteis?busca=${encodeURIComponent(destino.cidade || query)}`)
-    } catch (e: any) {
-      toast.error(e.message || 'Não consegui buscar hotéis agora.')
-    } finally {
-      setIaSearching(false)
-    }
+    if (!query) return
+    setSearchOpen(false)
+    setSearchQuery('')
+    router.push(`/dashboard/ia-chat?pergunta=${encodeURIComponent(`Pesquise hotéis para: ${query}`)}`)
   }
 
   if (!user) return null
@@ -213,11 +174,8 @@ export function Header({ onOpenNavigation }: HeaderProps) {
               type="text"
               value={searchQuery}
               onChange={(e) => { setSearchQuery(e.target.value); setSearchOpen(true) }}
-              onFocus={() => {
-                setSearchRevision((revision) => revision + 1)
-                setSearchOpen(true)
-              }}
-              placeholder="Busca global: empresas, viajantes, hotéis, demandas e vouchers..."
+              onFocus={() => setSearchOpen(true)}
+              placeholder="Buscar empresas, viajantes, OS, reservas, vouchers, políticas..."
               aria-label="Busca global"
               autoComplete="off"
               className="h-10 w-full rounded-md border border-bbt-gray-100 bg-[#f8f9fc] pl-11 pr-9 text-sm text-bbt-text transition placeholder:text-slate-400 focus:border-bbt-accent focus:bg-white focus:outline-none focus:ring-2 focus:ring-bbt-accent/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
@@ -231,67 +189,65 @@ export function Header({ onOpenNavigation }: HeaderProps) {
             )}
           </div>
 
-          {searchOpen && searchQuery.trim() && (
+          {searchOpen && searchQuery.trim().length >= 2 && (
             <div className="absolute top-full left-0 right-0 mt-2 bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-bbt-gray-100 dark:border-slate-700 overflow-hidden z-50 max-h-96 overflow-y-auto">
-              {results.length === 0 ? (
+              {searching ? (
+                <div className="flex items-center justify-center gap-2 p-5 text-sm text-slate-500">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Buscando no escopo autorizado...
+                </div>
+              ) : searchError ? (
+                <div className="p-4 text-center text-sm text-red-600 dark:text-red-400">
+                  {searchError}
+                </div>
+              ) : searchResults.length === 0 ? (
                 <div className="p-4 text-center text-sm text-slate-400">
                   <div>Nada encontrado para "{searchQuery}"</div>
-                  {podeBuscaIA && podeCadastrarHoteis && (
+                  {podeBuscaIA && (
                     <button
-                      onClick={buscarCadastrarComIA}
-                      disabled={iaSearching}
+                      type="button"
+                      onClick={openBiaSearch}
                       className="mt-3 inline-flex h-9 items-center gap-2 rounded-md bg-bbt-accent px-3 text-xs font-semibold text-white transition hover:brightness-110 disabled:opacity-60"
                     >
-                      {iaSearching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                      Buscar e cadastrar hotéis com IA
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Pesquisar hotéis com a BIA
                     </button>
                   )}
                 </div>
               ) : (
                 <>
-                {results.map((r) => {
-                  const TypeIcon =
-                    r.type === 'empresa'
-                      ? Building2
-                      : r.type === 'funcionario'
-                      ? Users
-                      : r.type === 'hotel'
-                      ? HotelIcon
-                      : r.type === 'voucher'
-                      ? FileText
-                      : ListChecks
+                {searchResults.map((result) => {
+                  const presentation = searchKindPresentation(result.kind)
+                  const TypeIcon = presentation.icon
                   return (
-                    <button key={r.type + r.id} onClick={() => goTo(r.href)}
+                    <button key={`${result.kind}:${result.id}`} onClick={() => goTo(result.href)}
                       className="w-full flex items-center gap-3 p-3 hover:bg-bbt-gray-50 dark:hover:bg-slate-900/50 transition text-left">
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                        r.type === 'empresa' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-600'
-                        : r.type === 'funcionario' ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600'
-                        : r.type === 'hotel' ? 'bg-green-100 dark:bg-green-900/30 text-green-600'
-                        : r.type === 'voucher' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600'
-                        : 'bg-slate-100 dark:bg-slate-900 text-slate-600'
-                      }`}>
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${presentation.className}`}>
                         <TypeIcon className="w-4 h-4" />
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="font-medium text-sm text-bbt-text dark:text-slate-100 truncate">{r.nome}</div>
-                        <div className="text-xs text-slate-500 truncate">{r.sub}</div>
+                        <div className="truncate text-sm font-medium text-bbt-text dark:text-slate-100">{result.title}</div>
+                        <div className="truncate text-xs text-slate-500">{result.subtitle}</div>
+                        {result.companyName && result.companyName !== result.title && (
+                          <div className="truncate text-[11px] text-slate-400">{result.companyName}</div>
+                        )}
                       </div>
-                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">{r.type}</span>
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">{presentation.label}</span>
                     </button>
                   )
                 })}
-                {podeBuscaIA && podeCadastrarHoteis && (
+                {podeBuscaIA && (
                   <button
-                    onClick={buscarCadastrarComIA}
-                    disabled={iaSearching}
+                    type="button"
+                    onClick={openBiaSearch}
                     className="w-full flex items-center gap-3 p-3 border-t border-bbt-gray-100 dark:border-slate-700 bg-bbt-accent/5 hover:bg-bbt-accent/10 text-left transition"
                   >
                     <div className="w-8 h-8 rounded-lg bg-bbt-accent text-white flex items-center justify-center shrink-0">
-                      {iaSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                      <Sparkles className="w-4 h-4" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="font-semibold text-sm text-bbt-primary dark:text-white">Buscar hotéis na web e cadastrar</div>
-                      <div className="text-xs text-slate-500 truncate">Usa IA para descobrir fornecedores quando não existe no sistema.</div>
+                      <div className="font-semibold text-sm text-bbt-primary dark:text-white">Pesquisar hotéis com a BIA</div>
+                      <div className="text-xs text-slate-500 truncate">A BIA pesquisa fontes externas e pede confirmação antes de cadastrar.</div>
                     </div>
                   </button>
                 )}
@@ -300,6 +256,8 @@ export function Header({ onOpenNavigation }: HeaderProps) {
             </div>
           )}
         </div>
+
+        <CorporateContextSelector />
 
         {/* CENTRO — Perfil (CENTRALIZADO) */}
         <div ref={profileRef} className="relative ml-auto shrink-0">
@@ -369,4 +327,29 @@ export function Header({ onOpenNavigation }: HeaderProps) {
       </div>
     </header>
   )
+}
+
+function searchKindPresentation(kind: UniversalSearchKind) {
+  switch (kind) {
+    case 'group':
+      return { icon: Network, label: 'Grupo', className: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300' }
+    case 'company':
+      return { icon: Building2, label: 'Empresa', className: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300' }
+    case 'employee':
+      return { icon: Users, label: 'Viajante', className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' }
+    case 'hotel':
+      return { icon: HotelIcon, label: 'Hotel', className: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' }
+    case 'demand':
+      return { icon: ListChecks, label: 'Demanda', className: 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200' }
+    case 'reservation':
+      return { icon: TicketCheck, label: 'Reserva', className: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' }
+    case 'emission':
+      return { icon: Plane, label: 'Emissao', className: 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300' }
+    case 'voucher':
+      return { icon: FileText, label: 'Voucher', className: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' }
+    case 'policy':
+      return { icon: ShieldCheck, label: 'Politica', className: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' }
+    case 'workflow':
+      return { icon: Workflow, label: 'Workflow', className: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300' }
+  }
 }

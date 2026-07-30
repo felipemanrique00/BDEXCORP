@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import { Suspense, useMemo } from 'react'
 import { useStore } from '@/lib/store'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
-import { canEditGlobal, canViewCompany } from '@/lib/auth'
+import { canAccessCompanyPermission, canEditGlobal } from '@/lib/auth'
 import { CorporateReport } from '../_components/corporate-report'
 import { ReportToolbar } from '../_components/report-toolbar'
 import { useReportRuntime } from '../_components/use-report-runtime'
@@ -49,7 +49,7 @@ function RelatorioFuncionarioInner() {
 
   if (!ready) return <div className="p-8 text-center text-sm text-slate-500">Carregando relatório...</div>
   if (!funcionario) return <div className="p-8 text-center">Funcionário não encontrado.</div>
-  if (!canViewCompany(user, empresa?.id || funcionario.company_id, empresas, gruposEmpresariais)) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
+  if (!canAccessCompanyPermission(user, empresa?.id || funcionario.company_id, 'ver_relatorios', empresas, gruposEmpresariais)) return <div className="p-8 text-center">Você não tem permissão para acessar este relatório.</div>
 
   function imprimir() { window.print() }
 
@@ -57,6 +57,7 @@ function RelatorioFuncionarioInner() {
     <>
       <ReportToolbar onPrint={imprimir} />
       <CorporateReport
+        canExport={canAccessCompanyPermission(user, empresa?.id || funcionario.company_id, 'exportar_relatorios', empresas, gruposEmpresariais)}
         title={visao === 'agencia' ? 'Relatório Interno por Funcionário' : 'Relatório por Funcionário'}
         eyebrow={visao === 'agencia' ? 'Visão da agência' : 'Visão da empresa'}
         visao={visao}

@@ -10,7 +10,12 @@ import { addDaysISODate, todayISODate } from '@/lib/date'
 import type { Atendimento, Empresa } from '@/types'
 import { normalizarValor, normalizarData, formatarValor } from './normalizers'
 import { registrarEvento } from './audit'
-import { compactarFinanceiro, loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import {
+  applyDomainApiValueLocally,
+  compactarFinanceiro,
+  loadJSON,
+  safeSetJSON,
+} from '@/lib/storage-quota'
 import { createEntityId } from '@/lib/ids'
 
 export type StatusLancamento = 'pendente' | 'pago' | 'parcial' | 'cancelado' | 'atrasado'
@@ -43,6 +48,7 @@ export interface LancamentoFinanceiro {
   created_at: string
   updated_at?: string
   created_by?: string
+  version?: number
 }
 
 const STORAGE_KEY = 'bbt-financeiro'
@@ -78,6 +84,34 @@ function recalcularStatus(l: LancamentoFinanceiro): StatusLancamento {
 
 export function getAllLancamentos(): LancamentoFinanceiro[] {
   return load().map((l) => ({ ...l, status: recalcularStatus(l) }))
+}
+
+export function substituirLancamentosDoServidor(
+  lancamentos: LancamentoFinanceiro[],
+): boolean {
+  return applyDomainApiValueLocally(
+    STORAGE_KEY,
+    lancamentos.map((item) => compactarFinanceiro(item)),
+  )
+}
+
+export function substituirLancamentosDaEmpresaDoServidor(
+  empresaId: string,
+  lancamentos: LancamentoFinanceiro[],
+): boolean {
+  const outrasEmpresas = load().filter((item) => item.empresa_id !== empresaId)
+  const empresa = lancamentos.filter((item) => item.empresa_id === empresaId)
+  return substituirLancamentosDoServidor([...outrasEmpresas, ...empresa])
+}
+
+export function aplicarLancamentosDoServidor(
+  lancamentos: LancamentoFinanceiro[],
+): boolean {
+  const porId = new Map(load().map((item) => [item.id, item]))
+  for (const lancamento of lancamentos) {
+    porId.set(lancamento.id, lancamento)
+  }
+  return substituirLancamentosDoServidor([...porId.values()])
 }
 
 export function getLancamentosPorAtendimento(atendimentoId: string): LancamentoFinanceiro[] {
@@ -122,6 +156,45 @@ export function excluirLancamento(id: string): boolean {
   all.splice(i, 1)
   save(all)
   return true
+}
+
+export function listarAtendimentosComLancamentosLiquidados(
+  atendimentoIds: Iterable<string>,
+): string[] {
+  const ids = new Set(atendimentoIds)
+  if (!ids.size) return []
+  return Array.from(new Set(
+    load()
+      .filter((lancamento) =>
+        Boolean(lancamento.atendimento_id)
+        && ids.has(lancamento.atendimento_id!)
+        && (
+          normalizarValor(lancamento.valor_pago) > 0
+          || ['pago', 'parcial'].includes(recalcularStatus(lancamento))
+        )
+      )
+      .map((lancamento) => lancamento.atendimento_id!),
+  ))
+}
+
+export function removerLancamentosNaoLiquidadosPorAtendimentos(
+  atendimentoIds: Iterable<string>,
+): number {
+  const ids = new Set(atendimentoIds)
+  if (!ids.size) return 0
+  const bloqueados = listarAtendimentosComLancamentosLiquidados(ids)
+  if (bloqueados.length) {
+    throw new Error(
+      'Existem lancamentos pagos ou parcialmente pagos; a reversao financeira foi bloqueada.',
+    )
+  }
+  const atuais = load()
+  const restantes = atuais.filter((lancamento) =>
+    !lancamento.atendimento_id || !ids.has(lancamento.atendimento_id)
+  )
+  const removidos = atuais.length - restantes.length
+  if (removidos > 0) save(restantes)
+  return removidos
 }
 
 export function pagarLancamento(

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 
 import { QuickAIPopup } from '@/components/ai/quick-ai-popup'
+import { CorporateContextProvider } from '@/components/corporate-context-provider'
 import { Header } from '@/components/header'
 import { Sidebar } from '@/components/sidebar'
 import { setCurrentUser } from '@/lib/auth'
@@ -42,19 +43,21 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
   }, [pathname])
 
   return (
-    <div className="flex min-h-screen bg-[#f4f6fa] dark:bg-[#10142b]">
-      <Sidebar
-        mobileOpen={mobileNavigationOpen}
-        onMobileClose={() => setMobileNavigationOpen(false)}
-      />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <Header onOpenNavigation={() => setMobileNavigationOpen(true)} />
-        <main className="min-w-0 flex-1 overflow-x-hidden p-4 pb-24 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24">
-          {hydratedPath === pathname ? children : <RouteLoadingState />}
-        </main>
-        {hydratedPath === pathname && <QuickAIPopup />}
+    <CorporateContextProvider user={user}>
+      <div className="flex min-h-screen bg-[#f4f6fa] dark:bg-[#10142b]">
+        <Sidebar
+          mobileOpen={mobileNavigationOpen}
+          onMobileClose={() => setMobileNavigationOpen(false)}
+        />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Header onOpenNavigation={() => setMobileNavigationOpen(true)} />
+          <main className="min-w-0 flex-1 overflow-x-hidden p-4 pb-24 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24">
+            {hydratedPath === pathname ? children : <RouteLoadingState />}
+          </main>
+          {hydratedPath === pathname && <QuickAIPopup />}
+        </div>
       </div>
-    </div>
+    </CorporateContextProvider>
   )
 }
 

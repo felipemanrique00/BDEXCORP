@@ -16,6 +16,10 @@ import {
   withTenantTransaction,
 } from '@/lib/server/database'
 import { getRequestContext, requireTenantId } from '@/lib/server/request-context'
+import { syncCorporateDirectoryFromStorage } from '@/lib/server/corporate-directory-sync'
+import { syncTravelDemandsFromStorage } from '@/lib/server/travel-demand-sync'
+import { getDomainRolloutInTransaction } from '@/lib/server/domain-rollout-service'
+import { filterRelationalDemandStorageWrites } from '@/lib/storage-relational-guard'
 
 export { databaseConfigured, getDatabasePool, pingDatabase }
 
@@ -71,7 +75,10 @@ export async function setStorageEntries(
   entries: Record<string, unknown>,
   tenantId = requireTenantId(),
 ): Promise<number> {
-  const filtered = Object.entries(entries).filter(([key]) => isSharedStorageKey(key))
+  const priority: Record<string, number> = { 'bbt-data-v4': 0, 'bbt-atendimentos': 1 }
+  const filtered = Object.entries(entries)
+    .filter(([key]) => isSharedStorageKey(key))
+    .sort(([left], [right]) => (priority[left] ?? 10) - (priority[right] ?? 10) || left.localeCompare(right))
   if (!filtered.length) return 0
 
   const context = getRequestContext()
@@ -94,7 +101,14 @@ export async function setStorageEntries(
     let addedOperations = 0
 
     for (const [key, value] of filtered) {
-      const merged = mergeStorageValues(key, current.get(key), value)
+      const guardedValue = key === 'bbt-atendimentos'
+        ? filterRelationalDemandStorageWrites(
+            current.get(key),
+            value,
+            await getDomainRolloutInTransaction(client, tenantId, 'demands'),
+          )
+        : value
+      const merged = mergeStorageValues(key, current.get(key), guardedValue)
       if (key === 'bbt-atendimentos') {
         addedOperations += countAddedEntityIds(current.get(key), merged)
       }
@@ -107,6 +121,12 @@ export async function setStorageEntries(
            updated_by = excluded.updated_by`,
         [tenantId, key, JSON.stringify(merged ?? null), actorUserId],
       )
+      if (key === 'bbt-data-v4') {
+        await syncCorporateDirectoryFromStorage(client, tenantId, merged, actorUserId)
+      }
+      if (key === 'bbt-atendimentos') {
+        await syncTravelDemandsFromStorage(client, tenantId, merged, actorUserId)
+      }
       current.set(key, merged)
     }
     if (addedOperations > 0) {

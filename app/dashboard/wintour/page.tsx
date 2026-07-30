@@ -1,7 +1,7 @@
 'use client'
 import { todayISODate } from '@/lib/date'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import {
   AlertTriangle, CheckCircle2, Clock, Database, FileSpreadsheet,
@@ -14,12 +14,24 @@ import {
   criarAtendimentoParaLista,
   getAllAtendimentos,
   persistirAtendimentos,
+  persistirAtendimentosRecebidosDoServidor,
   registrarLog,
 } from '@/lib/atendimentos-storage'
+import {
+  DemandClientError,
+  importDemandBatchesOnServer,
+} from '@/lib/demands-client'
 import { criarSequenciadorSerialOS } from '@/lib/atendimento-serial'
-import { upsertVouchersEmitidosBatch } from '@/lib/vouchers-emitidos-storage'
+import {
+  createVoucherBatchKey,
+  upsertVoucherBatchOnServer,
+} from '@/lib/voucher-persistence-client'
 import { asVoucherTipo } from '@/lib/operational-sync'
 import { gerarLancamentosDosAtendimentos } from '@/lib/financeiro'
+import {
+  createFinancialDemandSyncKey,
+  syncFinancialEntriesFromDemandsOnServer,
+} from '@/lib/finance-persistence-client'
 import { parsePDFEmissoes } from '@/lib/emissoes-pdf-parser'
 import {
   buildWintourResult,
@@ -33,16 +45,27 @@ import {
   type WintourImportResult,
   type WintourSaleRecord,
 } from '@/lib/wintour-import'
-import { addWintourImportRun, getAllWintourImportRuns, type WintourImportRun } from '@/lib/wintour-import-storage'
+import { addWintourImportRun, getAllWintourImportRuns } from '@/lib/wintour-import-storage'
+import { listWintourImportRunsFromServer } from '@/lib/wintour-import-history-client'
+import type { WintourImportRun } from '@/lib/wintour-import-history'
 import {
   getWintourEmissorMap,
   removeWintourEmissorMapping,
   setWintourEmissorMapping,
   type WintourEmissorMap,
 } from '@/lib/wintour-emissor-map-storage'
+import {
+  deleteWintourEmissorMappingOnServer,
+  listWintourEmissorMappingsFromServer,
+  upsertWintourEmissorMappingOnServer,
+} from '@/lib/wintour-emissor-mapping-client'
 import { CONFIG_COBRANCA_PADRAO, VOUCHER_PREFIX, type Atendimento, type Empresa, type Funcionario, type Hotel, type VoucherEmitido, type VoucherTipo } from '@/types'
 import { formatCurrency, formatDate } from '@/lib/utils'
-import { compactarLocalStorage, compactarWintourDados } from '@/lib/storage-quota'
+import {
+  commitPendingRemoteStorage,
+  compactarLocalStorage,
+  compactarWintourDados,
+} from '@/lib/storage-quota'
 import { criarSequenciadorCodigoIdentificacao } from '@/lib/funcionario-identidade'
 import { createEntityId } from '@/lib/ids'
 
@@ -77,6 +100,32 @@ function hashCurto(value: string): string {
 
 function gerarIdCadastro(prefix: 'emp' | 'func'): string {
   return createEntityId(prefix)
+}
+
+function mergeWintourHistory(
+  serverItems: WintourImportRun[],
+  legacyItems: WintourImportRun[],
+): WintourImportRun[] {
+  const merged = new Map<string, WintourImportRun>()
+  for (const item of serverItems) merged.set(`server:${item.id}`, item)
+  const serverFingerprints = new Set(serverItems.map((item) => [
+    item.file_name.trim().toUpperCase(),
+    item.imported_at.slice(0, 10),
+    item.created,
+    item.updated,
+  ].join('|')))
+  for (const item of legacyItems) {
+    const fingerprint = [
+      item.file_name.trim().toUpperCase(),
+      item.imported_at.slice(0, 10),
+      item.created,
+      item.updated,
+    ].join('|')
+    if (!serverFingerprints.has(fingerprint)) merged.set(`legacy:${item.id}`, item)
+  }
+  return [...merged.values()]
+    .sort((left, right) => right.imported_at.localeCompare(left.imported_at))
+    .slice(0, 60)
 }
 
 type HotelWintourIndex = {
@@ -119,7 +168,9 @@ export default function WintourPage() {
   const [importProgress, setImportProgress] = useState<{ processed: number; total: number } | null>(null)
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null)
   const [historico, setHistorico] = useState<WintourImportRun[]>(() => getAllWintourImportRuns())
+  const [historicoErro, setHistoricoErro] = useState<string | null>(null)
   const [emissorMap, setEmissorMap] = useState<Record<string, WintourEmissorMap>>(() => getWintourEmissorMap())
+  const [emissorSavingCode, setEmissorSavingCode] = useState<string | null>(null)
 
   const podeImportar = !user || hasPermission(user, 'importar_planilhas') || hasPermission(user, 'gerenciar_usuarios')
   const agentesBBT = useMemo(() => getAgentesBBT(), [])
@@ -135,6 +186,42 @@ export default function WintourPage() {
     }
     return Array.from(byCodigo.values()).sort((a, b) => a.codigo.localeCompare(b.codigo))
   }, [resultado])
+
+  useEffect(() => {
+    let active = true
+    listWintourImportRunsFromServer()
+      .then((items) => {
+        if (!active) return
+        setHistorico(mergeWintourHistory(items, getAllWintourImportRuns()))
+        setHistoricoErro(null)
+      })
+      .catch((error) => {
+        if (!active) return
+        console.error('[wintour:history]', error)
+        setHistoricoErro(error instanceof Error ? error.message : 'Falha ao carregar o historico.')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    listWintourEmissorMappingsFromServer()
+      .then((serverMappings) => {
+        if (!active) return
+        setEmissorMap({
+          ...getWintourEmissorMap(),
+          ...serverMappings,
+        })
+      })
+      .catch((error) => {
+        console.error('[wintour:emissor-mappings]', error)
+      })
+    return () => {
+      active = false
+    }
+  }, [])
 
   const analisePrevia = useMemo(() => {
     const records = (resultado?.records || []).slice(0, PREVIEW_LIMIT)
@@ -241,14 +328,30 @@ export default function WintourPage() {
     return fuzzyAgente(record)?.name || 'Sem mapeamento'
   }
 
-  function alterarEmissor(codigo: string, userId: string) {
+  async function alterarEmissor(codigo: string, userId: string) {
     const agente = agentesBBT.find((item) => item.id === userId)
-    if (!agente) {
-      removeWintourEmissorMapping(codigo)
-    } else {
-      setWintourEmissorMapping(codigo, agente.id, agente.name)
+    setEmissorSavingCode(codigo)
+    try {
+      if (!agente) {
+        await deleteWintourEmissorMappingOnServer(codigo)
+        removeWintourEmissorMapping(codigo)
+        setEmissorMap((current) => {
+          const next = { ...current }
+          delete next[codigo]
+          return next
+        })
+      } else {
+        const mapping = await upsertWintourEmissorMappingOnServer(codigo, agente.id)
+        setWintourEmissorMapping(mapping.codigo, mapping.user_id, mapping.user_name)
+        setEmissorMap((current) => ({ ...current, [mapping.codigo]: mapping }))
+      }
+      toast.success('Mapeamento de emissor atualizado.')
+    } catch (error) {
+      console.error('[wintour:emissor-mapping:update]', error)
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel atualizar o emissor.')
+    } finally {
+      setEmissorSavingCode((current) => current === codigo ? null : current)
     }
-    setEmissorMap(getWintourEmissorMap())
   }
 
   function criarEmpresaMinima(record: WintourSaleRecord): Empresa {
@@ -438,7 +541,7 @@ export default function WintourPage() {
     atendimento: Atendimento,
     empresa: Empresa,
     funcionario: Funcionario | null
-  ): Omit<VoucherEmitido, 'created_at'> & { created_at?: string } {
+  ): VoucherEmitido {
     const tipo: VoucherTipo = asVoucherTipo(record.tipo_servico)
     const base = [
       record.venda_numero,
@@ -523,6 +626,7 @@ export default function WintourPage() {
       fingerprint: `wintour_voucher|${hashCurto(base)}|${normalizarBuscaLocal(base)}`,
       emitido_por_user_id: atendimento.agente_user_id,
       emitido_por_user_name: atendimento.emissor_nome || agenteNomePara(record),
+      created_at: new Date().toISOString(),
     }
   }
 
@@ -539,6 +643,7 @@ export default function WintourPage() {
     let novosHoteis = 0
     let vouchersSincronizados = 0
     let financeiroSincronizado = 0
+    let demandasPersistidasRelacionalmente = false
     const fingerprints: string[] = []
 
     try {
@@ -641,34 +746,101 @@ export default function WintourPage() {
           funcionarios: funcionariosParaAdicionar,
           hoteis: hoteisParaAdicionar,
         })
+        await commitPendingRemoteStorage()
       }
 
-      if (!persistirAtendimentos(atendimentosAtuais)) {
-        throw new Error('Nao foi possivel salvar os atendimentos importados. O armazenamento local/servidor recusou a gravacao.')
+      const demandasDoLote = Array.from(atendimentosSalvos.values())
+      if (demandasDoLote.length) {
+        try {
+          const importacao = await importDemandBatchesOnServer(
+            demandasDoLote,
+            'wintour',
+            `wintour:${hashCurto(`${resultado.file_name}|${fingerprints.join('|')}`)}`,
+            (processed, total) => setImportProgress({ processed, total }),
+            {
+              fileName: resultado.file_name,
+              sourceFormat: resultado.source_format,
+              periodStart: resultado.summary.periodo_inicio,
+              periodEnd: resultado.summary.periodo_fim,
+              totalRecords: resultado.records.length,
+              totalValue: resultado.summary.total_venda,
+              totalCost: resultado.summary.total_custo,
+              totalMarkup: resultado.summary.total_markup,
+            },
+          )
+          const retornadas = new Map(importacao.demands.map((demanda) => [demanda.id, demanda]))
+          const listaSincronizada = atendimentosAtuais.map((demanda) => retornadas.get(demanda.id) || demanda)
+          if (!persistirAtendimentosRecebidosDoServidor(listaSincronizada)) {
+            toast.warning('O lote foi salvo no servidor, mas o cache local sera renovado no proximo carregamento.')
+          }
+          importacao.demands.forEach((demanda) => atendimentosSalvos.set(demanda.id, demanda))
+          criadas = importacao.inserted
+          atualizadas = importacao.updated
+          ignoradas += Math.max(0, importacao.skipped - importacao.failures.length)
+          erros += importacao.failures.length
+          demandasPersistidasRelacionalmente = true
+        } catch (error) {
+          if (!(error instanceof DemandClientError) || error.code !== 'DEMAND_RELATIONAL_WRITE_DISABLED') {
+            throw error
+          }
+          if (!persistirAtendimentos(atendimentosAtuais)) {
+            throw new Error('Nao foi possivel salvar os atendimentos importados no modo legado.')
+          }
+          await commitPendingRemoteStorage()
+        }
       }
 
-      const financeiro = gerarLancamentosDosAtendimentos(Array.from(atendimentosSalvos.values()))
-      financeiroSincronizado = financeiro.total
-      vouchersSincronizados = upsertVouchersEmitidosBatch(Array.from(vouchersParaSalvar.values())).length
+      const demandasFinanceiras = Array.from(atendimentosSalvos.values())
+      if (demandasPersistidasRelacionalmente && demandasFinanceiras.length) {
+        const ids = demandasFinanceiras.map((demanda) => demanda.id)
+        const stateFingerprint = demandasFinanceiras
+          .map((demanda) => [
+            demanda.id,
+            demanda.updated_at || '',
+            demanda.status,
+            demanda.valor_venda || demanda.valor_final || demanda.valor_cotacao || 0,
+            demanda.valor_custo || 0,
+          ].join('|'))
+          .sort()
+          .join('\n')
+        const financeiro = await syncFinancialEntriesFromDemandsOnServer(
+          ids,
+          createFinancialDemandSyncKey('wintour', ids, stateFingerprint),
+        )
+        financeiroSincronizado = financeiro.entries.length
+      } else {
+        const financeiro = gerarLancamentosDosAtendimentos(demandasFinanceiras)
+        financeiroSincronizado = financeiro.total
+      }
+      const vouchersDoLote = Array.from(vouchersParaSalvar.values())
+      if (vouchersDoLote.length) {
+        const vouchersPersistidos = await upsertVoucherBatchOnServer(
+          vouchersDoLote,
+          createVoucherBatchKey(`wintour-${resultado.file_name}`, vouchersDoLote),
+        )
+        vouchersSincronizados = vouchersPersistidos.length
+      }
       compactarLocalStorage()
 
-      addWintourImportRun({
-        file_name: resultado.file_name,
-        source_format: resultado.source_format,
-        imported_by_user_id: user.id,
-        imported_by_user_name: user.name,
-        periodo_inicio: resultado.summary.periodo_inicio,
-        periodo_fim: resultado.summary.periodo_fim,
-        total_records: resultado.records.length,
-        total_value: resultado.summary.total_venda,
-        total_cost: resultado.summary.total_custo,
-        total_markup: resultado.summary.total_markup,
-        created: criadas,
-        updated: atualizadas,
-        ignored: ignoradas,
-        errors: erros,
-        fingerprints,
-      })
+      if (!demandasPersistidasRelacionalmente) {
+        addWintourImportRun({
+          file_name: resultado.file_name,
+          source_format: resultado.source_format,
+          imported_by_user_id: user.id,
+          imported_by_user_name: user.name,
+          periodo_inicio: resultado.summary.periodo_inicio,
+          periodo_fim: resultado.summary.periodo_fim,
+          total_records: resultado.records.length,
+          total_value: resultado.summary.total_venda,
+          total_cost: resultado.summary.total_custo,
+          total_markup: resultado.summary.total_markup,
+          created: criadas,
+          updated: atualizadas,
+          ignored: ignoradas,
+          errors: erros,
+          fingerprints,
+        })
+      }
 
       registrarLog({
         user_id: user.id,
@@ -690,7 +862,14 @@ export default function WintourPage() {
         vouchers: vouchersSincronizados,
         financeiro: financeiroSincronizado,
       })
-      setHistorico(getAllWintourImportRuns())
+      try {
+        const serverHistory = await listWintourImportRunsFromServer()
+        setHistorico(mergeWintourHistory(serverHistory, getAllWintourImportRuns()))
+        setHistoricoErro(null)
+      } catch (historyError) {
+        console.error('[wintour:history-refresh]', historyError)
+        setHistoricoErro(historyError instanceof Error ? historyError.message : 'Falha ao atualizar o historico.')
+      }
       toast.success(`Wintour sincronizado: ${criadas} novas, ${atualizadas} atualizadas, ${vouchersSincronizados} voucher(s).`)
     } catch (error: any) {
       console.error(error)
@@ -756,6 +935,9 @@ export default function WintourPage() {
                 </div>
               ))}
             </div>
+          )}
+          {historicoErro && (
+            <p className="text-xs text-amber-700 dark:text-amber-300">{historicoErro}</p>
           )}
         </div>
       </div>
@@ -846,7 +1028,8 @@ export default function WintourPage() {
                     </div>
                     <select
                       value={emissorMap[emissor.codigo]?.user_id || fuzzyAgente({ emissor_codigo: emissor.codigo } as WintourSaleRecord)?.id || ''}
-                      onChange={(event) => alterarEmissor(emissor.codigo, event.target.value)}
+                      onChange={(event) => void alterarEmissor(emissor.codigo, event.target.value)}
+                      disabled={emissorSavingCode === emissor.codigo}
                       className="bbt-input w-full text-sm"
                     >
                       <option value="">Nao mapear / usar usuario atual</option>
@@ -858,7 +1041,7 @@ export default function WintourPage() {
                 ))}
               </div>
               <p className="text-xs text-slate-500 mt-3">
-                Esse vinculo fica salvo no navegador. Na proxima importacao, o mesmo emissor do Wintour ja cai no agente BBT correto para produtividade e faturamento por agente.
+                O vínculo é salvo com segurança para o tenant. Na próxima importação, o mesmo emissor do Wintour será associado ao agente BBT correto para produtividade e faturamento.
               </p>
             </div>
           )}

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import { guardApiRequest } from '@/lib/security/api-guard'
+import { CorporateAccessDeniedError } from '@/lib/server/corporate-access-service'
 import {
   resendTenantUserInvite,
   UserConflictError,
@@ -31,6 +32,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     })
     return NextResponse.json({ ok: true })
   } catch (error) {
+    if (error instanceof CorporateAccessDeniedError) {
+      return NextResponse.json({ ok: false, error: error.message, code: error.code }, { status: 403 })
+    }
     if (error instanceof UserConflictError) return NextResponse.json({ ok: false, error: error.message }, { status: 409 })
     if (error instanceof UserNotFoundError) return NextResponse.json({ ok: false, error: error.message }, { status: 404 })
     if (error instanceof UserInvitationUnavailableError) return NextResponse.json({ ok: false, error: error.message }, { status: 503 })

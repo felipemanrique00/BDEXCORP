@@ -1,0 +1,1546 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>Documentacao tecnica, API e implantacao</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: #162033; font-family: Arial, Helvetica, sans-serif; line-height: 1.48; background: #fff; }
+  .cover { min-height: 100vh; padding: 34mm 18mm 20mm; color: #fff; background: linear-gradient(135deg, #061631 0%, #0b2f6b 52%, #3159b7 100%); position: relative; overflow: hidden; page-break-after: always; }
+  .cover::after { content: ""; position: absolute; width: 420px; height: 420px; border-radius: 999px; right: -140px; bottom: -120px; border: 46px solid rgba(255,255,255,.08); }
+  .brand-mark { width: 62px; height: 62px; border-radius: 16px; background: #fff; color: #061631; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 800; margin-bottom: 34px; }
+  .eyebrow { font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: #bdd7ff; font-weight: 700; }
+  .cover h1 { margin: 16px 0 12px; font-size: 48px; line-height: 1.05; letter-spacing: -0.02em; color: #fff; page-break-before: auto; border: 0; padding: 0; }
+  .cover h2 { margin: 0; max-width: 620px; font-size: 20px; line-height: 1.35; color: #dce9ff; font-weight: 500; }
+  .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 42px; max-width: 620px; }
+  .meta { border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.08); border-radius: 10px; padding: 12px 14px; }
+  .meta small { display: block; color: #b7c9ee; font-size: 10px; text-transform: uppercase; letter-spacing: .12em; margin-bottom: 4px; }
+  .meta strong { font-size: 14px; color: #fff; }
+  main { max-width: 100%; }
+  h1 { color: #061631; font-size: 28px; line-height: 1.18; margin: 0 0 18px; padding-bottom: 8px; border-bottom: 2px solid #dbe7ff; page-break-before: always; }
+  h2 { color: #0b2f6b; font-size: 20px; margin: 22px 0 9px; line-height: 1.25; }
+  h3 { color: #1f3d72; font-size: 15px; margin: 16px 0 7px; }
+  p { margin: 0 0 9px; font-size: 10.7pt; }
+  ul, ol { margin-top: 6px; padding-left: 22px; }
+  li { margin-bottom: 4px; font-size: 10.5pt; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 16px; font-size: 9.2pt; page-break-inside: auto; }
+  tr { page-break-inside: avoid; page-break-after: auto; }
+  th { background: #061631; color: #fff; text-align: left; font-weight: 700; padding: 8px 9px; border: 1px solid #061631; vertical-align: middle; }
+  td { padding: 7px 9px; border: 1px solid #d7e0ee; vertical-align: top; }
+  tbody tr:nth-child(even) td { background: #f7f9fd; }
+  code { font-family: Consolas, "Courier New", monospace; color: #0b2f6b; background: #eef4ff; padding: 1px 4px; border-radius: 4px; }
+  pre { background: #07111f; color: #edf5ff; padding: 12px; border-radius: 8px; overflow-wrap: break-word; white-space: pre-wrap; font-size: 8.8pt; line-height: 1.45; page-break-inside: avoid; }
+  pre code { background: transparent; color: inherit; padding: 0; }
+  blockquote { margin: 12px 0; padding: 10px 14px; border-left: 4px solid #3159b7; background: #f2f6ff; color: #1c2d4a; }
+  .doc-footer { margin-top: 28px; padding-top: 10px; border-top: 1px solid #d7e0ee; color: #68758b; font-size: 9pt; }
+  strong { color: #0f1f38; }
+  .first h1:first-child { page-break-before: auto; }
+</style>
+</head>
+<body>
+  <section class="cover">
+    <div class="brand-mark">B</div>
+    <div class="eyebrow">BBT Corporate · BDEX VERSÃO TESTE</div>
+    <h1>BDEX</h1>
+    <h2>Arquitetura, requisitos, banco de dados, APIs, integracoes, seguranca e deploy em producao.</h2>
+    <div class="meta-grid">
+      <div class="meta"><small>Documento</small><strong>Documentacao tecnica, API e implantacao</strong></div>
+      <div class="meta"><small>Publico</small><strong>TI, desenvolvedores, integradores e suporte tecnico</strong></div>
+      <div class="meta"><small>Data</small><strong>21/05/2026</strong></div>
+      <div class="meta"><small>Responsavel</small><strong>BBT Corporate</strong></div>
+      <div class="meta"><small>Suporte</small><strong>62-994330797</strong></div>
+      <div class="meta"><small>E-mail</small><strong>BDEXTECNOLOGIA@GMAIL.COM</strong></div>
+    </div>
+  </section>
+  <main class="first"><h1>Documentação técnica, API e implantação</h1>
+<h2>1. Sumário técnico</h2>
+<ol>
+<li>Introducao técnica</li>
+<li>Arquitetura do sistema</li>
+<li>Requisitos técnicos</li>
+<li>Ambientes</li>
+<li>Instalacao e ativacao</li>
+<li>Configuracoes iniciais</li>
+<li>Banco de dados</li>
+<li>Autenticação e autorização</li>
+<li>Documentação de API</li>
+<li>Integrações externas</li>
+<li>Webhooks</li>
+<li>Logs e auditoria</li>
+<li>Segurança técnica</li>
+<li>Backup e recuperacao</li>
+<li>Monitoramento</li>
+<li>Troubleshooting</li>
+<li>Checklist de implantação</li>
+<li>Glossario técnico</li>
+<li>Pendências tecnicas</li>
+<li>Conclusão técnica</li>
+</ol>
+<h2>2. Introducao técnica</h2>
+<p>Este documento descreve a estrutura técnica do <strong>BDEX</strong>, sistema desenvolvido para gestao de viagens corporativas, demandas, vouchers, fornecedores, Wintour, financeiro, portal empresa e IA operacional.</p>
+<h3>2.1 Publico-alvo</h3>
+<ul>
+<li>Equipes de TI.</li>
+<li>Desenvolvedores.</li>
+<li>Integradores.</li>
+<li>Suporte técnico.</li>
+<li>Administradores de infraestrutura.</li>
+<li>Responsaveis por implantação e manutenção.</li>
+</ul>
+<h3>2.2 Escopo</h3>
+<p>O documento cobre arquitetura, requisitos, ambiente, banco de dados, APIs, integrações, segurança, backup, monitoramento e troubleshooting. Informacoes ainda nao confirmadas estao sinalizadas como <strong>[INFORMAÇÃO A CONFIRMAR]</strong>.</p>
+<h2>3. Arquitetura do sistema</h2>
+<h3>3.1 Visão geral</h3>
+<p>O BDEX é uma aplicacao web baseada em Next.js, React e TypeScript. O front-end e o back-end convivem no mesmo projeto por meio de rotas App Router e API Routes. O armazenamento de produção previsto e PostgreSQL, com compatibilidade de storage chave-valor/app_kv e fallback local para ambientes de desenvolvimento/homologacao.</p>
+<h3>3.2 Componentes principais</h3>
+<table>
+<thead>
+<tr>
+<th>Componente</th>
+<th>Tecnologia</th>
+<th>Responsabilidade</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Front-end</td>
+<td>Next.js, React, TypeScript, Tailwind CSS</td>
+<td>Interfaces operacionais, dashboards, formularios e portal empresa.</td>
+</tr>
+<tr>
+<td>Back-end</td>
+<td>Next.js API Routes, Node.js</td>
+<td>APIs internas, integrações, IA, autenticação e storage.</td>
+</tr>
+<tr>
+<td>Banco</td>
+<td>PostgreSQL</td>
+<td>Dados centrais, sessoes, demandas, vouchers, financeiro, IA e auditoria.</td>
+</tr>
+<tr>
+<td>IA</td>
+<td>OpenAI e Gemini opcional</td>
+<td>Chat, busca, extracao de dados, audio e automacao assistida.</td>
+</tr>
+<tr>
+<td>Fornecedores</td>
+<td>Tech Travel/TTravel</td>
+<td>Hub para aéreo, hotelaria, locação, pacotes e outros serviços.</td>
+</tr>
+<tr>
+<td>Wintour</td>
+<td>Importacao por arquivo</td>
+<td>Sincronizacao diaria de vendas/emissões.</td>
+</tr>
+<tr>
+<td>WhatsApp</td>
+<td>Evolution API</td>
+<td>Canal de atendimento e IA BIA.</td>
+</tr>
+<tr>
+<td>Infra</td>
+<td>Ubuntu, Nginx, systemd, SSL</td>
+<td>Hospedagem e operação em produção.</td>
+</tr>
+</tbody></table>
+<h3>3.3 Comunicacao entre componentes</h3>
+<ol>
+<li>Usuário acessa o front-end pelo navegador.</li>
+<li>Front-end chama APIs internas em <code>/api/*</code>.</li>
+<li>APIs validam sessao/permissão.</li>
+<li>APIs leem/escrevem no storage ou PostgreSQL.</li>
+<li>Quando necessário, APIs chamam OpenAI, Gemini, Tech Travel ou WhatsApp.</li>
+<li>Logs e auditoria registram ações relevantes.</li>
+</ol>
+<h2>4. Requisitos técnicos</h2>
+<h3>4.1 Servidor recomendado</h3>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Requisito</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Sistema operacional</td>
+<td>Ubuntu Server 24.04 LTS 64-bit</td>
+</tr>
+<tr>
+<td>Memoria RAM</td>
+<td>16 GB</td>
+</tr>
+<tr>
+<td>Processador</td>
+<td>6 a 8 vCPU</td>
+</tr>
+<tr>
+<td>Disco</td>
+<td>250 GB NVMe SSD</td>
+</tr>
+<tr>
+<td>Acesso</td>
+<td>root/SSH</td>
+</tr>
+<tr>
+<td>Banco de dados</td>
+<td>PostgreSQL</td>
+</tr>
+<tr>
+<td>Web server</td>
+<td>Nginx</td>
+</tr>
+<tr>
+<td>Runtime</td>
+<td>Node.js LTS, minimo Node 20.9+</td>
+</tr>
+<tr>
+<td>Extras</td>
+<td>SSL/HTTPS, firewall, backup diario automatico e snapshot semanal</td>
+</tr>
+</tbody></table>
+<h3>4.2 Navegadores suportados</h3>
+<ul>
+<li>Google Chrome atual.</li>
+<li>Microsoft Edge atual.</li>
+<li>Navegadores Chromium recentes.</li>
+</ul>
+<h3>4.3 Dependencias principais</h3>
+<table>
+<thead>
+<tr>
+<th>Dependencia</th>
+<th>Uso</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>next</code></td>
+<td>Aplicacao web e API routes.</td>
+</tr>
+<tr>
+<td><code>react</code> / <code>react-dom</code></td>
+<td>Interface.</td>
+</tr>
+<tr>
+<td><code>typescript</code></td>
+<td>Tipagem.</td>
+</tr>
+<tr>
+<td><code>tailwindcss</code></td>
+<td>Estilo.</td>
+</tr>
+<tr>
+<td><code>pg</code></td>
+<td>PostgreSQL.</td>
+</tr>
+<tr>
+<td><code>zod</code></td>
+<td>Validação.</td>
+</tr>
+<tr>
+<td><code>recharts</code></td>
+<td>Graficos.</td>
+</tr>
+<tr>
+<td><code>leaflet</code></td>
+<td>Mapas.</td>
+</tr>
+<tr>
+<td><code>pdfjs-dist</code></td>
+<td>Leitura de PDFs.</td>
+</tr>
+<tr>
+<td><code>papaparse</code></td>
+<td>CSV.</td>
+</tr>
+<tr>
+<td><code>xlsx</code> alias <code>@e965/xlsx</code></td>
+<td>Planilhas.</td>
+</tr>
+<tr>
+<td><code>qrcode.react</code></td>
+<td>QR code do WhatsApp.</td>
+</tr>
+</tbody></table>
+<h2>5. Ambientes</h2>
+<table>
+<thead>
+<tr>
+<th>Ambiente</th>
+<th>Objetivo</th>
+<th>Observacao</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Desenvolvimento</td>
+<td>Evolucao local do sistema.</td>
+<td>Pode usar <code>.env.local</code> e storage local.</td>
+</tr>
+<tr>
+<td>Homologacao</td>
+<td>Testes com equipe piloto.</td>
+<td>Deve usar banco compartilhado e chaves de teste.</td>
+</tr>
+<tr>
+<td>Produção</td>
+<td>Uso oficial.</td>
+<td>Deve usar HTTPS, PostgreSQL, backup e credenciais reais.</td>
+</tr>
+</tbody></table>
+<h3>5.1 Variaveis de ambiente principais</h3>
+<table>
+<thead>
+<tr>
+<th>Variavel</th>
+<th>Obrigatoria</th>
+<th>Descricao</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>PORT</code></td>
+<td>Sim</td>
+<td>Porta do Next.js.</td>
+</tr>
+<tr>
+<td><code>APP_URL</code></td>
+<td>Sim</td>
+<td>URL publica da aplicacao.</td>
+</tr>
+<tr>
+<td><code>NEXT_PUBLIC_APP_URL</code></td>
+<td>Sim</td>
+<td>URL publica usada no front-end.</td>
+</tr>
+<tr>
+<td><code>DATABASE_URL</code></td>
+<td>Sim em produção</td>
+<td>String de conexao PostgreSQL.</td>
+</tr>
+<tr>
+<td><code>DATABASE_SSL</code></td>
+<td>Conforme provedor</td>
+<td>Habilita TLS no banco.</td>
+</tr>
+<tr>
+<td><code>AUTH_SECRET</code></td>
+<td>Sim</td>
+<td>Segredo de sessao.</td>
+</tr>
+<tr>
+<td><code>AUTH_REQUIRE_SESSION</code></td>
+<td>Sim</td>
+<td>Exige sessao nas APIs protegidas.</td>
+</tr>
+<tr>
+<td><code>BBT_SUPER_MASTER_PASSWORD</code></td>
+<td>Sim</td>
+<td>Senha administrativa inicial.</td>
+</tr>
+<tr>
+<td><code>OPENAI_API_KEY</code></td>
+<td>Sim para IA completa</td>
+<td>Chave do cerebro IA principal.</td>
+</tr>
+<tr>
+<td><code>OPENAI_MODEL</code></td>
+<td>Sim</td>
+<td>Modelo principal, padrao <code>gpt-5.2</code>.</td>
+</tr>
+<tr>
+<td><code>GEMINI_API_KEY</code></td>
+<td>Opcional</td>
+<td>Busca/hotéis via Gemini quando configurado.</td>
+</tr>
+<tr>
+<td><code>TECH_API_ENABLED</code></td>
+<td>Sim para Tech</td>
+<td>Liga/desliga integração Tech.</td>
+</tr>
+<tr>
+<td><code>TECH_API_BASE_URL</code></td>
+<td>Sim para Tech</td>
+<td>Base URL da Tech Travel.</td>
+</tr>
+<tr>
+<td><code>TECH_API_LOGIN</code></td>
+<td>Sim para Tech</td>
+<td>Login Tech.</td>
+</tr>
+<tr>
+<td><code>TECH_API_PASSWORD</code></td>
+<td>Sim para Tech</td>
+<td>Senha Tech.</td>
+</tr>
+<tr>
+<td><code>TECH_API_KEY</code></td>
+<td>Se exigida</td>
+<td>Chave adicional da Tech.</td>
+</tr>
+<tr>
+<td><code>WHATSAPP_PROVIDER</code></td>
+<td>Sim para WhatsApp</td>
+<td>Provedor: Evolution API.</td>
+</tr>
+<tr>
+<td><code>WHATSAPP_API_BASE_URL</code></td>
+<td>Sim para WhatsApp</td>
+<td>URL da API WhatsApp.</td>
+</tr>
+<tr>
+<td><code>WHATSAPP_API_KEY</code></td>
+<td>Sim para WhatsApp</td>
+<td>Token/chave.</td>
+</tr>
+<tr>
+<td><code>WHATSAPP_INSTANCE_ID</code></td>
+<td>Sim para WhatsApp</td>
+<td>Instancia.</td>
+</tr>
+</tbody></table>
+<h2>6. Instalacao ou ativacao do sistema</h2>
+<h3>6.1 Preparacao do servidor</h3>
+<pre><code class="language-bash">sudo apt update &amp;&amp; sudo apt upgrade -y
+sudo apt install -y curl git nginx postgresql postgresql-contrib ufw certbot python3-certbot-nginx
+</code></pre>
+<p>Instalar Node.js LTS 20.9+ ou superior:</p>
+<pre><code class="language-bash">curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+node -v
+npm -v
+</code></pre>
+<h3>6.2 Banco PostgreSQL</h3>
+<pre><code class="language-bash">sudo -u postgres psql
+CREATE DATABASE bbt_corporate;
+CREATE USER bbt_user WITH ENCRYPTED PASSWORD &#39;SENHA_FORTE&#39;;
+GRANT ALL PRIVILEGES ON DATABASE bbt_corporate TO bbt_user;
+\q
+</code></pre>
+<p>Executar schemas:</p>
+<pre><code class="language-bash">psql &quot;$DATABASE_URL&quot; -f deploy/postgres/schema.sql
+psql &quot;$DATABASE_URL&quot; -f deploy/postgres/assistant-schema.sql
+psql &quot;$DATABASE_URL&quot; -f deploy/postgres/production-core-schema.sql
+psql &quot;$DATABASE_URL&quot; -f deploy/postgres/techtravel-schema.sql
+</code></pre>
+<h3>6.3 Build e start</h3>
+<pre><code class="language-bash">npm ci
+npm run build
+npm run start
+</code></pre>
+<p>Para produção, usar systemd com o arquivo base em <code>deploy/systemd/bbt-corporate.service</code>.</p>
+<h3>6.4 Nginx e SSL</h3>
+<p>Usar o arquivo base em <code>deploy/nginx/bbt-corporate.conf</code>, ajustar dominio final e ativar SSL:</p>
+<pre><code class="language-bash">sudo ln -s /etc/nginx/sites-available/bbt-corporate.conf /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot --nginx -d SEU_DOMINIO
+</code></pre>
+<p>Dominio de produção: <strong>[INFORMAÇÃO A CONFIRMAR - será informado na versão final]</strong>.</p>
+<h2>7. Configuracoes iniciais</h2>
+<ol>
+<li>Configurar <code>.env.local</code> ou variaveis de ambiente no servidor.</li>
+<li>Configurar banco PostgreSQL.</li>
+<li>Configurar usuário master.</li>
+<li>Configurar OpenAI para IA completa.</li>
+<li>Configurar Tech Travel como integração principal.</li>
+<li>Configurar Evolution API para WhatsApp.</li>
+<li>Cadastrar empresas.</li>
+<li>Cadastrar solicitantes e permissões.</li>
+<li>Cadastrar viajantes/funcionarios.</li>
+<li>Cadastrar politicas, centros de custo e regras financeiras.</li>
+<li>Testar importacao Wintour.</li>
+<li>Testar cotação/reserva Tech.</li>
+<li>Testar portal empresa.</li>
+<li>Testar relatórios, financeiro, auditoria e backup.</li>
+</ol>
+<h2>8. Banco de dados</h2>
+<h3>8.1 Tipo de banco</h3>
+<p>Banco previsto para produção: <strong>PostgreSQL</strong>.</p>
+<p>O projeto tambem preserva compatibilidade com storage chave-valor/app_kv e fallback local para ambientes de transicao, desenvolvimento ou homologacao.</p>
+<h3>8.2 Principais tabelas do core</h3>
+<table>
+<thead>
+<tr>
+<th>Tabela</th>
+<th>Finalidade</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tenants</code></td>
+<td>Estrutura SaaS/multiempresa.</td>
+</tr>
+<tr>
+<td><code>companies</code></td>
+<td>Empresas clientes.</td>
+</tr>
+<tr>
+<td><code>users</code></td>
+<td>Usuários internos e externos.</td>
+</tr>
+<tr>
+<td><code>user_credentials</code></td>
+<td>Credenciais e senha.</td>
+</tr>
+<tr>
+<td><code>roles</code> / <code>permissions</code></td>
+<td>Controle de acesso.</td>
+</tr>
+<tr>
+<td><code>company_memberships</code></td>
+<td>Vinculo usuário-empresa.</td>
+</tr>
+<tr>
+<td><code>user_sessions</code></td>
+<td>Sessoes.</td>
+</tr>
+<tr>
+<td><code>employees</code></td>
+<td>Viajantes/funcionarios.</td>
+</tr>
+<tr>
+<td><code>requesters</code></td>
+<td>Solicitantes das empresas.</td>
+</tr>
+<tr>
+<td><code>hotels</code></td>
+<td>Hotéis cadastrados.</td>
+</tr>
+<tr>
+<td><code>demands</code></td>
+<td>Demandas/solicitações.</td>
+</tr>
+<tr>
+<td><code>demand_events</code></td>
+<td>Histórico da demanda.</td>
+</tr>
+<tr>
+<td><code>approvals</code></td>
+<td>Aprovações.</td>
+</tr>
+<tr>
+<td><code>reservations</code></td>
+<td>Reservas.</td>
+</tr>
+<tr>
+<td><code>vouchers</code></td>
+<td>Vouchers emitidos.</td>
+</tr>
+<tr>
+<td><code>files</code></td>
+<td>Arquivos anexos.</td>
+</tr>
+<tr>
+<td><code>financial_entries</code></td>
+<td>Lancamentos financeiros.</td>
+</tr>
+<tr>
+<td><code>import_jobs</code></td>
+<td>Importacoes.</td>
+</tr>
+<tr>
+<td><code>audit_logs</code></td>
+<td>Auditoria.</td>
+</tr>
+</tbody></table>
+<h3>8.3 Tabelas da IA/assistente</h3>
+<table>
+<thead>
+<tr>
+<th>Tabela</th>
+<th>Finalidade</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>assistant_settings</code></td>
+<td>Configuracoes da IA BIA.</td>
+</tr>
+<tr>
+<td><code>assistant_voice_settings</code></td>
+<td>Voz e audio.</td>
+</tr>
+<tr>
+<td><code>assistant_tools</code></td>
+<td>Ferramentas permitidas.</td>
+</tr>
+<tr>
+<td><code>assistant_tool_logs</code></td>
+<td>Execucoes de ferramentas.</td>
+</tr>
+<tr>
+<td><code>assistant_audit_logs</code></td>
+<td>Auditoria da IA.</td>
+</tr>
+<tr>
+<td><code>whatsapp_sessions</code></td>
+<td>Sessao WhatsApp.</td>
+</tr>
+<tr>
+<td><code>conversations</code></td>
+<td>Conversas.</td>
+</tr>
+<tr>
+<td><code>conversation_messages</code></td>
+<td>Mensagens.</td>
+</tr>
+<tr>
+<td><code>generated_documents</code></td>
+<td>Documentos gerados.</td>
+</tr>
+<tr>
+<td><code>voucher_send_logs</code></td>
+<td>Envio de vouchers.</td>
+</tr>
+<tr>
+<td><code>audio_transcription_logs</code></td>
+<td>Logs de transcrição.</td>
+</tr>
+</tbody></table>
+<h3>8.4 Tabelas Tech Travel</h3>
+<table>
+<thead>
+<tr>
+<th>Tabela</th>
+<th>Finalidade</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>integration_connections</code></td>
+<td>Conexoes externas.</td>
+</tr>
+<tr>
+<td><code>provider_company_links</code></td>
+<td>Relacao empresa BDEX x empresa provedor.</td>
+</tr>
+<tr>
+<td><code>integration_logs</code></td>
+<td>Logs da Tech.</td>
+</tr>
+<tr>
+<td><code>travel_quotes</code></td>
+<td>Cotacoes.</td>
+</tr>
+<tr>
+<td><code>travel_reservations</code></td>
+<td>Reservas.</td>
+</tr>
+</tbody></table>
+<h2>9. Autenticação e autorização</h2>
+<h3>9.1 Login</h3>
+<p>O login usa endpoint interno <code>/api/auth/login</code>. Em produção, APIs protegidas devem usar <code>AUTH_REQUIRE_SESSION=true</code>.</p>
+<h3>9.2 Perfis de usuário</h3>
+<ul>
+<li><code>master</code></li>
+<li><code>company_admin</code></li>
+<li><code>colaborador</code></li>
+</ul>
+<h3>9.3 Perfis internos BBT</h3>
+<ul>
+<li><code>lider</code></li>
+<li><code>gestor_financeiro</code></li>
+<li><code>supervisor</code></li>
+<li><code>agente</code></li>
+<li><code>operacional</code></li>
+</ul>
+<h3>9.4 Permissões principais</h3>
+<table>
+<thead>
+<tr>
+<th>Permissão</th>
+<th>Uso</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ver_financeiro</code></td>
+<td>Visualizar módulo financeiro.</td>
+</tr>
+<tr>
+<td><code>editar_financeiro</code></td>
+<td>Alterar dados financeiros.</td>
+</tr>
+<tr>
+<td><code>cadastrar_empresas</code></td>
+<td>Criar/editar empresas.</td>
+</tr>
+<tr>
+<td><code>cadastrar_funcionarios</code></td>
+<td>Criar/editar viajantes.</td>
+</tr>
+<tr>
+<td><code>cadastrar_hoteis</code></td>
+<td>Criar/editar hotéis.</td>
+</tr>
+<tr>
+<td><code>editar_politicas</code></td>
+<td>Alterar politicas.</td>
+</tr>
+<tr>
+<td><code>gerar_relatorios</code></td>
+<td>Acessar relatórios.</td>
+</tr>
+<tr>
+<td><code>importar_planilhas</code></td>
+<td>Importar Wintour e bases.</td>
+</tr>
+<tr>
+<td><code>ver_produtividade_todos</code></td>
+<td>Ver produtividade geral.</td>
+</tr>
+<tr>
+<td><code>gerenciar_usuarios</code></td>
+<td>Gerenciar usuários.</td>
+</tr>
+<tr>
+<td><code>excluir_demandas</code></td>
+<td>Excluir demandas.</td>
+</tr>
+<tr>
+<td><code>aprovar_demandas</code></td>
+<td>Aprovar exceções.</td>
+</tr>
+</tbody></table>
+<h2>10. Documentação de API</h2>
+<p>Padrao geral:</p>
+<ul>
+<li>Base URL: <code>https://SEU_DOMINIO</code></li>
+<li>Content-Type: <code>application/json</code></li>
+<li>Autenticação: sessao/cookie quando <code>AUTH_REQUIRE_SESSION=true</code></li>
+<li>Respostas de erro devem retornar JSON com <code>ok: false</code> ou <code>error</code></li>
+</ul>
+<h3>10.1 Autenticação, storage e auditoria</h3>
+<table>
+<thead>
+<tr>
+<th>Metodo</th>
+<th>Endpoint</th>
+<th>Descricao</th>
+<th>Body/Query</th>
+<th>Response esperado</th>
+<th>Erros comuns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/api/auth/login</code></td>
+<td>Autentica usuário.</td>
+<td><code>{ &quot;email&quot;: &quot;...&quot;, &quot;password&quot;: &quot;...&quot; }</code></td>
+<td>Usuário e sessao.</td>
+<td>400, 401, 500</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/auth/logout</code></td>
+<td>Encerra sessao.</td>
+<td>vazio</td>
+<td>Confirmação.</td>
+<td>500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/auth/session</code></td>
+<td>Consulta sessao atual.</td>
+<td>vazio</td>
+<td>Usuário atual e exigencia de sessao.</td>
+<td>500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/health</code></td>
+<td>Health check.</td>
+<td>vazio</td>
+<td>Status da aplicacao.</td>
+<td>500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/storage</code></td>
+<td>Le storage compartilhado.</td>
+<td>vazio/query interna</td>
+<td>Dados salvos.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/storage</code></td>
+<td>Atualiza storage.</td>
+<td>JSON de dados.</td>
+<td>Confirmação.</td>
+<td>400, 401, 500</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/storage</code></td>
+<td>Limpa storage.</td>
+<td>vazio</td>
+<td>Confirmação.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/audit/logs</code></td>
+<td>Consulta logs de auditoria.</td>
+<td>filtros opcionais</td>
+<td>Lista de logs.</td>
+<td>401, 403, 500</td>
+</tr>
+</tbody></table>
+<p>Exemplo de login:</p>
+<pre><code class="language-http">POST /api/auth/login
+Content-Type: application/json
+
+{
+  &quot;email&quot;: &quot;usuário@empresa.com&quot;,
+  &quot;password&quot;: &quot;senha&quot;
+}
+</code></pre>
+<p>Resposta esperada:</p>
+<pre><code class="language-json">{
+  &quot;ok&quot;: true,
+  &quot;user&quot;: {
+    &quot;id&quot;: &quot;user_id&quot;,
+    &quot;email&quot;: &quot;usuário@empresa.com&quot;,
+    &quot;name&quot;: &quot;Nome do Usuário&quot;,
+    &quot;role&quot;: &quot;master&quot;
+  }
+}
+</code></pre>
+<h3>10.2 IA BIA</h3>
+<table>
+<thead>
+<tr>
+<th>Metodo</th>
+<th>Endpoint</th>
+<th>Descricao</th>
+<th>Body/Query</th>
+<th>Response esperado</th>
+<th>Erros comuns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/api/ia</code></td>
+<td>Status do provedor IA.</td>
+<td>vazio</td>
+<td>Provedor, modelo e capacidades.</td>
+<td>500</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/ia</code></td>
+<td>Gateway principal da IA.</td>
+<td>mensagens, task, provider, busca</td>
+<td>Texto, fontes, uso e provedor.</td>
+<td>400, 401, 429, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/ia/search</code></td>
+<td>Busca assistida.</td>
+<td>pergunta/contexto</td>
+<td>Resposta com fontes.</td>
+<td>401, 429, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/ia/hotel-search</code></td>
+<td>Busca hotéis.</td>
+<td>cidade/hotel/criterios</td>
+<td>Lista/resumo de hotéis.</td>
+<td>401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/ia/extract-demand</code></td>
+<td>Extrai demanda.</td>
+<td>texto/arquivo/conteudo</td>
+<td>JSON estruturado.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/ia/extract-document</code></td>
+<td>Extrai documento.</td>
+<td>imagem/PDF/base64</td>
+<td>Dados extraidos.</td>
+<td>400, 401, 503</td>
+</tr>
+</tbody></table>
+<p>Exemplo:</p>
+<pre><code class="language-http">POST /api/ia
+Content-Type: application/json
+
+{
+  &quot;task&quot;: &quot;chat&quot;,
+  &quot;enable_search&quot;: true,
+  &quot;messages&quot;: [
+    { &quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Localize o voucher do Pedro para Brasilia em 15/08&quot; }
+  ]
+}
+</code></pre>
+<h3>10.3 Assistente, audio, PDF e WhatsApp</h3>
+<table>
+<thead>
+<tr>
+<th>Metodo</th>
+<th>Endpoint</th>
+<th>Descricao</th>
+<th>Body/Query</th>
+<th>Response esperado</th>
+<th>Erros comuns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/api/assistant/health</code></td>
+<td>Saude da assistente.</td>
+<td>vazio</td>
+<td>Status.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/assistant/settings</code></td>
+<td>Consulta configuracoes.</td>
+<td>vazio</td>
+<td>Configuracoes.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/assistant/settings</code></td>
+<td>Salva configuracoes.</td>
+<td>JSON de configuracao</td>
+<td>Configuracao atualizada.</td>
+<td>400, 401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/assistant/tools</code></td>
+<td>Lista ferramentas.</td>
+<td>vazio</td>
+<td>Ferramentas.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/assistant/tools/[id]</code></td>
+<td>Atualiza ferramenta.</td>
+<td>permissão/status</td>
+<td>Ferramenta atualizada.</td>
+<td>400, 401, 404</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/assistant/logs</code></td>
+<td>Logs da assistente.</td>
+<td>filtros opcionais</td>
+<td>Lista de logs.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/assistant/audit</code></td>
+<td>Auditoria da IA.</td>
+<td>filtros opcionais</td>
+<td>Eventos.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/assistant/conversations</code></td>
+<td>Conversas.</td>
+<td>filtros opcionais</td>
+<td>Lista.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/test-message</code></td>
+<td>Testa mensagem.</td>
+<td>texto</td>
+<td>Resposta de teste.</td>
+<td>400, 401</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/test-audio</code></td>
+<td>Testa audio.</td>
+<td>audio/base64</td>
+<td>Resultado.</td>
+<td>400, 401</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/audio/transcribe</code></td>
+<td>Transcreve audio.</td>
+<td>arquivo/base64</td>
+<td>Texto transcrito.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/audio/generate</code></td>
+<td>Gera audio/TTS.</td>
+<td>texto/voz</td>
+<td>Audio/base64 ou URL.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/pdf/generate</code></td>
+<td>Gera PDF.</td>
+<td>HTML/dados</td>
+<td>Documento.</td>
+<td>400, 401</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/voucher/send</code></td>
+<td>Envia/prepara voucher.</td>
+<td>voucher/canal</td>
+<td>Status de envio.</td>
+<td>400, 401</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/assistant/whatsapp/status</code></td>
+<td>Status WhatsApp.</td>
+<td>vazio</td>
+<td>Status da instancia.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/assistant/whatsapp/qrcode</code></td>
+<td>QR code WhatsApp.</td>
+<td>vazio</td>
+<td>QR code.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/whatsapp/connect</code></td>
+<td>Conecta WhatsApp.</td>
+<td>config opcional</td>
+<td>Status.</td>
+<td>400, 401</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/assistant/whatsapp/disconnect</code></td>
+<td>Desconecta WhatsApp.</td>
+<td>vazio</td>
+<td>Status.</td>
+<td>401, 500</td>
+</tr>
+</tbody></table>
+<h3>10.4 Integrações e Tech Travel</h3>
+<table>
+<thead>
+<tr>
+<th>Metodo</th>
+<th>Endpoint</th>
+<th>Descricao</th>
+<th>Body/Query</th>
+<th>Response esperado</th>
+<th>Erros comuns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/api/integrations/status</code></td>
+<td>Status geral das integrações.</td>
+<td>vazio</td>
+<td>Lista de provedores.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/integrations/tech/status</code></td>
+<td>Status Tech Travel.</td>
+<td>vazio</td>
+<td>Conectado/configurado/capacidades.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/integrations/tech/companies</code></td>
+<td>Empresas Tech.</td>
+<td>vazio</td>
+<td>Empresas provedoras.</td>
+<td>401, 500</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/integrations/tech/access-company</code></td>
+<td>Acessa empresa Tech.</td>
+<td><code>{ &quot;companyId&quot;: &quot;...&quot; }</code></td>
+<td>Confirmação.</td>
+<td>400, 401, 503</td>
+</tr>
+</tbody></table>
+<h3>10.5 Travel API</h3>
+<table>
+<thead>
+<tr>
+<th>Metodo</th>
+<th>Endpoint</th>
+<th>Descricao</th>
+<th>Body/Query</th>
+<th>Response esperado</th>
+<th>Erros comuns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/api/travel/quotes</code></td>
+<td>Cria cotação.</td>
+<td>serviço, origem, destino, datas, empresa</td>
+<td>Cotação e opcoes.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/quotes/[id]/fare</code></td>
+<td>Tarifa cotação aerea.</td>
+<td>dados da opcao</td>
+<td>Resultado tarifado.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/reservations</code></td>
+<td>Cria/prepara reserva.</td>
+<td>serviço, quoteId, optionId, passageiros, confirmed</td>
+<td>Reserva.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/travel/reservations/[id]/status</code></td>
+<td>Consulta status.</td>
+<td>id</td>
+<td>Status.</td>
+<td>401, 404, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/reservations/[id]/issue</code></td>
+<td>Emite reserva.</td>
+<td>payload Tech</td>
+<td>Status emitido.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/reservations/[id]/cancel</code></td>
+<td>Cancela reserva.</td>
+<td>motivo/dados</td>
+<td>Status cancelado.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/reservations/[id]/cancel-ticket</code></td>
+<td>Cancela bilhete.</td>
+<td>bilhete/motivo</td>
+<td>Status.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/reservations/[id]/voucher-data</code></td>
+<td>Consulta dados voucher.</td>
+<td>id/localizador</td>
+<td>Dados do voucher.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/tech/cities</code></td>
+<td>Busca cidades.</td>
+<td>query/serviço</td>
+<td>Lista de cidades.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/travel/tech/policies</code></td>
+<td>Politicas Tech.</td>
+<td>filtros opcionais</td>
+<td>Politicas.</td>
+<td>401, 503</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/travel/tech/cost-centers</code></td>
+<td>Centros de custo Tech.</td>
+<td>filtros opcionais</td>
+<td>Centros de custo.</td>
+<td>401, 503</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/travel/tech/motives</code></td>
+<td>Motivos Tech.</td>
+<td>filtros opcionais</td>
+<td>Motivos.</td>
+<td>401, 503</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/travel/tech/additional-fields</code></td>
+<td>Campos adicionais.</td>
+<td>filtros opcionais</td>
+<td>Campos.</td>
+<td>401, 503</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/travel/tech/churning</code></td>
+<td>Consulta churning.</td>
+<td>payload Tech</td>
+<td>Resultado.</td>
+<td>400, 401, 503</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/travel/tech/reusable-tickets</code></td>
+<td>Bilhetes reutilizaveis.</td>
+<td>filtros opcionais</td>
+<td>Lista.</td>
+<td>401, 503</td>
+</tr>
+</tbody></table>
+<p>Exemplo de cotação:</p>
+<pre><code class="language-http">POST /api/travel/quotes
+Content-Type: application/json
+
+{
+  &quot;service&quot;: &quot;hotelaria&quot;,
+  &quot;empresaId&quot;: &quot;empresa_id&quot;,
+  &quot;destino&quot;: &quot;Sao Paulo&quot;,
+  &quot;dataInicio&quot;: &quot;2026-08-15&quot;,
+  &quot;dataFim&quot;: &quot;2026-08-17&quot;,
+  &quot;adultos&quot;: 1
+}
+</code></pre>
+<h3>10.6 Portal empresa/solicitantes</h3>
+<table>
+<thead>
+<tr>
+<th>Metodo</th>
+<th>Endpoint</th>
+<th>Descricao</th>
+<th>Body/Query</th>
+<th>Response esperado</th>
+<th>Erros comuns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/api/solicitantes/empresa</code></td>
+<td>Operacoes de solicitante/empresa conforme payload.</td>
+<td>acao e dados do solicitante</td>
+<td>Resultado da operação.</td>
+<td>400, 401, 403, 500</td>
+</tr>
+</tbody></table>
+<h2>11. Integrações externas</h2>
+<h3>11.1 Tech Travel/TTravel</h3>
+<p>Objetivo: ser o hub principal de fornecedores de viagem. Pela Tech Travel, o BDEX pode acessar serviços de aéreo, hotelaria, locação, pacotes, lazer, transfer, seguro e rodoviário conforme contrato e endpoints habilitados.</p>
+<p>Dados enviados:</p>
+<ul>
+<li>Serviço desejado.</li>
+<li>Origem/destino.</li>
+<li>Datas.</li>
+<li>Passageiros/viajantes.</li>
+<li>Empresa provedora.</li>
+<li>Politica, centro de custo e campos adicionais quando disponiveis.</li>
+</ul>
+<p>Dados recebidos:</p>
+<ul>
+<li>Opcoes de cotação.</li>
+<li>Tarifas.</li>
+<li>Reservas.</li>
+<li>Localizadores.</li>
+<li>Status.</li>
+<li>Dados de voucher.</li>
+</ul>
+<p>Autenticação: credenciais Tech Travel em variaveis de ambiente.</p>
+<h3>11.2 Wintour</h3>
+<p>Objetivo: importar vendas/emissões realizadas no Wintour por arquivo exportado diariamente.</p>
+<p>Formato: XML/XLSX/PDF/CSV conforme parser.</p>
+<p>Fluxo:</p>
+<ol>
+<li>Usuário exporta vendas do dia no Wintour.</li>
+<li>Usuário importa arquivo no BDEX.</li>
+<li>Sistema mostra previa.</li>
+<li>Usuário revisa registros.</li>
+<li>Sistema sincroniza demandas, vouchers e financeiro.</li>
+</ol>
+<h3>11.3 OpenAI</h3>
+<p>Objetivo: IA BIA, chat, interpretacao, busca, documentos, audio, TTS e automacoes assistidas.</p>
+<p>Modelos configurados:</p>
+<ul>
+<li><code>OPENAI_MODEL=gpt-5.2</code></li>
+<li><code>OPENAI_PRO_MODEL=gpt-5.2-pro</code></li>
+<li><code>OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe</code></li>
+<li><code>OPENAI_TTS_MODEL=gpt-4o-mini-tts</code></li>
+</ul>
+<h3>11.4 Gemini</h3>
+<p>Objetivo: apoio opcional para busca/hotelaria quando configurado.</p>
+<h3>11.5 WhatsApp Evolution API</h3>
+<p>Objetivo: canal de atendimento e operação da IA BIA.</p>
+<p>Status: provedor oficial confirmado como <strong>Evolution API</strong>.</p>
+<p>Webhook publico: <strong>[INFORMAÇÃO A CONFIRMAR]</strong>.</p>
+<h3>11.6 Carteira Pix/cartoes</h3>
+<p>O BDEX possui estrutura operacional para carteira digital corporativa, Pix, cartoes fisicos e virtuais. A integração transacional real depende da documentação do provedor financeiro a ser enviada posteriormente.</p>
+<p>Status: <strong>[INFORMAÇÃO A CONFIRMAR]</strong>.</p>
+<h2>12. Webhooks</h2>
+<h3>12.1 WhatsApp</h3>
+<p>Evento esperado:</p>
+<ul>
+<li>Mensagem recebida.</li>
+<li>Status de conexao.</li>
+<li>QR code.</li>
+<li>Status de envio.</li>
+</ul>
+<p>Payload final: <strong>[INFORMAÇÃO A CONFIRMAR - depende da Evolution API configurada]</strong>.</p>
+<h3>12.2 Tech Travel</h3>
+<p>Nao foi identificado webhook final obrigatorio no código atual. A integração principal usa chamadas HTTP ativas para cotação, reserva, status, emissão e cancelamento.</p>
+<h2>13. Logs e auditoria</h2>
+<p>O sistema possui:</p>
+<ul>
+<li>Logs de auditoria geral.</li>
+<li>Logs de IA BIA.</li>
+<li>Logs de ferramentas da IA.</li>
+<li>Logs de WhatsApp.</li>
+<li>Logs de transcrição de audio.</li>
+<li>Logs de envio de voucher.</li>
+<li>Logs de integração Tech.</li>
+<li>Histórico de importacao.</li>
+<li>Eventos de demanda.</li>
+</ul>
+<p>Boas praticas:</p>
+<ul>
+<li>Registrar usuário, módulo, acao, entidade, antes/depois e timestamp.</li>
+<li>Nunca gravar segredos em log.</li>
+<li>Mascarar tokens, senhas, documentos sensíveis e cartoes.</li>
+<li>Manter retenção definida por politica LGPD.</li>
+</ul>
+<h2>14. Segurança técnica</h2>
+<p>Recomendacoes:</p>
+<ul>
+<li>HTTPS obrigatorio em produção.</li>
+<li><code>AUTH_SECRET</code> forte.</li>
+<li><code>AUTH_REQUIRE_SESSION=true</code>.</li>
+<li>Senhas com hash seguro.</li>
+<li>Rate limit em endpoints sensíveis.</li>
+<li>CORS restrito ao dominio oficial.</li>
+<li>Segredos apenas em variaveis de ambiente.</li>
+<li>Firewall liberando apenas SSH, HTTP e HTTPS.</li>
+<li>PostgreSQL sem exposicao publica.</li>
+<li>Backup criptografado.</li>
+<li>Logs sem dados sensíveis.</li>
+<li>Permissões da IA BIA com aprovacao para ações críticas.</li>
+</ul>
+<h2>15. Backup e recuperacao</h2>
+<h3>15.1 Backup recomendado</h3>
+<ul>
+<li>Backup diario do PostgreSQL.</li>
+<li>Snapshot semanal do servidor.</li>
+<li>Retenção minima: <strong>[INFORMAÇÃO A CONFIRMAR]</strong>.</li>
+</ul>
+<p>Exemplo:</p>
+<pre><code class="language-bash">pg_dump &quot;$DATABASE_URL&quot; &gt; backup_bdex_$(date +%F).sql
+</code></pre>
+<h3>15.2 Restore</h3>
+<pre><code class="language-bash">psql &quot;$DATABASE_URL&quot; &lt; backup_bdex_YYYY-MM-DD.sql
+</code></pre>
+<p>Antes do restore:</p>
+<ol>
+<li>Parar aplicacao.</li>
+<li>Fazer backup do estado atual.</li>
+<li>Validar arquivo de backup.</li>
+<li>Restaurar em homologacao quando possivel.</li>
+<li>Restaurar em produção.</li>
+<li>Executar testes de login, dashboard, demandas, vouchers e financeiro.</li>
+</ol>
+<h2>16. Monitoramento</h2>
+<p>Monitorar:</p>
+<ul>
+<li>Processo Node.js/systemd.</li>
+<li>Nginx.</li>
+<li>PostgreSQL.</li>
+<li>CPU.</li>
+<li>Memoria.</li>
+<li>Disco.</li>
+<li>Latencia das APIs.</li>
+<li>Erros 4xx/5xx.</li>
+<li>Health check <code>/api/health</code>.</li>
+<li>Status Tech Travel.</li>
+<li>Status IA/OpenAI.</li>
+<li>Status WhatsApp.</li>
+<li>Tamanho de logs.</li>
+<li>Backups executados.</li>
+</ul>
+<h2>17. Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Problema</th>
+<th>Causa provavel</th>
+<th>Solucao</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Usuário nao consegue fazer login</td>
+<td>Credencial invalida, sessao obrigatoria ou usuário inativo</td>
+<td>Verificar usuário, senha, <code>AUTH_SECRET</code>, <code>AUTH_REQUIRE_SESSION</code> e logs.</td>
+</tr>
+<tr>
+<td>Sistema fica carregando</td>
+<td>Falha de sessao/storage ou API inicial</td>
+<td>Verificar console, <code>/api/health</code>, banco e variaveis.</td>
+</tr>
+<tr>
+<td>IA responde erro técnico</td>
+<td>Chave OpenAI ausente, quota, modelo invalido ou rate limit</td>
+<td>Validar <code>OPENAI_API_KEY</code>, billing, modelo e logs de IA.</td>
+</tr>
+<tr>
+<td>Busca web nao funciona</td>
+<td>Provedor IA sem busca ou chave ausente</td>
+<td>Validar OpenAI/Gemini e <code>enable_search</code>.</td>
+</tr>
+<tr>
+<td>Importacao Wintour falha</td>
+<td>Arquivo invalido, storage cheio, duplicidade ou parser</td>
+<td>Conferir arquivo exportado, limpar dados antigos, revisar previa e logs.</td>
+</tr>
+<tr>
+<td>Tech Travel nao conecta</td>
+<td>Credenciais/base URL incorretas ou contrato sem endpoint</td>
+<td>Validar <code>.env</code>, status Tech e retorno do provedor.</td>
+</tr>
+<tr>
+<td>Reserva nao emite</td>
+<td>Endpoint/contrato ausente ou dados obrigatorios faltando</td>
+<td>Conferir payload, politicas, empresa Tech e logs de integração.</td>
+</tr>
+<tr>
+<td>WhatsApp nao conecta</td>
+<td>Token/base URL/instancia incorretos</td>
+<td>Validar Evolution API e QR code.</td>
+</tr>
+<tr>
+<td>Financeiro nao atualiza</td>
+<td>Demanda/voucher sem vinculo ou importacao incompleta</td>
+<td>Executar sincronizacao operacional e reconciliacao.</td>
+</tr>
+<tr>
+<td>Mapa nao mostra dados</td>
+<td>Sem destinos ativos ou coordenadas ausentes</td>
+<td>Verificar viagens em campo, cidades e dados geograficos.</td>
+</tr>
+</tbody></table>
+<h2>18. Checklist de implantação</h2>
+<ul>
+<li><input disabled="" type="checkbox"> Servidor Ubuntu 24.04 LTS criado.</li>
+<li><input disabled="" type="checkbox"> SSH/root ativo e seguro.</li>
+<li><input disabled="" type="checkbox"> Firewall configurado.</li>
+<li><input disabled="" type="checkbox"> Node.js 20.9+ instalado.</li>
+<li><input disabled="" type="checkbox"> PostgreSQL instalado.</li>
+<li><input disabled="" type="checkbox"> Banco e usuário criados.</li>
+<li><input disabled="" type="checkbox"> Schemas executados.</li>
+<li><input disabled="" type="checkbox"> <code>.env.local</code>/variaveis configuradas.</li>
+<li><input disabled="" type="checkbox"> <code>AUTH_SECRET</code> gerado.</li>
+<li><input disabled="" type="checkbox"> <code>AUTH_REQUIRE_SESSION=true</code>.</li>
+<li><input disabled="" type="checkbox"> OpenAI configurada.</li>
+<li><input disabled="" type="checkbox"> Tech Travel configurada.</li>
+<li><input disabled="" type="checkbox"> Evolution API configurada.</li>
+<li><input disabled="" type="checkbox"> Build executado com sucesso.</li>
+<li><input disabled="" type="checkbox"> systemd ativo.</li>
+<li><input disabled="" type="checkbox"> Nginx configurado.</li>
+<li><input disabled="" type="checkbox"> SSL emitido.</li>
+<li><input disabled="" type="checkbox"> Login master testado.</li>
+<li><input disabled="" type="checkbox"> Cadastro de empresa testado.</li>
+<li><input disabled="" type="checkbox"> Cadastro de solicitante testado.</li>
+<li><input disabled="" type="checkbox"> Portal empresa testado.</li>
+<li><input disabled="" type="checkbox"> Criacao de demanda testada.</li>
+<li><input disabled="" type="checkbox"> Voucher testado.</li>
+<li><input disabled="" type="checkbox"> Importacao Wintour testada.</li>
+<li><input disabled="" type="checkbox"> Cotação Tech testada.</li>
+<li><input disabled="" type="checkbox"> Financeiro testado.</li>
+<li><input disabled="" type="checkbox"> IA BIA testada.</li>
+<li><input disabled="" type="checkbox"> Backup automatico configurado.</li>
+<li><input disabled="" type="checkbox"> Snapshot semanal configurado.</li>
+<li><input disabled="" type="checkbox"> Logs e monitoramento revisados.</li>
+</ul>
+<h2>19. Glossario técnico</h2>
+<table>
+<thead>
+<tr>
+<th>Termo</th>
+<th>Definicao</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>BDEX</td>
+<td>Nome oficial do sistema/documento.</td>
+</tr>
+<tr>
+<td>IA BIA</td>
+<td>Assistente de inteligencia artificial do sistema.</td>
+</tr>
+<tr>
+<td>Demanda</td>
+<td>Pedido operacional de viagem ou serviço.</td>
+</tr>
+<tr>
+<td>Serial/OS</td>
+<td>Identificador operacional da demanda.</td>
+</tr>
+<tr>
+<td>Voucher</td>
+<td>Documento/registro de confirmação de serviço.</td>
+</tr>
+<tr>
+<td>Wintour</td>
+<td>Sistema externo usado para vendas/emissões e importacao diaria por arquivo.</td>
+</tr>
+<tr>
+<td>Tech Travel/TTravel</td>
+<td>Hub de fornecedores e reservas.</td>
+</tr>
+<tr>
+<td>Solicitante</td>
+<td>Usuário da empresa cliente que cria/acompanhada pedidos.</td>
+</tr>
+<tr>
+<td>Duty of Care</td>
+<td>Monitoramento de viajantes e riscos durante a viagem.</td>
+</tr>
+<tr>
+<td>Reconciliacao</td>
+<td>Conferencia entre demanda, voucher, financeiro e importacao.</td>
+</tr>
+<tr>
+<td>app_kv</td>
+<td>Estrutura chave-valor usada para compatibilidade de storage.</td>
+</tr>
+</tbody></table>
+<h2>20. Pendências tecnicas</h2>
+<ul>
+<li>Dominio final de produção.</li>
+<li>Provedor financeiro real para Pix/cartoes/carteira.</li>
+<li>Contrato e credenciais finais da Tech Travel.</li>
+<li>Webhook final da Evolution API.</li>
+<li>Politica LGPD e retenção.</li>
+<li>Matriz final de permissões da IA BIA.</li>
+<li>Politica de backup/restore definitiva.</li>
+<li>Exposicao ou nao de API publica para integradores externos.</li>
+</ul>
+<h2>21. Conclusão técnica</h2>
+<p>O BDEX possui base técnica para operar como plataforma web de gestao de viagens corporativas com IA, importacao Wintour, portal empresa, financeiro, auditoria e integração Tech Travel. Para produção, a prioridade técnica e consolidar PostgreSQL, configurar segredos, ativar HTTPS, validar credenciais externas, testar fluxos principais e definir politicas formais de segurança, backup, LGPD e permissão da IA.</p>
+<div class="doc-footer">BDEX · BBT Corporate · BDEX VERSÃO TESTE · 21/05/2026</div></main>
+</body>
+</html>

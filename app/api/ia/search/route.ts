@@ -1,118 +1,96 @@
-import { todayISODate } from '@/lib/date'
 import { NextRequest, NextResponse } from 'next/server'
-import { callGemini, callOpenAIResponses, OPENAI_SEARCH_MODEL } from '@/lib/server-ai'
-import { classifyAIError } from '@/lib/ai-friendly-errors'
+import { z } from 'zod'
+
+import { todayISODate } from '@/lib/date'
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { readJsonBodyResult } from '@/lib/security/request-body'
+import {
+  AiGatewayError,
+  executeAiGateway,
+} from '@/lib/server/ai-gateway-service'
+import {
+  governanceBodyErrorResponse,
+  governanceErrorResponse,
+} from '@/lib/server/governance-api'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const SEARCH_JSON_SCHEMA = {
-  type: 'json_schema',
-  name: 'bbt_realtime_search',
-  strict: true,
-  schema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['summary', 'answer', 'confidence', 'action_items'],
-    properties: {
-      summary: { type: 'string' },
-      answer: { type: 'string' },
-      confidence: { type: 'string', enum: ['alta', 'media', 'baixa'] },
-      action_items: { type: 'array', items: { type: 'string' }, maxItems: 6 },
-    },
-  },
-}
+const searchSchema = z.object({
+  query: z.string().trim().min(3).max(4_000),
+  location: z.string().trim().max(200).optional(),
+  deep: z.boolean().default(false),
+}).strict()
 
 export async function POST(req: NextRequest) {
   const guard = await guardApiRequest(req, {
     requireAuth: true,
+    permission: 'usar_busca_global',
+    authorization: {
+      action: 'use',
+      resource: 'search',
+      requiredPermission: 'usar_busca_global',
+      allowEmptyCompanyScope: true,
+    },
     rateLimit: { key: 'ia-search:post', limit: 20, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
 
-  const input = await readJsonBodyResult<{ query?: string; location?: string; deep?: boolean }>(req, 64 * 1024)
-  if (!input.ok) return NextResponse.json({ error: input.error }, { status: input.status })
-  const body = input.body
+  const input = await readJsonBodyResult<unknown>(req, 64 * 1024)
+  if (!input.ok) return governanceBodyErrorResponse(input, guard.requestId)
 
-  const query = String(body.query || '').trim()
-  if (query.length < 3) {
-    return NextResponse.json({ error: 'Informe uma pesquisa com pelo menos 3 caracteres.' }, { status: 400 })
-  }
-  if (query.length > 4_000 || String(body.location || '').length > 200) {
-    return NextResponse.json({ error: 'Pesquisa grande demais.' }, { status: 413 })
-  }
-
-  const location = parseLocation(body.location || query)
-  const prompt = buildPrompt(query, body.location)
-  const errors: string[] = []
-
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const data = await callOpenAIResponses({
-        model: OPENAI_SEARCH_MODEL,
-        system:
-          'Voce e o pesquisador em tempo real da BBT Viagens Corporativas. Use busca web quando necessario, cite fontes e nao invente telefone, preco, disponibilidade ou regra.',
-        messages: [{ role: 'user', content: prompt }],
-        enableSearch: true,
-        maxOutputTokens: body.deep ? 5000 : 2800,
-        reasoningEffort: body.deep ? 'medium' : 'low',
-        verbosity: 'medium',
-        textFormat: SEARCH_JSON_SCHEMA,
-        searchLocation: location,
-      })
-      const parsed = parseJSON(data.output_text || '')
-      return NextResponse.json({
-        source: 'openai-web',
-        query,
-        answer: parsed.answer || data.output_text || '',
-        summary: parsed.summary || 'Pesquisa web concluida.',
-        confidence: parsed.confidence || 'media',
-        action_items: parsed.action_items || [],
-        sources: data.sources || [],
-      })
-    } catch (e: any) {
-      errors.push(`OpenAI: ${classifyAIError(e, 'openai').kind}`)
+  try {
+    const body = searchSchema.parse(input.body)
+    const result = await executeAiGateway(guard.principal!, {
+      task: 'research',
+      messages: [{
+        role: 'user',
+        content: buildPrompt(body.query, body.location),
+      }],
+      enableSearch: true,
+      maxOutputTokens: body.deep ? 5_000 : 2_800,
+    })
+    const parsed = parseJson(result.output_text)
+    return NextResponse.json(
+      {
+        source: result.provedor === 'gemini' ? 'gemini-google' : 'openai-web',
+        query: body.query,
+        answer: text(parsed.answer) || result.output_text,
+        summary: text(parsed.summary) || 'Pesquisa web concluida.',
+        confidence: confidence(parsed.confidence),
+        action_items: stringArray(parsed.action_items, 6),
+        sources: result.sources,
+      },
+      { headers: { 'X-Request-Id': guard.requestId, 'Cache-Control': 'no-store, private' } },
+    )
+  } catch (error) {
+    if (
+      error instanceof AiGatewayError
+      && ['AI_NOT_CONFIGURED', 'rate_limit', 'quota', 'billing', 'network', 'timeout'].includes(error.code)
+    ) {
+      const query = safeQuery(input.body)
+      return NextResponse.json(
+        {
+          source: 'fallback-link',
+          query,
+          answer:
+            'A busca web por API esta indisponivel agora. Confira a fonte manualmente antes de cadastrar telefone, tarifa ou disponibilidade.',
+          summary: 'Busca por API indisponivel.',
+          confidence: 'baixa',
+          action_items: ['Abrir a fonte e conferir os dados antes de qualquer cadastro ou operacao.'],
+          sources: query
+            ? [{ title: 'Abrir pesquisa no Google', uri: `https://www.google.com/search?q=${encodeURIComponent(query)}` }]
+            : [],
+          provider_error: error.code,
+        },
+        {
+          status: error.status === 503 ? 503 : 502,
+          headers: { 'X-Request-Id': guard.requestId, 'Cache-Control': 'no-store, private' },
+        },
+      )
     }
+    return governanceErrorResponse(error, guard.requestId)
   }
-
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      const data = await callGemini({
-        system:
-          'Voce e o pesquisador em tempo real da BBT Viagens Corporativas. Use Google Search, cite fontes e nao invente telefone, preco, disponibilidade ou regra.',
-        messages: [{ role: 'user', content: prompt }],
-        enableSearch: true,
-        maxOutputTokens: body.deep ? 5000 : 2800,
-      })
-      const parsed = parseJSON(data.content?.[0]?.text || '')
-      return NextResponse.json({
-        source: 'gemini-google',
-        query,
-        answer: parsed.answer || data.content?.[0]?.text || '',
-        summary: parsed.summary || 'Pesquisa Google concluida.',
-        confidence: parsed.confidence || 'media',
-        action_items: parsed.action_items || [],
-        sources: data.sources || [],
-      })
-    } catch (e: any) {
-      errors.push(`Gemini: ${classifyAIError(e, 'gemini').kind}`)
-    }
-  }
-
-  const google = `https://www.google.com/search?q=${encodeURIComponent(query)}`
-  return NextResponse.json({
-    source: 'fallback-link',
-    query,
-    answer:
-      'Nao consegui executar uma busca web por API agora. Deixei um link direto para conferencia manual antes de cadastrar telefone, tarifa ou disponibilidade.',
-    summary: 'Busca por API indisponivel.',
-    confidence: 'baixa',
-    action_items: ['Abrir a fonte manualmente antes de cadastrar telefone, tarifa ou disponibilidade.'],
-    sources: [{ title: 'Abrir pesquisa no Google', uri: google }],
-    provider_error: errors.join(' | ') || 'Nenhum provedor de IA configurado.',
-  })
 }
 
 function buildPrompt(query: string, location?: string): string {
@@ -132,37 +110,37 @@ Retorne APENAS JSON valido:
 
 Regras:
 - Use dados atuais da web quando a pergunta depender de informacao em tempo real.
-- Se for hotel/fornecedor, priorize site oficial, telefone oficial e fontes confiaveis.
+- Priorize fontes oficiais e confiaveis.
 - Nao invente telefone, tarifa, disponibilidade, endereco ou politica.
 - Se nao encontrar confirmacao confiavel, diga exatamente o que falta confirmar.`
 }
 
-function parseJSON(text: string): any {
+function parseJson(value: string): Record<string, unknown> {
   try {
-    return JSON.parse(extractJSON(text))
+    const clean = String(value || '').replace(/```json|```/g, '').trim()
+    const start = clean.indexOf('{')
+    const end = clean.lastIndexOf('}')
+    return JSON.parse(start >= 0 && end > start ? clean.slice(start, end + 1) : clean)
   } catch {
-    return { answer: text, summary: 'Resposta textual da IA.', confidence: 'media', action_items: [] }
+    return {}
   }
 }
 
-function extractJSON(text: string): string {
-  const clean = String(text || '').replace(/```json|```/g, '').trim()
-  const start = clean.indexOf('{')
-  const end = clean.lastIndexOf('}')
-  if (start >= 0 && end > start) return clean.slice(start, end + 1)
-  return clean
+function safeQuery(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  return String((value as Record<string, unknown>).query || '').trim().slice(0, 4_000)
 }
 
-function parseLocation(input: string): { country: string; city?: string; region?: string; timezone: string } {
-  const raw = String(input || '')
-  const uf = raw.match(/\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b/i)?.[1]?.toUpperCase()
-  const city =
-    raw.match(/(?:em|para|cidade de|hospedagem em)\s+([\p{L}\s]+?)(?:[-/,]\s*[A-Z]{2}\b|$)/iu)?.[1]?.trim() ||
-    undefined
-  return {
-    country: 'BR',
-    city: city || 'Trindade',
-    region: uf || 'GO',
-    timezone: 'America/Sao_Paulo',
-  }
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function confidence(value: unknown): 'alta' | 'media' | 'baixa' {
+  return value === 'alta' || value === 'baixa' ? value : 'media'
+}
+
+function stringArray(value: unknown, limit: number): string[] {
+  return Array.isArray(value)
+    ? value.map(String).map((item) => item.trim()).filter(Boolean).slice(0, limit)
+    : []
 }

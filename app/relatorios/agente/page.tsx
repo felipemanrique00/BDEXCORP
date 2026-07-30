@@ -53,6 +53,7 @@ function RelatorioAgenteInner() {
       <ReportToolbar onPrint={imprimir} />
 
       <CorporateReport
+        canExport={hasPermission(user, 'exportar_relatorios')}
         title="Relatório de Produtividade"
         eyebrow="Padrão executivo operacional"
         visao="agencia"

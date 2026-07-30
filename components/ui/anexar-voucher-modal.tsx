@@ -7,7 +7,8 @@ import {
   addVoucher, deleteVoucher, downloadVoucher, getVouchersByDemanda, openVoucherInNewTab,
   formatBytes, type Voucher,
 } from '@/lib/vouchers-storage'
-import { anexarVoucherAtendimento, registrarLog, updateAtendimento } from '@/lib/atendimentos-storage'
+import { registrarLog } from '@/lib/atendimentos-storage'
+import { persistDemandPatchWithCompatibility } from '@/lib/demand-persistence-client'
 import { getCurrentUser } from '@/lib/auth'
 import { formatDate } from '@/lib/utils'
 import type { Atendimento } from '@/types'
@@ -65,15 +66,25 @@ export function AnexarVoucherModal({ open, onClose, atendimento }: Props) {
     if (!user) { toast.error('Faça login.'); return }
 
     setUploading(true)
+    let voucher: Voucher | null = null
     try {
-      const voucher = await addVoucher({
+      voucher = await addVoucher({
         file: pendingFile,
         funcionario_id: atendimento.funcionario_id,
         demanda_id: atendimento.id,
         descricao: descricao || 'Voucher',
       })
 
-      anexarVoucherAtendimento(atendimento.id, voucher.id)
+      const voucherIds = Array.from(new Set([
+        ...(atendimento.voucher_ids || []),
+        ...vouchers.map((item) => item.id),
+        voucher.id,
+      ]))
+      await persistDemandPatchWithCompatibility(
+        atendimento,
+        { voucher_ids: voucherIds },
+        `Anexo do voucher ${voucher.nome_arquivo}`,
+      )
 
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'anexar_voucher',
@@ -85,6 +96,13 @@ export function AnexarVoucherModal({ open, onClose, atendimento }: Props) {
       setPendingFile(null); setDescricao('')
       await reload()
     } catch (error) {
+      if (voucher) {
+        try {
+          await deleteVoucher(voucher.id)
+        } catch {
+          // A rota de arquivos mantém a trilha para limpeza administrativa.
+        }
+      }
       toast.error(error instanceof Error ? error.message : 'Erro ao processar arquivo.')
     } finally {
       setUploading(false)
@@ -94,9 +112,16 @@ export function AnexarVoucherModal({ open, onClose, atendimento }: Props) {
   async function removerVoucher(v: Voucher) {
     if (!atendimento) return
     try {
+      const atualIds = Array.from(new Set([
+        ...(atendimento.voucher_ids || []),
+        ...vouchers.map((item) => item.id),
+      ])).filter((id) => id !== v.id)
+      await persistDemandPatchWithCompatibility(
+        atendimento,
+        { voucher_ids: atualIds },
+        `Remocao do voucher ${v.nome_arquivo}`,
+      )
       await deleteVoucher(v.id)
-      const atualIds = (atendimento.voucher_ids || []).filter((id) => id !== v.id)
-      updateAtendimento(atendimento.id, { voucher_ids: atualIds })
       toast.success('Voucher removido.')
       await reload()
     } catch (error) {

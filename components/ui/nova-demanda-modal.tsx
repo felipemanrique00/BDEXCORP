@@ -3,7 +3,20 @@ import { todayISODate } from '@/lib/date'
 import { useState, useEffect, useMemo } from 'react'
 import { Modal } from '@/components/ui/modal'
 import { useStore } from '@/lib/store'
-import { addAtendimento, updateAtendimento, registrarLog } from '@/lib/atendimentos-storage'
+import { useCorporateContext, useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import {
+  criarAtendimentoParaLista,
+  getAllAtendimentos,
+  persistirAtendimentos,
+  persistirAtendimentosRecebidosDoServidor,
+  registrarLog,
+} from '@/lib/atendimentos-storage'
+import {
+  createDemandOnServer,
+  DemandClientError,
+  getDemandFromServer,
+  updateDemandDetailsOnServer,
+} from '@/lib/demands-client'
 import { dispararAlertaNovaDemanda } from '@/lib/notificacoes'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { toast } from 'sonner'
@@ -73,10 +86,17 @@ function diffDays(d1: string, d2: string): number {
 
 export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmpresaId, prefilledFuncionarioId }: Props) {
   const { empresas, hoteis, addHotel } = useStore()
+  const { context } = useCorporateContext()
+  const { includesCompany, isConsolidated } = useCorporateCompanyScope()
+  const empresasNoContexto = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'criar_demandas')),
+    [empresas, includesCompany],
+  )
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeVerFinanceiro = hasPermission(user, 'ver_financeiro')
 
   const [empresaId, setEmpresaId] = useState('')
+  const podeVerFinanceiro = hasPermission(user, 'ver_financeiro')
+    && includesCompany(empresaId, 'ver_financeiro')
   const [funcionarioId, setFuncionarioId] = useState<string | null>(null)
   const [passageiroNome, setPassageiroNome] = useState('')
   const [tipoServico, setTipoServico] = useState<TipoServico>('Hotel')
@@ -116,7 +136,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
   const [sugestoesHotelIA, setSugestoesHotelIA] = useState<HotelAISuggestion[]>([])
 
   // Empresa config (markup/taxa)
-  const empresaSelecionada = useMemo(() => empresas.find((e) => e.id === empresaId), [empresas, empresaId])
+  const empresaSelecionada = useMemo(() => empresasNoContexto.find((e) => e.id === empresaId), [empresasNoContexto, empresaId])
   const configEmpresa = empresaSelecionada?.config_cobranca || CONFIG_COBRANCA_PADRAO
   const ocupanteLabel = labelOcupante(tipoServico)
 
@@ -154,7 +174,10 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       setContatoPassageiro(editing.contato_passageiro || '')
       setObservacoesInternas(editing.observacoes_internas || '')
     } else {
-      setEmpresaId(prefilledEmpresaId || empresas[0]?.id || '')
+      const explicitCompanyId = prefilledEmpresaId && includesCompany(prefilledEmpresaId, 'criar_demandas')
+        ? prefilledEmpresaId
+        : context?.type === 'company' ? context.id : ''
+      setEmpresaId(explicitCompanyId)
       setFuncionarioId(prefilledFuncionarioId || null)
       setPassageiroNome(''); setTipoServico('Hotel'); setStatus('em_andamento')
       setPrioridade('media'); setOrigem('WhatsApp'); setObservacoes('')
@@ -168,7 +191,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       setNumeroSolicitacao(''); setAutorizadorNome(''); setContatoPassageiro('')
       setObservacoesInternas('')
     }
-  }, [open, editing, empresas, prefilledEmpresaId, prefilledFuncionarioId])
+  }, [open, editing, context, includesCompany, prefilledEmpresaId, prefilledFuncionarioId])
 
   // Quando empresa muda, aplicar config de cobrança
   useEffect(() => {
@@ -354,41 +377,151 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
     }
 
     if (editing) {
-      if (!updateAtendimento(editing.id, payload)) {
-        toast.error('Nao foi possivel preparar a atualizacao da demanda.')
-        return
+      const atualizada: Atendimento = {
+        ...editing,
+        ...payload,
+        id: editing.id,
+        serial_os: editing.serial_os,
+        created_at: editing.created_at,
+        updated_at: new Date().toISOString(),
       }
-      registrarLog({
-        user_id: user.id, user_name: user.name, acao: 'editar',
-        entidade: 'Atendimento', entidade_id: editing.id,
-        descricao: `Editou demanda de ${passageiroNome}`,
-      })
       try {
         await commitPendingRemoteStorage()
+        const relacional = await getDemandFromServer(editing.id)
+        const resultado = await updateDemandDetailsOnServer(editing.id, {
+          demand: atualizada,
+          expectedVersion: relacional.version,
+          reason: `Edicao manual da demanda por ${user.name}`,
+          idempotencyKey: `demand:update:${editing.id}:${relacional.version}`,
+        })
+        const atuais = getAllAtendimentos()
+        const lista = atuais.some((item) => item.id === editing.id)
+          ? atuais.map((item) => item.id === editing.id ? resultado.item.demand : item)
+          : [...atuais, resultado.item.demand]
+        if (!persistirAtendimentosRecebidosDoServidor(lista)) {
+          toast.warning('A demanda foi atualizada no servidor, mas o cache local nao pode ser renovado.')
+        }
+        registrarLog({
+          user_id: user.id,
+          user_name: user.name,
+          acao: 'editar',
+          entidade: 'Atendimento',
+          entidade_id: editing.id,
+          descricao: `Editou demanda de ${passageiroNome}`,
+        })
+        if (resultado.approval.required) {
+          toast.info(resultado.approval.configured
+            ? 'Demanda atualizada e reenviada para aprovacao.'
+            : 'Demanda atualizada; o workflow de aprovacao precisa ser configurado.')
+        } else if (resultado.policy.requiresAction) {
+          toast.warning('Demanda atualizada e mantida pendente por requisitos da politica.')
+        } else {
+          toast.success('Demanda atualizada!')
+        }
+        onSaved?.(resultado.item.demand)
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')
-        onClose()
+        if (
+          error instanceof DemandClientError
+          && ['DEMAND_NOT_FOUND', 'DEMAND_RELATIONAL_WRITE_DISABLED'].includes(error.code || '')
+        ) {
+          const atuais = getAllAtendimentos()
+          if (!atuais.some((item) => item.id === editing.id)) {
+            toast.error('A demanda não foi encontrada para atualização.')
+            return
+          }
+          if (!persistirAtendimentos(
+            atuais.map((item) => item.id === editing.id ? atualizada : item),
+          )) {
+            toast.error('Nao foi possivel preparar a atualizacao da demanda.')
+            return
+          }
+          try {
+            await commitPendingRemoteStorage()
+          } catch (syncError) {
+            toast.error(syncError instanceof Error ? syncError.message : 'Falha ao confirmar a demanda no servidor.')
+            return
+          }
+          registrarLog({
+            user_id: user.id,
+            user_name: user.name,
+            acao: 'editar',
+            entidade: 'Atendimento',
+            entidade_id: editing.id,
+            descricao: `Editou demanda de ${passageiroNome}`,
+          })
+          toast.success('Demanda atualizada!')
+          onSaved?.(atualizada)
+        } else {
+          toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')
+          return
+        }
+      }
+    } else {
+      const preparada = criarAtendimentoParaLista(payload, getAllAtendimentos())
+      let resultado
+      try {
+        resultado = await createDemandOnServer(preparada, true)
+      } catch (error) {
+        if (error instanceof DemandClientError && error.code === 'DEMAND_RELATIONAL_WRITE_DISABLED') {
+          const atuais = getAllAtendimentos()
+          if (!persistirAtendimentos([...atuais, preparada])) {
+            toast.error('Nao foi possivel salvar a demanda no modo legado.')
+            return
+          }
+          try {
+            await commitPendingRemoteStorage()
+          } catch (syncError) {
+            toast.error(syncError instanceof Error ? syncError.message : 'Falha ao confirmar a demanda no servidor.')
+            return
+          }
+          registrarLog({
+            user_id: user.id,
+            user_name: user.name,
+            acao: 'criar',
+            entidade: 'Atendimento',
+            entidade_id: preparada.id,
+            descricao: `Criou demanda ${tipoServico} para ${passageiroNome}`,
+          })
+          dispararAlertaNovaDemanda(
+            passageiroNome,
+            empresaSelecionada?.nome || '',
+            preparada.id,
+            preparada.serial_os,
+          )
+          toast.success(`Demanda ${preparada.serial_os || preparada.id} criada!`)
+          onSaved?.(preparada)
+          onClose()
+          return
+        }
+        toast.error(error instanceof Error ? error.message : 'Falha ao criar a demanda no servidor.')
         return
       }
-      toast.success('Demanda atualizada!')
-    } else {
-      const nova = addAtendimento(payload)
-      if (!nova) { toast.error('Erro ao salvar.'); return }
+      const nova = resultado.demand
+      const atuais = getAllAtendimentos()
+      const atualizada = atuais.some((item) => item.id === nova.id)
+        ? atuais.map((item) => item.id === nova.id ? nova : item)
+        : [...atuais, nova]
+      if (!persistirAtendimentosRecebidosDoServidor(atualizada)) {
+        toast.warning('A demanda foi salva no servidor, mas o cache local nao pode ser atualizado. Recarregue a pagina.')
+      }
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'criar',
         entidade: 'Atendimento', entidade_id: nova.id,
         descricao: `Criou demanda ${tipoServico} para ${passageiroNome}`,
       })
-      try {
-        await commitPendingRemoteStorage()
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')
-        onClose()
-        return
-      }
       // V9: Alerta sonoro + notificação
       dispararAlertaNovaDemanda(passageiroNome, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
-      toast.success(`Demanda ${nova.serial_os || nova.id} criada!`)
+      if (resultado.policy.blocked) {
+        toast.warning(`Demanda ${nova.serial_os || nova.id} salva como pendente por politica corporativa.`)
+      } else if (resultado.policy.requiresAction) {
+        toast.warning(`Demanda ${nova.serial_os || nova.id} salva como pendente. Conclua os requisitos obrigatorios da politica.`)
+      } else if (resultado.approval.required) {
+        toast.info(resultado.approval.configured
+          ? `Demanda ${nova.serial_os || nova.id} enviada para aprovacao.`
+          : `Demanda ${nova.serial_os || nova.id} criada; configure o workflow de aprovacao indicado.`)
+      } else {
+        toast.success(`Demanda ${nova.serial_os || nova.id} criada!`)
+      }
       onSaved?.(nova)
     }
     onClose()
@@ -446,7 +579,8 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               setFuncionarioId(null)
             }} className="bbt-input" required>
               <option value="">Selecione...</option>
-              {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+              {isConsolidated && <option value="">Selecione a empresa</option>}
+              {empresasNoContexto.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
             </select>
             {empresaSelecionada && (
               <div className="mt-1 flex gap-2 flex-wrap text-[10px]">

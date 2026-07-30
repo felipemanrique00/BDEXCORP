@@ -43,6 +43,7 @@ type TabId = 'geral' | 'whatsapp' | 'voz' | 'alertas' | 'permissoes' | 'ferramen
 
 interface HealthPayload {
   ok: boolean
+  error?: string
   status: string
   storage: string
   whatsapp: WhatsAppSessionState
@@ -51,6 +52,8 @@ interface HealthPayload {
 }
 
 interface LogsPayload {
+  ok: boolean
+  error?: string
   audit: Array<Record<string, any>>
   tools: Array<Record<string, any>>
   whatsapp: Array<Record<string, any>>
@@ -103,34 +106,34 @@ export default function AssistantDashboardPage() {
   const [tools, setTools] = useState<AssistantToolDefinition[]>([])
   const [logs, setLogs] = useState<LogsPayload | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [testMessage, setTestMessage] = useState('Localize o voucher H-26262 e gere PDF')
   const [testResult, setTestResult] = useState<Record<string, any> | null>(null)
   const [audioText, setAudioText] = useState('Quero receber a resposta por audio')
 
   useEffect(() => {
-    refreshAll()
+    void refreshAll()
   }, [])
 
   async function refreshAll() {
     setLoading(true)
+    setLoadError(null)
     try {
-      const [settingsRes, healthRes, toolsRes, logsRes] = await Promise.all([
-        fetch('/api/assistant/settings'),
-        fetch('/api/assistant/health'),
-        fetch('/api/assistant/tools'),
-        fetch('/api/assistant/logs'),
+      const [settingsJson, healthJson, toolsJson, logsJson] = await Promise.all([
+        fetchAssistantResource<{ ok: true; settings: AssistantSetting }>('/api/assistant/settings'),
+        fetchAssistantResource<HealthPayload>('/api/assistant/health'),
+        fetchAssistantResource<{ ok: true; tools: AssistantToolDefinition[] }>('/api/assistant/tools'),
+        fetchAssistantResource<LogsPayload>('/api/assistant/logs'),
       ])
-      const settingsJson = await settingsRes.json()
-      const healthJson = await healthRes.json()
-      const toolsJson = await toolsRes.json()
-      const logsJson = await logsRes.json()
-      if (settingsJson.ok) setSettings(settingsJson.settings)
-      if (healthJson.ok) setHealth(healthJson)
-      if (toolsJson.ok) setTools(toolsJson.tools || [])
-      if (logsJson.ok) setLogs(logsJson)
+      setSettings(settingsJson.settings)
+      setHealth(healthJson)
+      setTools(toolsJson.tools || [])
+      setLogs(logsJson)
     } catch (error) {
-      toast.error('Falha ao carregar painel da assistente.')
+      const message = error instanceof Error ? error.message : 'Falha ao carregar painel da assistente.'
+      setLoadError(message)
+      toast.error(message)
     } finally {
       setLoading(false)
     }
@@ -283,7 +286,7 @@ export default function AssistantDashboardPage() {
       .slice(0, 18)
   }, [logs])
 
-  if (loading || !settings) {
+  if (loading) {
     return (
       <div className="space-y-4">
         <div className="bbt-page-header">
@@ -296,6 +299,23 @@ export default function AssistantDashboardPage() {
           <div className="h-32 skeleton" />
           <div className="h-32 skeleton" />
           <div className="h-32 skeleton" />
+        </div>
+      </div>
+    )
+  }
+
+  if (loadError || !settings) {
+    return (
+      <div className="bbt-card p-6">
+        <div className="flex items-start gap-3">
+          <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
+          <div className="min-w-0">
+            <h1 className="bbt-page-title">Painel da assistente indisponivel</h1>
+            <p className="bbt-page-subtitle mt-1">{loadError || 'Nao foi possivel carregar as configuracoes.'}</p>
+            <button type="button" onClick={() => void refreshAll()} className="bbt-button-outline mt-4">
+              <RefreshCw className="h-4 w-4" /> Tentar novamente
+            </button>
+          </div>
         </div>
       </div>
     )
@@ -702,6 +722,15 @@ export default function AssistantDashboardPage() {
       )}
     </div>
   )
+}
+
+async function fetchAssistantResource<T extends { ok: boolean; error?: string }>(url: string): Promise<T> {
+  const response = await fetch(url, { cache: 'no-store' })
+  const payload = await response.json().catch(() => null) as T | null
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error || 'Falha ao carregar painel da assistente.')
+  }
+  return payload
 }
 
 function SectionTitle({ icon: Icon, title, description }: { icon: any; title: string; description: string }) {

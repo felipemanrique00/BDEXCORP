@@ -26,7 +26,7 @@ const tenantSchema = z.object({
 export async function GET(request: Request) {
   const guard = await guardApiRequest(request, { requireAuth: true, platformAdmin: true, rateLimit: { key: 'platform-tenants:get', limit: 60, windowMs: 60_000 } })
   if (guard.response) return guard.response
-  return NextResponse.json({ ok: true, tenants: await listPlatformTenants() })
+  return NextResponse.json({ ok: true, tenants: await listPlatformTenants(guard.principal!) })
 }
 
 export async function POST(request: Request) {

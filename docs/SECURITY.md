@@ -18,8 +18,11 @@
 - Operacoes mutaveis validam `Origin` contra `APP_URL`.
 - O tenant vem da sessao; valores enviados pelo browser nao alteram o contexto.
 - RLS forcado e chaves compostas fornecem uma segunda barreira no banco.
+- A camada de identidade usa contextos restritos por tenant, usuario, hash de
+  sessao, hash de convite ou administrador de plataforma verificado.
 - Migrations usam uma credencial administrativa separada; o processo web usa papel sem `SUPERUSER/BYPASSRLS`.
-- `/api/ready` bloqueia producao se o papel da aplicacao puder ignorar RLS.
+- `/api/ready` bloqueia producao se o papel da aplicacao puder ignorar RLS ou
+  se qualquer migration versionada estiver ausente.
 - Rotas da plataforma exigem `platformAdmin`.
 
 ## Segredos
@@ -83,7 +86,10 @@ Eventos do servidor cobrem autenticacao, acesso negado, usuarios, tenants, armaz
 ## Riscos residuais
 
 - Auditoria externa de penetracao ainda nao foi executada.
-- `npm audit` depende de acesso ao registry e deve passar no CI antes da liberacao.
+- As auditorias npm completa e de producao passaram em 24/07/2026; o gate deve
+  continuar no CI para detectar novas vulnerabilidades.
+- DAST autenticado amplo, SAST dedicado, SBOM e scanner da imagem Docker ainda
+  dependem do ambiente de staging.
 - Volume local de arquivos limita escala horizontal.
 - O rate limiting no banco protege a aplicacao, mas nao substitui protecao DDoS na borda.
 - Politicas de retencao e base legal exigem decisao organizacional/juridica.

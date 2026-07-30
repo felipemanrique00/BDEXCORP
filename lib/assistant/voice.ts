@@ -1,12 +1,16 @@
 import { ASSISTANT_KEYS, appendAssistantList, createId } from '@/lib/assistant/storage'
 import { getAssistantSettings } from '@/lib/assistant/settings'
-import { transcribeAudioWithOpenAI } from '@/lib/server-ai'
+import {
+  executeAiSpeechGateway,
+  executeAiTranscriptionGateway,
+} from '@/lib/server/ai-gateway-service'
+import type { RequestPrincipal } from '@/lib/server/request-context'
 import type { AudioGenerationLog, AudioTranscriptionLog, AssistantChannel, AssistantVoiceSetting } from '@/lib/assistant/types'
 
 export const MAX_ASSISTANT_AUDIO_BYTES = 25 * 1024 * 1024
 const MAX_ASSISTANT_AUDIO_BASE64_LENGTH = Math.ceil(MAX_ASSISTANT_AUDIO_BYTES * 4 / 3) + 16
 
-export async function transcribeAssistantAudio(input: {
+export async function transcribeAssistantAudio(principal: RequestPrincipal, input: {
   base64?: string
   fileName?: string
   mimeType?: string
@@ -20,12 +24,13 @@ export async function transcribeAssistantAudio(input: {
   if (input.base64) {
     if (process.env.OPENAI_API_KEY && provider === 'openai') {
       try {
-        const transcript = await transcribeAudioWithOpenAI({
+        const result = await executeAiTranscriptionGateway(principal, {
           base64: input.base64,
           fileName: input.fileName,
           mimeType: input.mimeType,
           prompt: 'Audio de comando operacional BBT em portugues do Brasil.',
         })
+        const transcript = result.transcript
         const log: AudioTranscriptionLog = {
           id: createId('stt'),
           provider: 'openai',
@@ -85,7 +90,7 @@ export async function transcribeAssistantAudio(input: {
   return { transcript, log }
 }
 
-export async function generateAssistantAudio(input: { text: string }): Promise<{
+export async function generateAssistantAudio(principal: RequestPrincipal, input: { text: string }): Promise<{
   text: string
   audioBase64?: string
   audioUrl?: string
@@ -99,28 +104,12 @@ export async function generateAssistantAudio(input: { text: string }): Promise<{
 
   if (process.env.OPENAI_API_KEY && provider === 'openai' && settings.voice.textToSpeechEnabled) {
     try {
-      const response = await fetch('https://api.openai.com/v1/audio/speech', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
-          voice: openAIVoice,
-          input: input.text.replace(/\s+/g, ' ').slice(0, 4000),
-          response_format: format,
-          speed: clampSpeechSpeed(settings.voice.speed),
-        }),
+      const result = await executeAiSpeechGateway(principal, {
+        text: input.text,
+        voice: openAIVoice,
+        format,
+        speed: clampSpeechSpeed(settings.voice.speed),
       })
-
-      if (!response.ok) {
-        const detail = await response.json().catch(() => ({}))
-        throw new Error(detail?.error?.message || 'Falha ao gerar audio.')
-      }
-
-      const bytes = Buffer.from(await response.arrayBuffer())
-      const mimeType = format === 'mp3' ? 'audio/mpeg' : format === 'wav' ? 'audio/wav' : 'audio/ogg'
       const log: AudioGenerationLog = {
         id: createId('tts'),
         provider: 'openai',
@@ -131,7 +120,12 @@ export async function generateAssistantAudio(input: { text: string }): Promise<{
         createdAt: new Date().toISOString(),
       }
       await appendAssistantList(ASSISTANT_KEYS.audioGenerations, log, 500)
-      return { text: input.text, audioBase64: bytes.toString('base64'), mimeType, log }
+      return {
+        text: input.text,
+        audioBase64: result.audioBase64,
+        mimeType: result.mimeType,
+        log,
+      }
     } catch (error: any) {
       const log: AudioGenerationLog = {
         id: createId('tts'),

@@ -322,6 +322,13 @@ export function contentToOpenAIContent(content: any, role: 'user' | 'assistant' 
           image_url: `data:${block.source.media_type || 'image/png'};base64,${block.source.data}`,
         }
       }
+      if (block?.type === 'file' && block?.source?.type === 'base64') {
+        return {
+          type: 'input_file',
+          filename: String(block.file_name || block.filename || 'documento.pdf').slice(0, 240),
+          file_data: `data:${block.source.media_type || 'application/pdf'};base64,${block.source.data}`,
+        }
+      }
       return null
     })
     .filter(Boolean)

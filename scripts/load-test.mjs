@@ -7,6 +7,7 @@ const maxP95Ms = positiveInteger(process.env.LOAD_MAX_P95_MS, 2_500, 100, 120_00
 const email = String(process.env.LOAD_EMAIL || process.env.E2E_ADMIN_EMAIL || '').trim()
 const password = String(process.env.LOAD_PASSWORD || process.env.E2E_ADMIN_PASSWORD || '')
 const tenant = String(process.env.LOAD_TENANT || '').trim()
+const targetPath = normalizeTargetPath(process.env.LOAD_TARGET_PATH || '/api/auth/session')
 
 if (!baseUrl) fail('Defina LOAD_BASE_URL ou APP_URL.')
 if (!email || !password) fail('Defina LOAD_EMAIL/LOAD_PASSWORD ou E2E_ADMIN_EMAIL/E2E_ADMIN_PASSWORD.')
@@ -36,7 +37,7 @@ await Promise.all(Array.from({ length: Math.min(concurrency, totalRequests) }, a
     const requestStartedAt = performance.now()
     let status = 0
     try {
-      const response = await fetch(`${baseUrl}/api/storage?keys=bbt-data-v4`, {
+      const response = await fetch(`${baseUrl}${targetPath}`, {
         headers: { Cookie: cookie, 'User-Agent': 'bbt-load-baseline' },
         cache: 'no-store',
       })
@@ -58,7 +59,7 @@ const errors = Array.from(statuses.entries()).reduce(
 )
 const report = {
   generatedAt: new Date().toISOString(),
-  target: '/api/storage?keys=bbt-data-v4',
+  target: targetPath,
   requests: totalRequests,
   concurrency,
   elapsedMs: round(elapsedMs),
@@ -87,6 +88,14 @@ function positiveInteger(value, fallback, minimum, maximum) {
     fail(`Valor inteiro fora do intervalo ${minimum}-${maximum}.`)
   }
   return parsed
+}
+
+function normalizeTargetPath(value) {
+  const path = String(value || '').trim()
+  if (!path.startsWith('/') || path.startsWith('//') || path.includes('://')) {
+    fail('LOAD_TARGET_PATH deve ser um caminho local iniciado por /.')
+  }
+  return path
 }
 
 function round(value) {

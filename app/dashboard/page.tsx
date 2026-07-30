@@ -38,6 +38,7 @@ import {
   Leaf,
   LifeBuoy,
   ListChecks,
+  Loader2,
   MapPin,
   MessageCircle,
   Navigation,
@@ -55,29 +56,40 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 
-import { getAgentesBBT, getCurrentUser, hasPermission } from '@/lib/auth'
+import { getAgentesBBT, getCurrentUser } from '@/lib/auth'
 import { AI_SHORT_NAME, SYSTEM_FULL_NAME } from '@/lib/branding'
 import { getStatusIA, type StatusIA } from '@/lib/ia-parser'
 import { reportClientFailure } from '@/lib/client-observability'
 import {
   calcularEstatisticasAtendimentos,
   getAllAtendimentos,
-  updateAtendimento,
 } from '@/lib/atendimentos-storage'
+import { persistDemandStatusWithCompatibility } from '@/lib/demand-persistence-client'
 import {
   adicionarLancamento,
   calcularResumoFinanceiroDaLista,
   getAllLancamentos,
   type LancamentoFinanceiro,
 } from '@/lib/financeiro'
+import {
+  createFinancialEntryOnServer,
+  FinanceClientError,
+  loadFinancialEntriesFromServer,
+} from '@/lib/finance-persistence-client'
 import { useStore } from '@/lib/store'
 import { getAllVouchersEmitidos } from '@/lib/vouchers-emitidos-storage'
 import { formatCurrency, formatDate } from '@/lib/utils'
-import { commitPendingRemoteStorage, loadJSON, safeSetJSON } from '@/lib/storage-quota'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import { calcularResumoCRM } from '@/lib/crm'
+import {
+  loadOperationalCommunicationOverview,
+  sendTravelDeskNote,
+} from '@/lib/operational-communication-client'
+import type { CrmSummary, TravelDeskNote } from '@/lib/operational-communications'
+import { saveExecutiveReportSnapshot } from '@/lib/report-snapshot-client'
 import { getOperationalAlerts, type OperationalAlert } from '@/lib/operational-alerts'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
-import { createEntityId } from '@/lib/ids'
+import { useCorporateContext, useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 // V16: mapa real Leaflet (carrega só no cliente)
 const OperationalMap = dynamic(() => import('@/components/dashboard/operational-map'), {
@@ -162,6 +174,8 @@ const SERVICE_TYPES: TipoServico[] = ['Aéreo', 'Hotel', 'Carro', 'Pacote']
 
 export default function DashboardPage() {
   const { empresas, funcionarios, hoteis } = useStore()
+  const { context } = useCorporateContext()
+  const { companyIds, includesCompany, isConsolidated } = useCorporateCompanyScope()
   const [reload, setReload] = useState(0)
   const [periodo, setPeriodo] = useState<Periodo>('30d')
   const [filtroEmpresa, setFiltroEmpresa] = useState('')
@@ -173,7 +187,11 @@ export default function DashboardPage() {
     categoria: 'Refeição',
     empresa_id: '',
   })
+  const [expenseSubmitting, setExpenseSubmitting] = useState(false)
   const [deskNote, setDeskNote] = useState('')
+  const [deskNotes, setDeskNotes] = useState<TravelDeskNote[]>([])
+  const [deskNoteSubmitting, setDeskNoteSubmitting] = useState(false)
+  const [serverCrmResumo, setServerCrmResumo] = useState<CrmSummary | null>(null)
   const [user, setUser] = useState<ReturnType<typeof getCurrentUser>>(null)
   const [iaStatus, setIaStatus] = useState<StatusIA | null>(null)
 
@@ -189,23 +207,99 @@ export default function DashboardPage() {
     setReload((n) => n + 1)
   }, [])
 
-  useEffect(() => {
-    if (!expenseDraft.empresa_id && empresas[0]?.id) {
-      setExpenseDraft((draft) => ({ ...draft, empresa_id: empresas[0].id }))
-    }
-  }, [empresas, expenseDraft.empresa_id])
+  const empresasVisiveis = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_empresas')),
+    [empresas, includesCompany],
+  )
+  const empresasDemandas = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_demandas')),
+    [empresas, includesCompany],
+  )
+  const empresasFinanceiras = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_financeiro')),
+    [empresas, includesCompany],
+  )
+  const empresasEditaveisFinanceiro = useMemo(
+    () => empresas.filter((empresa) => includesCompany(empresa.id, 'editar_financeiro')),
+    [empresas, includesCompany],
+  )
+  const funcionariosVisiveis = useMemo(
+    () => funcionarios.filter((funcionario) => includesCompany(funcionario.company_id, 'ver_funcionarios')),
+    [funcionarios, includesCompany],
+  )
 
-  const podeFinanceiro = hasPermission(user, 'ver_financeiro')
+  useEffect(() => {
+    if (filtroEmpresa && !empresasDemandas.some((empresa) => empresa.id === filtroEmpresa)) setFiltroEmpresa('')
+  }, [empresasDemandas, filtroEmpresa])
+
+  useEffect(() => {
+    setExpenseDraft((draft) => {
+      if (draft.empresa_id && includesCompany(draft.empresa_id, 'editar_financeiro')) return draft
+      const defaultCompanyId = context?.type === 'company' && includesCompany(context.id, 'editar_financeiro')
+        ? context.id
+        : !companyIds && !isConsolidated ? empresasEditaveisFinanceiro[0]?.id || '' : ''
+      return { ...draft, empresa_id: defaultCompanyId }
+    })
+  }, [companyIds, context, empresasEditaveisFinanceiro, includesCompany, isConsolidated])
+
+  const podeFinanceiro = empresasFinanceiras.length > 0
+  const podeEditarFinanceiro = empresasEditaveisFinanceiro.length > 0
+  const empresasFinanceirasKey = empresasFinanceiras.map((empresa) => empresa.id).sort().join('|')
+
+  useEffect(() => {
+    if (!podeFinanceiro) return
+    let active = true
+    void loadFinancialEntriesFromServer()
+      .then(() => {
+        if (active) setReload((value) => value + 1)
+      })
+      .catch((error) => {
+        if (active) {
+          reportClientFailure('dashboard_finance_load_failed', error, {
+            component: 'dashboard',
+          })
+        }
+      })
+    return () => {
+      active = false
+    }
+  }, [empresasFinanceirasKey, podeFinanceiro])
+
   const { dataInicio, dataFim, dataInicioAnterior, dataFimAnterior } = useMemo(
     () => periodoRange(periodo),
     [periodo],
   )
 
+  useEffect(() => {
+    let active = true
+    loadOperationalCommunicationOverview({
+      startDate: dataInicio,
+      endDate: dataFim,
+      companyId: filtroEmpresa || (context?.type === 'company' ? context.id : undefined),
+      groupId: !filtroEmpresa && context?.type === 'group' ? context.id : undefined,
+      serviceType: filtroTipo === 'todos' ? undefined : filtroTipo,
+    })
+      .then((overview) => {
+        if (!active) return
+        setServerCrmResumo(overview.crm)
+        setDeskNotes(overview.notes)
+      })
+      .catch((error) => {
+        if (!active) return
+        reportClientFailure('operational_communications_load_failed', error, {
+          component: 'dashboard',
+        })
+      })
+    return () => {
+      active = false
+    }
+  }, [context?.id, context?.type, dataFim, dataInicio, filtroEmpresa, filtroTipo])
+
   const agentesBBT = useMemo(() => getAgentesBBT(), [])
   const atendimentos = useMemo(() => {
     void reload
-    return getAllAtendimentos()
-  }, [reload])
+    return getAllAtendimentos().filter((atendimento) => includesCompany(atendimento.empresa_id, 'ver_demandas'))
+  }, [includesCompany, reload])
   const atendimentosFiltrados = useMemo(
     () => filtrarAtendimentosDashboard(
       atendimentos,
@@ -236,39 +330,53 @@ export default function DashboardPage() {
     () => calcularEstatisticasAtendimentos(atendimentosAnteriores),
     [atendimentosAnteriores],
   )
+  const atendimentosFinanceiros = useMemo(
+    () => atendimentosFiltrados.filter((atendimento) => includesCompany(atendimento.empresa_id, 'ver_financeiro')),
+    [atendimentosFiltrados, includesCompany],
+  )
+  const statsFinanceiros = useMemo(
+    () => calcularEstatisticasAtendimentos(atendimentosFinanceiros),
+    [atendimentosFinanceiros],
+  )
   const lancamentos = useMemo(() => {
     void reload
-    return getAllLancamentos()
-  }, [reload])
+    return getAllLancamentos().filter((lancamento) => includesCompany(lancamento.empresa_id, 'ver_financeiro'))
+  }, [includesCompany, reload])
   const resumoFinanceiro = useMemo(
     () => calcularResumoFinanceiroDaLista(lancamentos, { desde: dataInicio, ate: dataFim }),
     [dataFim, dataInicio, lancamentos],
   )
   const vouchers = useMemo(() => {
     void reload
-    return getAllVouchersEmitidos()
-  }, [reload])
+    return getAllVouchersEmitidos().filter((voucher) => includesCompany(voucher.empresa_id, 'ver_vouchers'))
+  }, [includesCompany, reload])
 
   const alertasOperacionais = useMemo(
-    () => getOperationalAlerts({ atendimentos, vouchers, empresas }),
-    [atendimentos, vouchers, empresas],
+    () => getOperationalAlerts({ atendimentos, vouchers, empresas: empresasVisiveis }),
+    [atendimentos, vouchers, empresasVisiveis],
   )
   const viagens = useMemo(() => proximasViagens(atendimentosFiltrados), [atendimentosFiltrados])
   const demandasCriticas = useMemo(() => filaCritica(atendimentosFiltrados), [atendimentosFiltrados])
   const serviceSummaries = useMemo(
-    () => montarResumoServicos(atendimentosFiltrados, stats, statsAnterior, dataInicio, dataFim),
-    [atendimentosFiltrados, stats, statsAnterior, dataInicio, dataFim],
+    () => montarResumoServicos(atendimentosFiltrados, atendimentosFinanceiros, stats, statsAnterior, dataInicio, dataFim),
+    [atendimentosFiltrados, atendimentosFinanceiros, stats, statsAnterior, dataInicio, dataFim],
   )
   const relatoriosDespesas = useMemo(() => montarRelatoriosDespesas(lancamentos), [lancamentos])
   const despesasRecentes = useMemo(() => despesasParaCaixa(lancamentos), [lancamentos])
   const dutyPoints = useMemo(() => pontosDeCuidado(atendimentosFiltrados), [atendimentosFiltrados])
-  const dashboardSeries = useMemo(() => montarSerieDashboard(atendimentosFiltrados, dataInicio, dataFim), [atendimentosFiltrados, dataInicio, dataFim])
+  const dashboardSeries = useMemo(
+    () => montarSerieDashboard(atendimentosFiltrados, atendimentosFinanceiros, dataInicio, dataFim),
+    [atendimentosFiltrados, atendimentosFinanceiros, dataInicio, dataFim],
+  )
   const serviceMix = useMemo(() => serviceSummaries.map((s) => ({ name: s.label, value: s.units, spend: s.spend, tipo: s.tipo })), [serviceSummaries])
   const pipelineMetrics = useMemo(
-    () => montarPipelineMetrics(atendimentosFiltrados, resumoFinanceiro, empresas.length, funcionarios.length),
-    [atendimentosFiltrados, resumoFinanceiro, empresas.length, funcionarios.length],
+    () => montarPipelineMetrics(atendimentosFiltrados, resumoFinanceiro, empresasVisiveis.length, funcionariosVisiveis.length, podeFinanceiro),
+    [atendimentosFiltrados, resumoFinanceiro, empresasVisiveis.length, funcionariosVisiveis.length, podeFinanceiro],
   )
-  const crmResumo = useMemo(() => calcularResumoCRM(atendimentosFiltrados), [atendimentosFiltrados])
+  const crmResumo = useMemo(
+    () => serverCrmResumo || calcularResumoCRM(atendimentosFiltrados),
+    [atendimentosFiltrados, serverCrmResumo],
+  )
   const resumoInteligente = useMemo(
     () => montarResumoInteligente({
       stats,
@@ -279,8 +387,9 @@ export default function DashboardPage() {
       policyRate: calcularPolicyRate(atendimentosFiltrados),
       onlineAdoption: calcularAdocaoOnline(atendimentosFiltrados),
       co2: calcularCO2(stats.por_tipo),
+      podeFinanceiro,
     }),
-    [stats, statsAnterior, resumoFinanceiro, crmResumo, dutyPoints, atendimentosFiltrados],
+    [stats, statsAnterior, resumoFinanceiro, crmResumo, dutyPoints, atendimentosFiltrados, podeFinanceiro],
   )
 
   const quickActions: QuickAction[] = [
@@ -314,7 +423,7 @@ export default function DashboardPage() {
     },
   ]
 
-  const totalSpend = podeFinanceiro ? stats.faturado_total || resumoFinanceiro.total_a_receber : 0
+  const totalSpend = podeFinanceiro ? statsFinanceiros.faturado_total || resumoFinanceiro.total_a_receber : 0
   const onlineAdoption = calcularAdocaoOnline(atendimentosFiltrados)
   const co2 = calcularCO2(stats.por_tipo)
   const policyRate = calcularPolicyRate(atendimentosFiltrados)
@@ -326,7 +435,8 @@ export default function DashboardPage() {
 
   async function handleDespesaRapida(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!podeFinanceiro) {
+    if (expenseSubmitting) return
+    if (!includesCompany(expenseDraft.empresa_id, 'editar_financeiro')) {
       toast.error('Seu perfil não tem permissão para lançar despesas.')
       return
     }
@@ -338,44 +448,80 @@ export default function DashboardPage() {
     }
 
     const hoje = todayISODate()
-    adicionarLancamento({
-      tipo: 'pagar',
-      empresa_id: expenseDraft.empresa_id || undefined,
-      fornecedor_nome: 'Despesa de viagem',
-      valor,
-      data_emissao: hoje,
-      data_vencimento: hoje,
-      descricao: expenseDraft.descricao.trim(),
-      categoria: expenseDraft.categoria,
-      forma_pagamento: 'Outro',
-      observacoes: `Despesa lancada pelo ${SYSTEM_FULL_NAME}.`,
-    })
-
+    setExpenseSubmitting(true)
     try {
-      await commitPendingRemoteStorage()
+      await createFinancialEntryOnServer(
+        {
+          tipo: 'pagar',
+          empresa_id: expenseDraft.empresa_id,
+          fornecedor_nome: 'Despesa de viagem',
+          valor,
+          data_emissao: hoje,
+          data_vencimento: hoje,
+          descricao: expenseDraft.descricao.trim(),
+          categoria: expenseDraft.categoria,
+          forma_pagamento: 'Outro',
+          observacoes: `Despesa lancada pelo ${SYSTEM_FULL_NAME}.`,
+        },
+        `finance:quick-expense:${crypto.randomUUID()}`,
+      )
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o lancamento no servidor.')
-      return
+      if (
+        error instanceof FinanceClientError
+        && error.code === 'FINANCE_RELATIONAL_WRITE_DISABLED'
+      ) {
+        adicionarLancamento({
+          tipo: 'pagar',
+          empresa_id: expenseDraft.empresa_id,
+          fornecedor_nome: 'Despesa de viagem',
+          valor,
+          data_emissao: hoje,
+          data_vencimento: hoje,
+          descricao: expenseDraft.descricao.trim(),
+          categoria: expenseDraft.categoria,
+          forma_pagamento: 'Outro',
+          observacoes: `Despesa lancada pelo ${SYSTEM_FULL_NAME}.`,
+        })
+        try {
+          await commitPendingRemoteStorage()
+        } catch (commitError) {
+          toast.error(
+            commitError instanceof Error
+              ? commitError.message
+              : 'Falha ao confirmar o lancamento no servidor.',
+          )
+          return
+        }
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Falha ao criar o lancamento.')
+        return
+      }
+    } finally {
+      setExpenseSubmitting(false)
     }
 
     setExpenseDraft({
       descricao: '',
       valor: '',
       categoria: 'Refeição',
-      empresa_id: empresas[0]?.id || '',
+      empresa_id: context?.type === 'company' && includesCompany(context.id, 'editar_financeiro') ? context.id : '',
     })
     setReload((n) => n + 1)
     toast.success('Despesa adicionada ao financeiro.')
   }
 
   async function alterarStatusDemanda(id: string, status: StatusAtendimento) {
-    const ok = updateAtendimento(id, { status })
-    if (!ok) {
-      toast.error('Não foi possível atualizar a demanda.')
+    const atendimento = atendimentos.find((item) => item.id === id)
+    if (!atendimento || !includesCompany(atendimento.empresa_id, 'criar_demandas')) {
+      toast.error('Seu perfil nao pode alterar esta demanda.')
       return
     }
     try {
-      await commitPendingRemoteStorage()
+      await persistDemandStatusWithCompatibility(
+        atendimento,
+        status,
+        `Alteracao de status pelo dashboard executivo`,
+      )
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o status no servidor.')
       return
@@ -385,12 +531,8 @@ export default function DashboardPage() {
   }
 
   async function salvarResumoExecutivo() {
-    if (typeof window !== 'undefined') {
-      const key = 'bbt-resumos-executivos-v12'
-      const lista = loadJSON<any[]>(key, [])
-      const novo = {
-        id: createEntityId('re'),
-        created_at: new Date().toISOString(),
+    try {
+      await saveExecutiveReportSnapshot({
         periodo: periodoLabel(periodo),
         totalSpend,
         total_demandas: stats.total,
@@ -398,18 +540,11 @@ export default function DashboardPage() {
         policyRate,
         co2,
         onlineAdoption,
-        faturamento_total: resumoFinanceiro.total_a_receber,
+        faturamento_total: podeFinanceiro ? resumoFinanceiro.total_a_receber : 0,
         insights: resumoInteligente.insights,
         recomendacoes: resumoInteligente.recomendacoes,
         riscos: resumoInteligente.riscos,
-      }
-      if (!safeSetJSON(key, [novo, ...lista].slice(0, 30))) {
-        toast.error('Nao foi possivel preparar o resumo executivo.')
-        return
-      }
-    }
-    try {
-      await commitPendingRemoteStorage()
+      })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o resumo no servidor.')
       return
@@ -427,22 +562,20 @@ export default function DashboardPage() {
   async function salvarNotaDesk() {
     const texto = deskNote.trim()
     if (!texto) return
-    if (typeof window !== 'undefined') {
-      const key = 'bbt-travel-desk-v11'
-      const current = loadJSON<Array<{ text: string; created_at: string }>>(key, [])
-      if (!safeSetJSON(key, [{ text: texto, created_at: new Date().toISOString() }, ...current].slice(0, 30))) {
-        toast.error('Nao foi possivel preparar a nota.')
-        return
-      }
-    }
+    setDeskNoteSubmitting(true)
     try {
-      await commitPendingRemoteStorage()
+      const note = await sendTravelDeskNote({
+        note: texto,
+        companyId: filtroEmpresa || (context?.type === 'company' ? context.id : undefined),
+      })
+      setDeskNotes((current) => [note, ...current.filter((item) => item.id !== note.id)].slice(0, 30))
+      setDeskNote('')
+      toast.success('Nota enviada para o Travel Desk.')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a nota no servidor.')
-      return
+    } finally {
+      setDeskNoteSubmitting(false)
     }
-    setDeskNote('')
-    toast.success('Nota enviada para o Travel Desk.')
   }
 
   return (
@@ -499,7 +632,7 @@ export default function DashboardPage() {
                   <TripCard
                     key={viagem.id}
                     atendimento={viagem}
-                    empresa={empresaPorId(empresas, viagem.empresa_id)}
+                    empresa={empresaPorId(empresasVisiveis, viagem.empresa_id)}
                     index={index}
                     onStatusChange={alterarStatusDemanda}
                   />
@@ -520,6 +653,8 @@ export default function DashboardPage() {
           <TravelDeskPanel
             demandas={demandasCriticas}
             deskNote={deskNote}
+            notes={deskNotes}
+            submitting={deskNoteSubmitting}
             setDeskNote={setDeskNote}
             onSend={salvarNotaDesk}
             onStatusChange={alterarStatusDemanda}
@@ -540,7 +675,7 @@ export default function DashboardPage() {
           icon={Users}
           label="Viajantes ativos"
           value={String(activeTravellers)}
-          detail={`${funcionarios.filter((f) => f.ativo).length} perfis habilitados`}
+          detail={`${funcionariosVisiveis.filter((f) => f.ativo).length} perfis habilitados`}
           tone="bg-white dark:bg-slate-800 text-bbt-primary dark:text-white"
         />
         <MetricTile
@@ -562,7 +697,7 @@ export default function DashboardPage() {
       <DashboardFilters
         periodo={periodo}
         setPeriodo={setPeriodo}
-        empresas={empresas}
+        empresas={empresasDemandas}
         agentes={agentesBBT}
         filtroEmpresa={filtroEmpresa}
         setFiltroEmpresa={setFiltroEmpresa}
@@ -575,8 +710,8 @@ export default function DashboardPage() {
       <TeamCommandStrip
         atendimentos={atendimentosFiltrados}
         totalAtendimentos={atendimentos.length}
-        empresas={empresas}
-        funcionarios={funcionarios}
+        empresas={empresasVisiveis}
+        funcionarios={funcionariosVisiveis}
         agentes={agentesBBT}
         vouchers={vouchers}
         alertas={alertasOperacionais}
@@ -607,18 +742,19 @@ export default function DashboardPage() {
             dutyPoints={dutyPoints}
             demandasCriticas={demandasCriticas}
             hoteis={hoteis}
-            empresas={empresas}
+            empresas={empresasVisiveis}
             vouchers={vouchers}
           />
         </div>
 
         <div className="min-w-0 space-y-6">
           <ExpenseBox
-            podeFinanceiro={podeFinanceiro}
+            podeFinanceiro={podeEditarFinanceiro}
+            submitting={expenseSubmitting}
             despesasRecentes={despesasRecentes}
             expenseDraft={expenseDraft}
             setExpenseDraft={setExpenseDraft}
-            empresas={empresas}
+            empresas={empresasEditaveisFinanceiro}
             onSubmit={handleDespesaRapida}
           />
 
@@ -633,7 +769,7 @@ export default function DashboardPage() {
       <section className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <OperationalQueue
           demandas={demandasCriticas}
-          empresas={empresas}
+          empresas={empresasDemandas}
           onStatusChange={alterarStatusDemanda}
         />
         <SustainabilityPanel co2={co2} stats={stats.por_tipo} vouchers={vouchers} />
@@ -641,7 +777,7 @@ export default function DashboardPage() {
 
       <AIAssistantFab
         pageContext="Dashboard Executivo"
-        dataContext={`Total demandas: ${stats.total}\nFaturamento estimado: ${formatCurrency(stats.valor_total || 0)}\nDemandas críticas: ${demandasCriticas.length}\nAlertas operacionais ativos: ${alertasOperacionais.length}\nEmpresas ativas: ${empresas.length}\nVouchers no período: ${vouchers.length}\nCO₂e total: ${(co2 || 0).toFixed(0)} kg`}
+        dataContext={`Total demandas: ${stats.total}\nFaturamento estimado: ${podeFinanceiro ? formatCurrency(totalSpend) : 'Restrito'}\nDemandas críticas: ${demandasCriticas.length}\nAlertas operacionais ativos: ${alertasOperacionais.length}\nEmpresas ativas: ${empresasVisiveis.length}\nVouchers no período: ${vouchers.length}\nCO₂e total: ${(co2 || 0).toFixed(0)} kg`}
         suggestedPrompts={[
           'Quais são as 3 maiores prioridades agora?',
           'Resuma a operação dessa semana',
@@ -767,6 +903,8 @@ function EmptyHeroState({
 function TravelDeskPanel({
   demandas,
   deskNote,
+  notes,
+  submitting,
   setDeskNote,
   onSend,
   onStatusChange,
@@ -774,6 +912,8 @@ function TravelDeskPanel({
 }: {
   demandas: Atendimento[]
   deskNote: string
+  notes: TravelDeskNote[]
+  submitting: boolean
   setDeskNote: (value: string) => void
   onSend: () => void
   onStatusChange: (id: string, status: StatusAtendimento) => void
@@ -847,19 +987,37 @@ function TravelDeskPanel({
           value={deskNote}
           onChange={(event) => setDeskNote(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') onSend()
+            if (event.key === 'Enter' && !submitting) onSend()
           }}
+          disabled={submitting}
           placeholder="Nota rápida para suporte"
           className="h-10 min-w-0 flex-1 rounded-md border border-white/10 bg-white/10 px-3 text-sm text-white outline-none placeholder:text-blue-100/45"
         />
         <button
           onClick={onSend}
+          disabled={submitting || !deskNote.trim()}
           className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-blue-500 text-white transition hover:bg-blue-400"
           aria-label="Enviar nota"
         >
-          <Send className="h-4 w-4" />
+          <Send className={`h-4 w-4 ${submitting ? 'animate-pulse' : ''}`} />
         </button>
       </div>
+
+      {notes.length > 0 && (
+        <div className="mt-3 space-y-2" aria-label="Notas recentes do Travel Desk">
+          {notes.slice(0, 3).map((note) => (
+            <div key={note.id} className="rounded-md border border-white/10 bg-white/5 p-2">
+              <p className="break-words text-xs text-blue-50">{note.note}</p>
+              <p className="mt-1 text-[10px] text-blue-100/55">
+                {note.createdByName}
+                {note.companyName ? ` · ${note.companyName}` : ''}
+                {' · '}
+                {new Date(note.createdAt).toLocaleString('pt-BR')}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
 
       <Link
         href="/dashboard/ia?tab=chat"
@@ -1559,6 +1717,7 @@ function MapStat({ icon: Icon, label, value }: { icon: LucideIcon; label: string
 
 function ExpenseBox({
   podeFinanceiro,
+  submitting,
   despesasRecentes,
   expenseDraft,
   setExpenseDraft,
@@ -1566,6 +1725,7 @@ function ExpenseBox({
   onSubmit,
 }: {
   podeFinanceiro: boolean
+  submitting: boolean
   despesasRecentes: LancamentoFinanceiro[]
   expenseDraft: ExpenseDraft
   setExpenseDraft: (draft: ExpenseDraft) => void
@@ -1642,11 +1802,13 @@ function ExpenseBox({
           </select>
           <button
             type="submit"
-            disabled={!podeFinanceiro}
+            disabled={!podeFinanceiro || submitting}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-blue-600 px-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Plus className="h-4 w-4" />
-            Adicionar
+            {submitting
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <Plus className="h-4 w-4" />}
+            {submitting ? 'Salvando...' : 'Adicionar'}
           </button>
         </div>
       </form>
@@ -1937,6 +2099,7 @@ function filaCritica(atendimentos: Atendimento[]): Atendimento[] {
 
 function montarResumoServicos(
   atendimentos: Atendimento[],
+  atendimentosFinanceiros: Atendimento[],
   stats: ReturnType<typeof calcularEstatisticasAtendimentos>,
   statsAnterior: ReturnType<typeof calcularEstatisticasAtendimentos>,
   dataInicio: string,
@@ -1945,7 +2108,9 @@ function montarResumoServicos(
   return SERVICE_TYPES.map((tipo) => {
     const meta = SERVICE_META[tipo]
     const current = atendimentos.filter((a) => a.tipo_servico === tipo && dataRegistro(a) >= dataInicio && dataRegistro(a) <= dataFim)
-    const spend = current.reduce((sum, a) => sum + Number(a.valor_venda || a.valor_final || a.valor_cotacao || 0), 0)
+    const spend = atendimentosFinanceiros
+      .filter((a) => a.tipo_servico === tipo && dataRegistro(a) >= dataInicio && dataRegistro(a) <= dataFim)
+      .reduce((sum, a) => sum + Number(a.valor_venda || a.valor_final || a.valor_cotacao || 0), 0)
     const previous = statsAnterior.por_tipo[tipo] || 0
     const now = stats.por_tipo[tipo] || 0
 
@@ -2025,7 +2190,12 @@ function cityHotelCounts(hoteis: HotelType[]) {
   return Array.from(map.values()).sort((a, b) => b.count - a.count)
 }
 
-function montarSerieDashboard(atendimentos: Atendimento[], dataInicio: string, dataFim: string): DashboardPoint[] {
+function montarSerieDashboard(
+  atendimentos: Atendimento[],
+  atendimentosFinanceiros: Atendimento[],
+  dataInicio: string,
+  dataFim: string,
+): DashboardPoint[] {
   const buckets = new Map<string, DashboardPoint>()
   const start = new Date(`${dataInicio}T00:00:00`)
   const end = new Date(`${dataFim}T00:00:00`)
@@ -2046,9 +2216,21 @@ function montarSerieDashboard(atendimentos: Atendimento[], dataInicio: string, d
       bucketDate.setDate(start.getDate() + Math.floor(offset / step) * step)
       const key = toIsoDate(bucketDate)
       const current = buckets.get(key) || { label: labelBucket(bucketDate, step), demandas: 0, faturado: 0, custo: 0, margem: 0 }
+      current.demandas += 1
+      buckets.set(key, current)
+    })
+
+  atendimentosFinanceiros
+    .filter((a) => dataRegistro(a) >= dataInicio && dataRegistro(a) <= dataFim)
+    .forEach((a) => {
+      const date = new Date(`${dataRegistro(a)}T00:00:00`)
+      const offset = Math.floor((date.getTime() - start.getTime()) / 86400000)
+      const bucketDate = new Date(start)
+      bucketDate.setDate(start.getDate() + Math.floor(offset / step) * step)
+      const key = toIsoDate(bucketDate)
+      const current = buckets.get(key) || { label: labelBucket(bucketDate, step), demandas: 0, faturado: 0, custo: 0, margem: 0 }
       const venda = Number(a.valor_venda || a.valor_final || a.valor_cotacao || 0)
       const custo = Number(a.valor_custo || 0)
-      current.demandas += 1
       current.faturado += venda
       current.custo += custo
       current.margem += venda - custo
@@ -2063,6 +2245,7 @@ function montarPipelineMetrics(
   resumoFinanceiro: ReturnType<typeof calcularResumoFinanceiroDaLista>,
   totalEmpresas: number,
   totalFuncionarios: number,
+  podeFinanceiro: boolean,
 ): PipelineMetric[] {
   const abertas = atendimentos.filter((a) => ['pendente', 'em_andamento', 'aguardando_cliente'].includes(a.status)).length
   const semAgente = atendimentos.filter((a) => !a.agente_user_id && !['finalizado', 'cancelado'].includes(a.status)).length
@@ -2071,7 +2254,7 @@ function montarPipelineMetrics(
   return [
     { label: 'Pipeline aberto', value: abertas, detail: `${semAgente} sem agente`, tone: 'bg-blue-50 text-blue-950 dark:bg-blue-900/20 dark:text-blue-100' },
     { label: 'Conversão', value: conversao, detail: '% finalizadas', tone: 'bg-emerald-50 text-emerald-950 dark:bg-emerald-900/20 dark:text-emerald-100' },
-    { label: 'Contas atrasadas', value: Math.round(resumoFinanceiro.atrasados_pagar + resumoFinanceiro.atrasados_receber), detail: 'R$ em aberto', tone: 'bg-amber-50 text-amber-950 dark:bg-amber-900/20 dark:text-amber-100' },
+    { label: 'Contas atrasadas', value: podeFinanceiro ? Math.round(resumoFinanceiro.atrasados_pagar + resumoFinanceiro.atrasados_receber) : 0, detail: podeFinanceiro ? 'R$ em aberto' : 'Acesso restrito', tone: 'bg-amber-50 text-amber-950 dark:bg-amber-900/20 dark:text-amber-100' },
     { label: 'Base CRM', value: totalEmpresas + totalFuncionarios, detail: `${totalEmpresas} empresas`, tone: 'bg-slate-100 text-slate-900 dark:bg-slate-900 dark:text-slate-100' },
   ]
 }
@@ -2085,6 +2268,7 @@ function montarResumoInteligente({
   policyRate,
   onlineAdoption,
   co2,
+  podeFinanceiro,
 }: {
   stats: ReturnType<typeof calcularEstatisticasAtendimentos>
   statsAnterior: ReturnType<typeof calcularEstatisticasAtendimentos>
@@ -2094,6 +2278,7 @@ function montarResumoInteligente({
   policyRate: number
   onlineAdoption: number
   co2: number
+  podeFinanceiro: boolean
 }) {
   const variacao = percentual(stats.total, statsAnterior.total)
   const topTipo = Object.entries(stats.por_tipo).sort((a, b) => b[1] - a[1])[0]
@@ -2101,15 +2286,17 @@ function montarResumoInteligente({
   const insights = [
     `Volume ${variacao >= 0 ? 'subiu' : 'caiu'} ${Math.abs(variacao)}% contra o período anterior, com ${stats.total} demandas.`,
     topTipo ? `${topTipo[0]} lidera o mix operacional com ${topTipo[1]} solicitação(ões).` : 'Sem volume suficiente por serviço.',
-    `Saldo previsto financeiro: ${formatCurrency(resumoFinanceiro.saldo_previsto)}.`,
+    podeFinanceiro
+      ? `Saldo previsto financeiro: ${formatCurrency(resumoFinanceiro.saldo_previsto)}.`
+      : 'Indicadores financeiros restritos para este perfil.',
     `Adoção online em ${onlineAdoption}% e compliance de política em ${policyRate}%.`,
   ]
   const riscos = [
     crmResumo.com_pendencia > 0 ? `${crmResumo.com_pendencia} thread(s) com pendência de resposta.` : 'CRM sem pendência crítica registrada.',
     topDestino ? `${topDestino.city} concentra ${topDestino.count} demanda(s) ativa(s).` : 'Sem concentração de destino ativo.',
-    resumoFinanceiro.atrasados_receber + resumoFinanceiro.atrasados_pagar > 0
+    podeFinanceiro && resumoFinanceiro.atrasados_receber + resumoFinanceiro.atrasados_pagar > 0
       ? `${formatCurrency(resumoFinanceiro.atrasados_receber + resumoFinanceiro.atrasados_pagar)} atrasado no financeiro.`
-      : 'Financeiro sem atraso no recorte atual.',
+      : podeFinanceiro ? 'Financeiro sem atraso no recorte atual.' : 'Risco financeiro não exibido para este perfil.',
   ]
   const recomendacoes = [
     stats.por_prioridade.urgente > 0 ? `Tratar ${stats.por_prioridade.urgente} urgente(s) antes de novas emissões.` : 'Manter fila por SLA e check-in mais próximo.',

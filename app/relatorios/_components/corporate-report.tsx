@@ -102,6 +102,7 @@ type ReportProps = {
   analise?: AnaliseRelatorio
   operacional?: RelatorioOperacional
   detailCompanyColumn?: boolean
+  canExport?: boolean
 }
 
 type DetailFocusKind =
@@ -151,6 +152,7 @@ const CATEGORY_LABELS: Record<TipoServico, string> = {
 }
 
 export function CorporateReport(props: ReportProps) {
+  const canExport = props.canExport === true
   const isAgency = props.visao === 'agencia'
   const analise = props.analise
   const operacional = props.operacional
@@ -372,7 +374,7 @@ export function CorporateReport(props: ReportProps) {
 
   return (
     <div className="bbt-relatorio-folha mx-auto max-w-[1180px] bg-[#f1f3f8] px-3 py-4 text-[#222936] sm:px-5 sm:py-5 print:bg-white print:px-0 print:py-0">
-      <div className="print:hidden mb-3 flex flex-wrap items-center justify-end gap-2">
+      {canExport && <div className="print:hidden mb-3 flex flex-wrap items-center justify-end gap-2">
         <button
           type="button"
           onClick={exportInteractiveHTML}
@@ -380,7 +382,7 @@ export function CorporateReport(props: ReportProps) {
         >
           <Download className="h-4 w-4" /> Salvar HTML interativo
         </button>
-      </div>
+      </div>}
       <article className="overflow-hidden rounded-md border border-[#cfd6e3] bg-white shadow-[0_12px_34px_rgba(32,38,90,0.09)] print:rounded-none print:border-0 print:shadow-none">
         <header className="bbt-report-brand-header">
           <BBTLogo variant="full" tone="color" size={44} />
@@ -806,12 +808,14 @@ export function CorporateReport(props: ReportProps) {
               <option key={status} value={status}>{label}</option>
             ))}
           </select>
-          <button onClick={exportFilteredCSV} className="rounded border border-[#333e50] px-3 py-2 text-xs font-semibold text-[#333e50] hover:bg-[#f1f4f8]">
-            Exportar CSV
-          </button>
-          <button onClick={exportInteractiveHTML} className="inline-flex items-center gap-1 rounded border border-[#333e50] px-3 py-2 text-xs font-semibold text-[#333e50] hover:bg-[#f1f4f8]">
-            <Download className="h-3.5 w-3.5" /> HTML
-          </button>
+          {canExport && <>
+            <button onClick={exportFilteredCSV} className="rounded border border-[#333e50] px-3 py-2 text-xs font-semibold text-[#333e50] hover:bg-[#f1f4f8]">
+              Exportar CSV
+            </button>
+            <button onClick={exportInteractiveHTML} className="inline-flex items-center gap-1 rounded border border-[#333e50] px-3 py-2 text-xs font-semibold text-[#333e50] hover:bg-[#f1f4f8]">
+              <Download className="h-3.5 w-3.5" /> HTML
+            </button>
+          </>}
         </div>
         {filteredDetails.length === 0 ? (
           <EmptyBox>Nenhuma demanda no período selecionado.</EmptyBox>

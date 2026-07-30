@@ -14,19 +14,19 @@ import {
   Sparkles,
 } from 'lucide-react'
 import {
-  getAgentMemories,
-  getAllAgentApprovals,
-  getAllAgentQuotes,
-  getAllAgentRuns,
-  getAllAgentTasks,
+  loadAiAgentState,
   updateAgentTask,
-  type AgentApproval,
-  type AgentQuote,
-  type AgentRun,
-  type AgentTask,
-} from '@/lib/ai-agent-storage'
+} from '@/lib/ai-agent-client'
+import type {
+  AgentApproval,
+  AgentMemory,
+  AgentQuote,
+  AgentRun,
+  AgentTask,
+} from '@/lib/ai-agent'
 import { AI_NAME } from '@/lib/branding'
 import { formatCurrency } from '@/lib/utils'
+import { toast } from 'sonner'
 
 export default function IAOperacionalPage() {
   const [reload, setReload] = useState(0)
@@ -34,21 +34,50 @@ export default function IAOperacionalPage() {
   const [approvals, setApprovals] = useState<AgentApproval[]>([])
   const [quotes, setQuotes] = useState<AgentQuote[]>([])
   const [runs, setRuns] = useState<AgentRun[]>([])
+  const [memories, setMemories] = useState<AgentMemory[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [savingTaskId, setSavingTaskId] = useState<string | null>(null)
 
   useEffect(() => {
-    carregar()
+    let active = true
+    setLoading(true)
+    loadAiAgentState()
+      .then((state) => {
+        if (!active) return
+        setTasks(state.tasks)
+        setApprovals(state.approvals)
+        setQuotes(state.quotes)
+        setRuns(state.runs)
+        setMemories(state.memories)
+        setLoadError(null)
+      })
+      .catch((error) => {
+        if (!active) return
+        setLoadError(error instanceof Error ? error.message : 'Falha ao carregar o painel da IA.')
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => {
+      active = false
+    }
   }, [reload])
 
-  function carregar() {
-    setTasks(getAllAgentTasks())
-    setApprovals(getAllAgentApprovals())
-    setQuotes(getAllAgentQuotes())
-    setRuns(getAllAgentRuns())
-  }
-
-  function concluirTask(task: AgentTask) {
-    updateAgentTask(task.id, { status: 'concluida' })
-    setReload((n) => n + 1)
+  async function concluirTask(task: AgentTask) {
+    setSavingTaskId(task.id)
+    try {
+      const updated = await updateAgentTask(task.id, {
+        status: 'concluida',
+        expectedVersion: task.version,
+      })
+      setTasks((current) => current.map((item) => item.id === updated.id ? updated : item))
+      toast.success('Tarefa concluída.')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível concluir a tarefa.')
+    } finally {
+      setSavingTaskId(null)
+    }
   }
 
   const stats = useMemo(() => {
@@ -63,9 +92,9 @@ export default function IAOperacionalPage() {
       cotacoes: quotes.length,
       aprovacoes: approvals.filter((a) => a.status === 'pendente').length,
       valorCotado,
-      memorias: getAgentMemories().length,
+      memorias: memories.length,
     }
-  }, [tasks, approvals, quotes])
+  }, [tasks, approvals, quotes, memories.length])
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -79,10 +108,20 @@ export default function IAOperacionalPage() {
             Cotacoes, aprovacoes, tarefas, memoria operacional e trilha de decisoes criadas pela {AI_NAME}.
           </p>
         </div>
-        <button onClick={() => setReload((n) => n + 1)} className="bbt-button-ghost text-xs">
-          <RefreshCw className="w-3.5 h-3.5" /> Atualizar
+        <button
+          onClick={() => setReload((n) => n + 1)}
+          disabled={loading}
+          className="bbt-button-ghost text-xs"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Atualizar
         </button>
       </div>
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-200">
+          {loadError}
+        </div>
+      )}
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <KPI icon={ListChecks} label="Tarefas pendentes" value={String(stats.pendentes)} detail={`${stats.urgentes} urgente(s)`} />
@@ -117,8 +156,15 @@ export default function IAOperacionalPage() {
                     </p>
                   </div>
                   {task.status !== 'concluida' && (
-                    <button onClick={() => concluirTask(task)} className="bbt-button-ghost h-8 text-xs">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Concluir
+                    <button
+                      onClick={() => void concluirTask(task)}
+                      disabled={savingTaskId !== null}
+                      className="bbt-button-ghost h-8 text-xs"
+                    >
+                      {savingTaskId === task.id
+                        ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        : <CheckCircle2 className="w-3.5 h-3.5" />}
+                      Concluir
                     </button>
                   )}
                 </div>
@@ -131,7 +177,10 @@ export default function IAOperacionalPage() {
         <div className="space-y-6">
           <div className="bbt-card overflow-hidden">
             <div className="border-b border-bbt-gray-100 px-5 py-4 dark:border-slate-700">
-              <h2 className="font-semibold text-bbt-primary dark:text-white">Aprovacoes</h2>
+              <h2 className="font-semibold text-bbt-primary dark:text-white">Sinais de aprovação</h2>
+              <p className="mt-1 text-xs text-slate-500">
+                Conteúdo consultivo da IA. A decisão oficial permanece no workflow de aprovações.
+              </p>
             </div>
             <div className="divide-y divide-bbt-gray-100 dark:divide-slate-700">
               {approvals.slice(0, 6).map((approval) => (
@@ -154,7 +203,7 @@ export default function IAOperacionalPage() {
 
           <div className="bbt-card overflow-hidden">
             <div className="border-b border-bbt-gray-100 px-5 py-4 dark:border-slate-700">
-              <h2 className="font-semibold text-bbt-primary dark:text-white">Cotacoes recentes</h2>
+              <h2 className="font-semibold text-bbt-primary dark:text-white">Cotações consultivas recentes</h2>
             </div>
             <div className="divide-y divide-bbt-gray-100 dark:divide-slate-700">
               {quotes.slice(0, 6).map((quote) => (

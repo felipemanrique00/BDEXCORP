@@ -2,10 +2,12 @@ import 'server-only'
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import type { User } from '@/types'
+import type { AuthorizationScopeGrant, CorporateAccessSummary, User } from '@/types'
 
 export interface RequestPrincipal {
   sessionId: string
+  authenticationLevel?: 'password' | 'mfa' | 'system'
+  mfaVerifiedAt?: string | null
   tenantId: string
   tenantSlug: string
   tenantStatus: string
@@ -19,6 +21,8 @@ export interface RequestPrincipal {
     storageBytes: number | null
     monthlyOperations: number | null
   }
+  corporateAccess?: CorporateAccessSummary
+  authorizationGrants?: AuthorizationScopeGrant[]
   user: User
 }
 

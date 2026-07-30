@@ -6,11 +6,16 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { useStore } from '@/lib/store'
-import { canEditCompany, getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
 import {
-  getVoucherEmitidoById,
-  updateVoucherEmitido,
-} from '@/lib/vouchers-emitidos-storage'
+  canEditCompany,
+  getCurrentUser,
+  getEmpresasPermitidas,
+  hasPermission,
+} from '@/lib/auth'
+import {
+  getVoucherFromServer,
+  updateVoucherOnServer,
+} from '@/lib/voucher-persistence-client'
 import type { VoucherEmitido, VoucherTipo, VoucherStatus } from '@/types'
 import {
   FileText, ArrowLeft, Save, Hotel as HotelIcon, Plane, Car, Package,
@@ -31,9 +36,18 @@ export default function EditarVoucherPage() {
 
   useEffect(() => {
     if (!id) return
-    const found = getVoucherEmitidoById(id)
-    if (found) setV(found)
-    setLoading(false)
+    let active = true
+    void getVoucherFromServer(id)
+      .then((found) => {
+        if (active) setV(found)
+      })
+      .catch((error) => {
+        if (active) toast.error(error instanceof Error ? error.message : 'Voucher não encontrado.')
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => { active = false }
   }, [id])
 
   if (loading) return <div className="text-center py-12 text-slate-500">Carregando...</div>
@@ -47,6 +61,7 @@ export default function EditarVoucherPage() {
   }
 
   const canManageVoucher = user?.role === 'master'
+    && hasPermission(user, 'operar_reservas')
     && canEditCompany(user, v.empresa_id, empresas, gruposEmpresariais)
 
   if (!canManageVoucher) {
@@ -62,8 +77,12 @@ export default function EditarVoucherPage() {
     setV((prev) => prev ? { ...prev, [key]: val } : prev)
   }
 
-  function salvar() {
-    if (!v || !canManageVoucher || !empresasPermitidas.some((empresa) => empresa.id === v.empresa_id)) {
+  async function salvar() {
+    if (
+      !v
+      || !canManageVoucher
+      || !canEditCompany(user, v.empresa_id, empresas, gruposEmpresariais)
+    ) {
       toast.error('Você não tem permissão para salvar este voucher.')
       return
     }
@@ -82,11 +101,20 @@ export default function EditarVoucherPage() {
       ? v.valor_diaria * noites + (v.taxas || 0)
       : (v.tarifa_total || 0) + (v.taxas || 0)
 
-    const updated = updateVoucherEmitido(v.id, { ...v, noites, total })
-    if (!updated) { toast.error('Erro ao salvar.'); setSalvando(false); return }
-    toast.success('Voucher atualizado!')
-    setSalvando(false)
-    router.push(`/dashboard/vouchers/${v.id}`)
+    try {
+      const updated = await updateVoucherOnServer(
+        v.id,
+        { ...v, noites, total },
+        v.version,
+      )
+      setV(updated)
+      toast.success('Voucher atualizado!')
+      router.push(`/dashboard/vouchers/${v.id}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Erro ao salvar o voucher.')
+    } finally {
+      setSalvando(false)
+    }
   }
 
   return (

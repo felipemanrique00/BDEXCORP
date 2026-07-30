@@ -58,6 +58,10 @@ export interface TravelerInput {
 }
 
 export interface TravelQuoteRequest {
+  demandId?: string
+  expectedLifecycleVersion?: number
+  idempotencyKey?: string
+  policyJustification?: string
   service: TravelService
   empresaId?: string
   providerCompanyId?: string | number | null
@@ -114,6 +118,9 @@ export interface TravelQuote {
 }
 
 export interface TravelReservationRequest {
+  demandId?: string
+  expectedLifecycleVersion?: number
+  policyJustification?: string
   service: TravelService
   quoteId?: string
   optionId?: string
@@ -148,6 +155,38 @@ export interface TravelReservation {
   raw?: unknown
   createdAt: string
   updatedAt?: string
+}
+
+export interface TravelIssueRequest {
+  reservationId: string
+  expectedLifecycleVersion?: number
+  idempotencyKey: string
+  policyJustification?: string
+  confirmed: boolean
+  payment?: Record<string, unknown>
+  payload: Record<string, unknown>
+}
+
+export interface TravelCancellationRequest {
+  reservationId: string
+  expectedLifecycleVersion?: number
+  idempotencyKey: string
+  policyJustification?: string
+  confirmed: boolean
+  reason?: string
+  payload: Record<string, unknown>
+}
+
+export interface TravelProviderLookupRequest {
+  reservationId: string
+  idempotencyKey: string
+  payload?: Record<string, unknown>
+}
+
+export interface TravelFareRequest {
+  quoteId: string
+  idempotencyKey: string
+  payload: Record<string, unknown>
 }
 
 export interface IntegrationLogEntry {

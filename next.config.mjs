@@ -22,7 +22,7 @@ const nextConfig = {
   poweredByHeader: false,
 
   // pdfjs-dist precisa ser tratada como pacote externo no servidor
-  serverExternalPackages: ['pdfjs-dist'],
+  serverExternalPackages: ['pdfjs-dist', 'pg'],
 
   async headers() {
     return [

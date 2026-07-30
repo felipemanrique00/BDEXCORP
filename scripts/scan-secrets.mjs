@@ -1,7 +1,10 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { extname, join, relative } from 'node:path'
+import { promisify } from 'node:util'
+import { execFile } from 'node:child_process'
 
 const root = process.cwd()
+const execFileAsync = promisify(execFile)
 const ignoredDirectories = new Set([
   '.git', '.next', 'node_modules', 'coverage', 'playwright-report', 'test-results',
   '.server-backups', '.server-runtime', '.bbt-storage',
@@ -19,10 +22,13 @@ const highConfidencePatterns = [
 ]
 
 const findings = []
+const trackedFiles = await readTrackedFiles(root)
 for (const path of await walk(root)) {
   const relativePath = relative(root, path).replaceAll('\\', '/')
   if (isForbiddenEnvironmentFile(relativePath)) {
-    findings.push(`${relativePath}: arquivo de ambiente local nao deve ser versionado`)
+    if (trackedFiles === null || trackedFiles.has(relativePath)) {
+      findings.push(`${relativePath}: arquivo de ambiente local nao deve ser versionado`)
+    }
     continue
   }
   if (!textExtensions.has(extname(path).toLowerCase()) && !relativePath.endsWith('.env.example')) continue
@@ -54,4 +60,16 @@ async function walk(directory) {
 function isForbiddenEnvironmentFile(path) {
   const name = path.split('/').at(-1) || ''
   return name.startsWith('.env') && name !== '.env.example'
+}
+
+async function readTrackedFiles(directory) {
+  try {
+    const { stdout } = await execFileAsync('git', ['ls-files', '--cached'], {
+      cwd: directory,
+      windowsHide: true,
+    })
+    return new Set(stdout.split(/\r?\n/).map((path) => path.replaceAll('\\', '/')).filter(Boolean))
+  } catch {
+    return null
+  }
 }

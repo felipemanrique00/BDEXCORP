@@ -5,7 +5,12 @@ import { randomUUID } from 'node:crypto'
 import { hashPassword } from '@/lib/security/password'
 import { assertStrongPassword, type RequestSecurityMetadata } from '@/lib/server/auth-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
-import { queryDatabase, withTenantTransaction, withTransaction } from '@/lib/server/database'
+import {
+  applyDatabaseSecurityContext,
+  queryDatabase,
+  withDatabaseSecurityContext,
+  withTenantTransaction,
+} from '@/lib/server/database'
 import { emailConfigured, sendTransactionalEmail } from '@/lib/server/email'
 import { getServerEnvironment } from '@/lib/server/environment'
 import { logError } from '@/lib/server/logger'
@@ -71,7 +76,7 @@ export async function acceptUserInvite(
   assertStrongPassword(password)
   const passwordHash = await hashPassword(password)
   const tokenHash = hashSecureToken(token, 'user-invite')
-  const accepted = await withTransaction(async (client) => {
+  const accepted = await withDatabaseSecurityContext({ inviteTokenHash: tokenHash }, async (client) => {
     const result = await client.query<{
       id: string
       tenant_id: string
@@ -86,6 +91,10 @@ export async function acceptUserInvite(
     )
     const invite = result.rows[0]
     if (!invite) throw new InvalidInviteError()
+    await applyDatabaseSecurityContext(client, {
+      tenantId: invite.tenant_id,
+      identityUserId: invite.user_id,
+    })
     await client.query(
       `update user_credentials set password_hash = $2, password_updated_at = now(),
          must_change_password = false, failed_attempts = 0, locked_until = null
@@ -171,14 +180,17 @@ export async function upsertPlatformPlan(input: {
   return (await listPlatformPlans()).find((plan) => plan.id === result.rows[0].id)!
 }
 
-export async function listPlatformTenants(): Promise<PlatformTenant[]> {
-  const result = await queryDatabase<TenantRow>(
-    `select t.id, t.name, t.slug::text, t.status, t.created_at, t.suspended_at,
-       p.id as plan_id, p.name as plan_name, s.status as subscription_status, s.billing_mode
-     from tenants t
-     join tenant_subscriptions s on s.tenant_id = t.id
-     join plans p on p.id = s.plan_id
-     order by t.created_at desc`,
+export async function listPlatformTenants(principal: RequestPrincipal): Promise<PlatformTenant[]> {
+  const result = await withDatabaseSecurityContext(
+    { platformAdminUserId: principal.user.id },
+    (client) => client.query<TenantRow>(
+      `select t.id, t.name, t.slug::text, t.status, t.created_at, t.suspended_at,
+         p.id as plan_id, p.name as plan_name, s.status as subscription_status, s.billing_mode
+       from tenants t
+       join tenant_subscriptions s on s.tenant_id = t.id
+       join plans p on p.id = s.plan_id
+       order by t.created_at desc`,
+    ),
   )
   const tenants: PlatformTenant[] = []
   for (const row of result.rows) {
@@ -245,7 +257,7 @@ export async function createPlatformTenant(
   const unusablePasswordHash = await hashPassword(createOpaqueToken(48))
 
   try {
-    await withTransaction(async (client) => {
+    await withDatabaseSecurityContext({ platformAdminUserId: principal.user.id }, async (client) => {
       const plan = await client.query('select id from plans where id = $1 and status = $2', [input.planId, 'active'])
       if (!plan.rowCount) throw new PlatformNotFoundError('Plano ativo nao encontrado.')
       const duplicateTenant = await client.query('select 1 from tenants where slug = $1', [input.slug])
@@ -257,10 +269,25 @@ export async function createPlatformTenant(
         `insert into tenants (id, name, slug, status) values ($1, $2, $3, 'active')`,
         [tenantId, input.name, input.slug],
       )
+      await applyDatabaseSecurityContext(client, { tenantId })
       await client.query(
         `insert into tenant_subscriptions (tenant_id, plan_id, status, billing_mode)
          values ($1, $2, 'active', 'manual')`,
         [tenantId, input.planId],
+      )
+      await client.query(
+        `insert into tenant_domain_rollouts (
+           tenant_id, domain_key, read_mode, write_mode, status, metadata
+         )
+         select
+           $1,
+           domain_key,
+            'relational',
+            'relational',
+            'active',
+            '{"source":"platform-tenant-create","relationalDefault":true}'::jsonb
+         from unnest($2::text[]) domain_key`,
+        [tenantId, ['approvals', 'demands', 'emissions', 'finance', 'requesters', 'vouchers']],
       )
       const roles = await createTenantRoles(client, tenantId)
       await client.query(
@@ -293,7 +320,7 @@ export async function createPlatformTenant(
       html: `<p>Ola, ${escapeHtml(input.adminName)}.</p><p>Voce foi convidado para administrar <strong>${escapeHtml(input.name)}</strong>.</p><p><a href="${escapeHtml(inviteUrl.toString())}">Aceitar convite e definir senha</a></p><p>O link expira em 72 horas.</p>`,
     })
   } catch (error) {
-    await cleanupFailedTenantCreation(tenantId, userId)
+    await cleanupFailedTenantCreation(principal, tenantId, userId)
     throw error
   }
 
@@ -306,7 +333,7 @@ export async function createPlatformTenant(
     entityId: tenantId,
     metadata: { targetTenantId: tenantId, planId: input.planId, billingMode: 'manual' },
   })
-  return (await listPlatformTenants()).find((tenant) => tenant.id === tenantId)!
+  return (await listPlatformTenants(principal)).find((tenant) => tenant.id === tenantId)!
 }
 
 export async function updatePlatformTenant(
@@ -314,23 +341,26 @@ export async function updatePlatformTenant(
   tenantId: string,
   input: { status: 'trial' | 'active' | 'suspended' | 'cancelled'; planId: string },
 ): Promise<PlatformTenant> {
-  await withTransaction(async (client) => {
-    const plan = await client.query('select 1 from plans where id = $1 and status = $2', [input.planId, 'active'])
-    if (!plan.rowCount) throw new PlatformNotFoundError('Plano ativo nao encontrado.')
-    const tenant = await client.query(
-      `update tenants set status = $2, suspended_at = case when $2 = 'suspended' then now() else null end
-       where id = $1 returning id`,
-      [tenantId, input.status],
-    )
-    if (!tenant.rowCount) throw new PlatformNotFoundError('Tenant nao encontrado.')
-    const subscriptionStatus = input.status === 'trial' ? 'trial' : input.status === 'active' ? 'active' : input.status
-    await client.query(
-      `update tenant_subscriptions set plan_id = $2, status = $3,
-         cancelled_at = case when $3 = 'cancelled' then now() else null end
-       where tenant_id = $1`,
-      [tenantId, input.planId, subscriptionStatus],
-    )
-  })
+  await withDatabaseSecurityContext(
+    { tenantId, platformAdminUserId: principal.user.id },
+    async (client) => {
+      const plan = await client.query('select 1 from plans where id = $1 and status = $2', [input.planId, 'active'])
+      if (!plan.rowCount) throw new PlatformNotFoundError('Plano ativo nao encontrado.')
+      const tenant = await client.query(
+        `update tenants set status = $2, suspended_at = case when $2 = 'suspended' then now() else null end
+         where id = $1 returning id`,
+        [tenantId, input.status],
+      )
+      if (!tenant.rowCount) throw new PlatformNotFoundError('Tenant nao encontrado.')
+      const subscriptionStatus = input.status === 'trial' ? 'trial' : input.status === 'active' ? 'active' : input.status
+      await client.query(
+        `update tenant_subscriptions set plan_id = $2, status = $3,
+           cancelled_at = case when $3 = 'cancelled' then now() else null end
+         where tenant_id = $1`,
+        [tenantId, input.planId, subscriptionStatus],
+      )
+    },
+  )
   await writeAuditEvent({
     action: 'platform.tenant_update',
     result: 'success',
@@ -340,7 +370,7 @@ export async function updatePlatformTenant(
     entityId: tenantId,
     metadata: { targetTenantId: tenantId, status: input.status, planId: input.planId },
   })
-  const updated = (await listPlatformTenants()).find((tenant) => tenant.id === tenantId)
+  const updated = (await listPlatformTenants(principal)).find((tenant) => tenant.id === tenantId)
   if (!updated) throw new PlatformNotFoundError('Tenant nao encontrado.')
   return updated
 }
@@ -355,6 +385,14 @@ async function createTenantRoles(client: import('pg').PoolClient, tenantId: stri
       [tenantId, definition.key, definition.name, definition.description],
     )
     ids[definition.key] = role.rows[0].id
+    if (definition.key === 'tenant_admin') {
+      await client.query(
+        `insert into role_permissions (role_id, permission_key, allowed)
+         select $1, permission_key, true from permissions`,
+        [role.rows[0].id],
+      )
+      continue
+    }
     for (const permission of definition.permissions) {
       await client.query(
         'insert into role_permissions (role_id, permission_key, allowed) values ($1, $2, true)',
@@ -373,26 +411,33 @@ function tenantRoleDefinitions() {
   ]
   return [
     { key: 'tenant_admin', name: 'Administrador do tenant', description: 'Administracao integral do ambiente', permissions: all },
-    { key: 'agent', name: 'Agente', description: 'Operacao de viagens', permissions: ['cadastrar_funcionarios'] },
-    { key: 'financial_manager', name: 'Gestor financeiro', description: 'Gestao financeira e relatorios', permissions: ['ver_financeiro', 'editar_financeiro', 'gerar_relatorios', 'importar_planilhas', 'ver_produtividade_todos', 'aprovar_demandas'] },
-    { key: 'supervisor', name: 'Supervisor', description: 'Supervisao operacional', permissions: ['ver_financeiro', 'cadastrar_empresas', 'cadastrar_funcionarios', 'cadastrar_hoteis', 'editar_politicas', 'gerar_relatorios', 'importar_planilhas', 'ver_produtividade_todos', 'aprovar_demandas'] },
-    { key: 'operator', name: 'Operacional', description: 'Operacao com acesso controlado', permissions: [] },
-    { key: 'company_admin', name: 'Administrador de empresa', description: 'Administracao restrita as empresas vinculadas', permissions: ['cadastrar_funcionarios', 'gerar_relatorios', 'aprovar_demandas'] },
-    { key: 'requester', name: 'Solicitante', description: 'Criacao e acompanhamento de demandas', permissions: [] },
-    { key: 'readonly', name: 'Somente leitura', description: 'Consulta sem alteracoes', permissions: ['gerar_relatorios'] },
+    { key: 'agent', name: 'Agente', description: 'Operacao de viagens', permissions: ['cadastrar_funcionarios', 'operar_cotacoes', 'operar_reservas', 'operar_emissoes', 'operar_cancelamentos', 'gerenciar_integracoes', 'ver_politicas', 'ver_aprovacoes'] },
+    { key: 'financial_manager', name: 'Gestor financeiro', description: 'Gestao financeira e relatorios', permissions: ['ver_financeiro', 'editar_financeiro', 'gerar_relatorios', 'importar_planilhas', 'ver_produtividade_todos', 'aprovar_demandas', 'operar_cotacoes', 'ver_politicas', 'ver_aprovacoes', 'decidir_aprovacoes'] },
+    { key: 'supervisor', name: 'Supervisor', description: 'Supervisao operacional', permissions: ['ver_financeiro', 'cadastrar_empresas', 'cadastrar_funcionarios', 'cadastrar_hoteis', 'editar_politicas', 'gerar_relatorios', 'importar_planilhas', 'ver_produtividade_todos', 'aprovar_demandas', 'operar_cotacoes', 'operar_reservas', 'operar_emissoes', 'operar_cancelamentos', 'gerenciar_integracoes', 'ver_politicas', 'gerenciar_politicas', 'simular_politicas', 'ver_aprovacoes', 'decidir_aprovacoes', 'gerenciar_workflows'] },
+    { key: 'operator', name: 'Operacional', description: 'Operacao com acesso controlado', permissions: ['operar_cotacoes', 'operar_reservas', 'operar_emissoes', 'operar_cancelamentos', 'gerenciar_integracoes', 'ver_politicas', 'ver_aprovacoes'] },
+    { key: 'company_admin', name: 'Administrador de empresa', description: 'Administracao restrita as empresas vinculadas', permissions: ['cadastrar_funcionarios', 'gerar_relatorios', 'aprovar_demandas', 'ver_politicas', 'gerenciar_politicas', 'simular_politicas', 'ver_aprovacoes', 'decidir_aprovacoes', 'gerenciar_workflows', 'gerenciar_delegacoes'] },
+    { key: 'requester', name: 'Solicitante', description: 'Criacao e acompanhamento de demandas', permissions: ['ver_politicas', 'ver_aprovacoes'] },
+    { key: 'readonly', name: 'Somente leitura', description: 'Consulta sem alteracoes', permissions: ['gerar_relatorios', 'ver_politicas', 'ver_aprovacoes'] },
   ]
 }
 
-async function cleanupFailedTenantCreation(tenantId: string, userId: string): Promise<void> {
+async function cleanupFailedTenantCreation(
+  principal: RequestPrincipal,
+  tenantId: string,
+  userId: string,
+): Promise<void> {
   try {
-    await withTransaction(async (client) => {
-      await client.query('delete from tenant_subscriptions where tenant_id = $1', [tenantId])
-      await client.query('delete from tenants where id = $1', [tenantId])
-      await client.query(
-        'delete from users where id = $1 and not exists (select 1 from tenant_memberships where user_id = $1)',
-        [userId],
-      )
-    })
+    await withDatabaseSecurityContext(
+      { tenantId, platformAdminUserId: principal.user.id },
+      async (client) => {
+        await client.query('delete from tenant_subscriptions where tenant_id = $1', [tenantId])
+        await client.query('delete from tenants where id = $1', [tenantId])
+        await client.query(
+          'delete from users where id = $1 and not exists (select 1 from tenant_memberships where user_id = $1)',
+          [userId],
+        )
+      },
+    )
   } catch (error) {
     logError('tenant_creation_cleanup_failed', error, {
       errorCode: 'TENANT_CREATION_CLEANUP_FAILED',

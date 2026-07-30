@@ -3,7 +3,7 @@ import { addDaysISODate, todayISODate } from '@/lib/date'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useStore } from '@/lib/store'
-import { getCurrentUser, canEditCompany, canViewCompany, hasPermission } from '@/lib/auth'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { formatDate, maskPhone, formatCurrency, maskCPF } from '@/lib/utils'
 import { WhatsAppButton } from '@/components/ui/whatsapp-button'
 import {
@@ -18,6 +18,7 @@ import { toast } from 'sonner'
 import { PoliticaModal } from '@/components/ui/politica-modal'
 import { SolicitantesEmpresaTab } from '@/components/empresas/solicitantes-empresa-tab'
 import { getEmissoesByEmpresa, getRankingHoteisByEmpresa, type Emissao } from '@/lib/emissoes-storage'
+import { loadManualHotelBookingsFromServer } from '@/lib/manual-hotel-booking-client'
 import { getEstatisticas, getAtendimentosByEmpresa, getEstatisticasPorTipo } from '@/lib/atendimentos-storage'
 import { topFuncionariosViajantes, topHoteisPorEmpresa, serieTemporalDiaria } from '@/lib/agregacoes'
 import {
@@ -44,15 +45,23 @@ type Tab = 'dados' | 'funcionarios' | 'politicas' | 'emissoes' | 'atendimentos' 
 export default function EmpresaDetalhePage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
-  const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const { includesCompany } = useCorporateCompanyScope()
   const [tab, setTab] = useState<Tab>('dados')
 
-  const { empresas, gruposEmpresariais, funcionarios, politicas, updatePolitica, addPolitica } = useStore()
+  const { empresas, funcionarios, politicas, updatePolitica, addPolitica } = useStore()
   const empresa = empresas.find((e) => e.id === id)
   const funcs = funcionarios.filter((f) => f.company_id === id)
   const pols = politicas.filter((p) => p.company_id === id)
 
-  const canEdit = canEditCompany(user, id ?? null, empresas, gruposEmpresariais)
+  const canViewEmployees = includesCompany(id, 'ver_funcionarios')
+  const canManageEmployees = includesCompany(id, 'gerenciar_funcionarios')
+  const canViewRequesters = includesCompany(id, 'ver_solicitantes')
+  const canManageRequesters = includesCompany(id, 'gerenciar_solicitantes')
+  const canEditPolicies = includesCompany(id, 'editar_politicas')
+  const canViewDemands = includesCompany(id, 'ver_demandas')
+  const canViewEmissions = includesCompany(id, 'ver_emissoes')
+  const canViewFinance = includesCompany(id, 'ver_financeiro')
+  const canImport = includesCompany(id, 'importar_planilhas')
   const [editingPol, setEditingPol] = useState<PoliticaCargo | null>(null)
   const [novaPolCargo, setNovaPolCargo] = useState<Cargo | null>(null)
   const [importModalOpen, setImportModalOpen] = useState(false)
@@ -68,7 +77,7 @@ export default function EmpresaDetalhePage() {
     )
   }
 
-  if (!canViewCompany(user, empresa.id, empresas, gruposEmpresariais)) {
+  if (!includesCompany(empresa.id, 'ver_empresas')) {
     return (
       <div className="bbt-card p-12 text-center">
         <p className="mb-4 text-slate-500">Você não tem permissão para acessar esta empresa.</p>
@@ -79,11 +88,11 @@ export default function EmpresaDetalhePage() {
 
   const tabs: { id: Tab; label: string; icon: any; count?: number }[] = [
     { id: 'dados', label: 'Dados', icon: Building2 },
-    { id: 'funcionarios', label: 'Funcionários', icon: Users, count: funcs.length },
-    { id: 'solicitantes', label: 'Acessos', icon: UserRound, count: getSolicitantesPorEmpresa(id).length },
+    ...(canViewEmployees ? [{ id: 'funcionarios' as const, label: 'Funcionários', icon: Users, count: funcs.length }] : []),
+    ...(canViewRequesters ? [{ id: 'solicitantes' as const, label: 'Acessos', icon: UserRound, count: getSolicitantesPorEmpresa(id).length }] : []),
     { id: 'politicas', label: 'Políticas', icon: Briefcase },
-    { id: 'atendimentos', label: 'Atendimentos', icon: BarChart3 },
-    { id: 'emissoes', label: 'Hotéis Emitidos', icon: FileText },
+    ...(canViewDemands ? [{ id: 'atendimentos' as const, label: 'Atendimentos', icon: BarChart3 }] : []),
+    ...(canViewEmissions ? [{ id: 'emissoes' as const, label: 'Hotéis Emitidos', icon: FileText }] : []),
   ]
 
   return (
@@ -148,20 +157,20 @@ export default function EmpresaDetalhePage() {
             <Info icon={DollarSign} label="Centro de Custo Padrão" value={empresa.centro_custo_padrao} />
           </div>
           <div className="space-y-4">
-            <div className="bbt-card p-6">
+            {canViewEmployees && <div className="bbt-card p-6">
               <div className="text-sm text-slate-500">Funcionários vinculados</div>
               <div className="text-4xl font-bold text-bbt-primary dark:text-white mt-2">{funcs.length}</div>
               <button onClick={() => setTab('funcionarios')} className="text-sm text-bbt-accent hover:underline mt-3 inline-flex items-center gap-1">
                 <Users className="w-4 h-4" /> Ver funcionários
               </button>
-            </div>
-            <div className="bbt-card p-6">
+            </div>}
+            {canViewRequesters && <div className="bbt-card p-6">
               <div className="text-sm text-slate-500">Acessos do portal</div>
               <div className="text-4xl font-bold text-bbt-primary dark:text-white mt-2">{getSolicitantesPorEmpresa(id).length}</div>
               <button onClick={() => setTab('solicitantes')} className="text-sm text-bbt-accent hover:underline mt-3 inline-flex items-center gap-1">
                 <UserRound className="w-4 h-4" /> Gerenciar acessos
               </button>
-            </div>
+            </div>}
             <div className="bbt-card p-6">
               <div className="text-sm text-slate-500">Status</div>
               <div className="mt-2">
@@ -174,18 +183,18 @@ export default function EmpresaDetalhePage() {
       )}
 
       {tab === 'funcionarios' && (
-        <FuncionariosTab companyId={empresa.id} companyName={empresa.nome} funcs={funcs} canEdit={canEdit} onImport={() => setImportModalOpen(true)} />
+        <FuncionariosTab companyId={empresa.id} companyName={empresa.nome} funcs={funcs} canEdit={canManageEmployees} onImport={() => setImportModalOpen(true)} />
       )}
 
       {tab === 'solicitantes' && (
-        <SolicitantesEmpresaTab empresa={empresa} funcionarios={funcionarios} canEdit={canEdit} />
+        <SolicitantesEmpresaTab empresa={empresa} funcionarios={funcionarios} canEdit={canManageRequesters} />
       )}
 
       {tab === 'politicas' && (
         <PoliticasTab
           empresaId={empresa.id}
           politicas={pols}
-          canEdit={canEdit}
+          canEdit={canEditPolicies}
           onEdit={(p) => setEditingPol(p)}
           onNova={(cargo) => setNovaPolCargo(cargo)}
         />
@@ -197,13 +206,15 @@ export default function EmpresaDetalhePage() {
           empresaNome={empresa.nome}
           funcionarios={funcionarios}
           onImportar={() => setImportEmissoesOpen(true)}
+          canImport={canImport}
+          canViewFinance={canViewFinance}
           reloadKey={reloadKey}
         />
       )}
 
-      {tab === 'emissoes' && <EmissoesTab companyId={empresa.id} companyName={empresa.nome} />}
+      {tab === 'emissoes' && <EmissoesTab companyId={empresa.id} companyName={empresa.nome} canViewFinance={canViewFinance} />}
 
-      <PoliticaModal
+      {canEditPolicies && <PoliticaModal
         open={!!editingPol || !!novaPolCargo}
         onClose={() => { setEditingPol(null); setNovaPolCargo(null) }}
         politica={editingPol}
@@ -237,15 +248,15 @@ export default function EmpresaDetalhePage() {
             setNovaPolCargo(null)
           }
         }}
-      />
+      />}
 
-      <ImportarFuncionariosModal open={importModalOpen} onClose={() => setImportModalOpen(false)} companyId={empresa.id} companyName={empresa.nome} />
-      <ImportarEmpresaModal
+      {canManageEmployees && <ImportarFuncionariosModal open={importModalOpen} onClose={() => setImportModalOpen(false)} companyId={empresa.id} companyName={empresa.nome} />}
+      {canImport && <ImportarEmpresaModal
         open={importEmissoesOpen}
         onClose={() => setImportEmissoesOpen(false)}
         empresa={empresa}
         onCompleto={() => setReloadKey((k) => k + 1)}
-      />
+      />}
     </div>
   )
 }
@@ -330,11 +341,13 @@ function FuncionariosTab({ companyId, companyName, funcs, canEdit, onImport }: a
 }
 
 // ======== ATENDIMENTOS (novo) ========
-function AtendimentosTab({ empresaId, empresaNome, funcionarios, onImportar, reloadKey }: {
+function AtendimentosTab({ empresaId, empresaNome, funcionarios, onImportar, canImport, canViewFinance, reloadKey }: {
   empresaId: string
   empresaNome: string
   funcionarios: any[]
   onImportar?: () => void
+  canImport: boolean
+  canViewFinance: boolean
   reloadKey?: number
 }) {
   const [stats, setStats] = useState(() => getEstatisticas({ empresa_id: empresaId }))
@@ -348,8 +361,7 @@ function AtendimentosTab({ empresaId, empresaNome, funcionarios, onImportar, rel
     return serieTemporalDiaria({ empresa_id: empresaId, data_inicio: ini, data_fim: fim })
   })
 
-  const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeFinanceiro = hasPermission(user, 'ver_financeiro')
+  const podeFinanceiro = canViewFinance
 
   useEffect(() => {
     setStats(getEstatisticas({ empresa_id: empresaId }))
@@ -366,7 +378,7 @@ function AtendimentosTab({ empresaId, empresaNome, funcionarios, onImportar, rel
 
   return (
     <div className="space-y-6">
-      {onImportar && (
+      {onImportar && canImport && (
         <div className="flex justify-end">
           <button onClick={onImportar} className="bbt-button-primary flex items-center gap-2">
             <Upload className="w-4 h-4" /> Importar emissões desta empresa
@@ -562,11 +574,28 @@ function StatusBadge({ status }: { status: StatusAtendimento }) {
 }
 
 // ======== EMISSÕES (preservado das versões anteriores) ========
-function EmissoesTab({ companyId, companyName }: { companyId: string; companyName: string }) {
+function EmissoesTab({ companyId, companyName, canViewFinance }: { companyId: string; companyName: string; canViewFinance: boolean }) {
   const { hoteis } = useStore()
   const [emissoes, setEmissoes] = useState<Emissao[]>([])
 
-  useEffect(() => { setEmissoes(getEmissoesByEmpresa(companyId)) }, [companyId])
+  useEffect(() => {
+    let active = true
+    setEmissoes(getEmissoesByEmpresa(companyId))
+    void loadManualHotelBookingsFromServer(companyId)
+      .then((items) => {
+        if (active) setEmissoes(items)
+      })
+      .catch((error) => {
+        if (active) {
+          toast.error(
+            error instanceof Error ? error.message : 'Falha ao carregar as hospedagens.',
+          )
+        }
+      })
+    return () => {
+      active = false
+    }
+  }, [companyId])
 
   const ranking = getRankingHoteisByEmpresa(companyId)
   const totalEmissoes = emissoes.length
@@ -577,7 +606,7 @@ function EmissoesTab({ companyId, companyName }: { companyId: string; companyNam
       <div className="grid grid-cols-3 gap-4">
         <div className="bbt-card p-5"><div className="text-xs text-slate-500 uppercase tracking-wider">Emissões</div><div className="text-3xl font-bold text-bbt-primary dark:text-white mt-2">{totalEmissoes}</div></div>
         <div className="bbt-card p-5"><div className="text-xs text-slate-500 uppercase tracking-wider">Hotéis diferentes</div><div className="text-3xl font-bold text-bbt-primary dark:text-white mt-2">{ranking.length}</div></div>
-        <div className="bbt-card p-5"><div className="text-xs text-slate-500 uppercase tracking-wider">Total</div><div className="text-3xl font-bold text-bbt-primary dark:text-white mt-2">{formatCurrency(totalValor)}</div></div>
+        <div className="bbt-card p-5"><div className="text-xs text-slate-500 uppercase tracking-wider">Total</div><div className="text-3xl font-bold text-bbt-primary dark:text-white mt-2">{canViewFinance ? formatCurrency(totalValor) : 'Restrito'}</div></div>
       </div>
 
       <div className="bbt-card overflow-hidden">
@@ -619,7 +648,7 @@ function EmissoesTab({ companyId, companyName }: { companyId: string; companyNam
                       <td className="px-4 py-3">{hotel ? <Link href={`/dashboard/hoteis/${hotel.id}`} className="font-medium hover:text-bbt-accent">{hotel.nome}</Link> : '—'}</td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300">{hotel ? `${hotel.cidade} · ${hotel.uf}` : '—'}</td>
                       <td className="px-4 py-3 text-right"><span className="bbt-badge bg-bbt-accent/10 text-bbt-primary dark:text-bbt-accent"><FileText className="w-3 h-3" /> {r.total}</span></td>
-                      <td className="px-4 py-3 text-right font-semibold text-bbt-primary dark:text-white">{formatCurrency(r.valor_total)}</td>
+                      <td className="px-4 py-3 text-right font-semibold text-bbt-primary dark:text-white">{canViewFinance ? formatCurrency(r.valor_total) : 'Restrito'}</td>
                     </tr>
                   )
                 })}

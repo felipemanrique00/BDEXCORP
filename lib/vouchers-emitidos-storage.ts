@@ -4,7 +4,14 @@
 // ============================================================
 import type { VoucherEmitido, VoucherTipo } from '@/types'
 import { VOUCHER_PREFIX, gerarNumeroVoucher } from '@/types'
-import { compactarVoucherEmitido, loadJSON, safeGetRaw, safeSetJSON, safeSetRaw } from '@/lib/storage-quota'
+import {
+  applyDomainApiValueLocally,
+  compactarVoucherEmitido,
+  loadJSON,
+  safeGetRaw,
+  safeSetJSON,
+  safeSetRaw,
+} from '@/lib/storage-quota'
 
 const STORAGE_KEY = 'bbt-vouchers-emitidos'
 const STORAGE_LAST_NUMERO = 'bbt-vouchers-last-numero'
@@ -36,6 +43,28 @@ export function getAllVouchersEmitidos(): VoucherEmitido[] {
 
 export function getVoucherEmitidoById(id: string): VoucherEmitido | undefined {
   return load().find((v) => v.id === id)
+}
+
+export function aplicarVouchersEmitidosDoServidor(vouchers: VoucherEmitido[]): boolean {
+  const current = load()
+  const byId = new Map(current.map((voucher) => [voucher.id, voucher]))
+  for (const voucher of vouchers) {
+    if (voucher.fingerprint) {
+      const duplicate = [...byId.values()].find(
+        (item) => item.id !== voucher.id && item.fingerprint === voucher.fingerprint,
+      )
+      if (duplicate) byId.delete(duplicate.id)
+    }
+    byId.set(voucher.id, compactarVoucherEmitido(voucher) as VoucherEmitido)
+  }
+  return applyDomainApiValueLocally(STORAGE_KEY, [...byId.values()])
+}
+
+export function removerVoucherEmitidoDoServidor(id: string): boolean {
+  return applyDomainApiValueLocally(
+    STORAGE_KEY,
+    load().filter((voucher) => voucher.id !== id),
+  )
 }
 
 export function getVouchersByAtendimento(atendimentoId: string): VoucherEmitido[] {
@@ -167,8 +196,8 @@ function criarFingerprint(v: Pick<VoucherEmitido, 'tipo' | 'numero' | 'passageir
 }
 
 // Estatísticas
-export function getEstatisticasVouchers() {
-  const all = load()
+export function getEstatisticasVouchers(companyIds?: ReadonlySet<string> | null) {
+  const all = companyIds ? load().filter((voucher) => companyIds.has(voucher.empresa_id)) : load()
   return {
     total: all.length,
     rascunhos: all.filter((v) => v.status === 'rascunho').length,

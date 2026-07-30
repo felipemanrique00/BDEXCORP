@@ -3,6 +3,10 @@ import { z } from 'zod'
 export const travelServiceSchema = z.enum(['aereo', 'hotelaria', 'locacao', 'pacotes', 'lazer', 'transfer', 'seguro', 'rodoviario'])
 
 export const travelQuoteRequestSchema = z.object({
+  demandId: z.string().trim().min(1).max(200).optional(),
+  expectedLifecycleVersion: z.coerce.number().int().positive().optional(),
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+  policyJustification: z.string().trim().min(3).max(2_000).optional(),
   service: travelServiceSchema,
   empresaId: z.string().optional(),
   providerCompanyId: z.union([z.string(), z.number()]).nullable().optional(),
@@ -31,6 +35,7 @@ export const travelQuoteRequestSchema = z.object({
 export const citySearchSchema = z.object({
   query: z.string().min(1),
   service: travelServiceSchema.default('hotelaria'),
+  companyId: z.string().trim().min(1).max(160).optional(),
   providerCompanyId: z.union([z.string(), z.number()]).nullable().optional(),
 })
 
@@ -50,6 +55,9 @@ const travelerInputSchema = z.object({
 })
 
 export const travelReservationRequestSchema = z.object({
+  demandId: z.string().trim().min(1).max(200).optional(),
+  expectedLifecycleVersion: z.coerce.number().int().positive().optional(),
+  policyJustification: z.string().trim().min(3).max(2_000).optional(),
   service: travelServiceSchema,
   quoteId: z.string().optional(),
   optionId: z.string().optional(),
@@ -62,7 +70,7 @@ export const travelReservationRequestSchema = z.object({
   contatoReserva: z.record(z.unknown()).optional(),
   payment: z.record(z.unknown()).optional(),
   payload: z.record(z.unknown()).optional(),
-  idempotencyKey: z.string().optional(),
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
   confirmed: z.boolean().optional(),
 })
 
@@ -79,6 +87,46 @@ export const reservationLookupSchema = z.object({
   chaveConsulta: z.string(),
   providerCompanyId: z.union([z.string(), z.number()]).nullable().optional(),
 })
+
+const providerPayloadSchema = z.record(z.unknown())
+const governedOperationBaseSchema = z.object({
+  expectedLifecycleVersion: z.coerce.number().int().positive().optional(),
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+  policyJustification: z.string().trim().min(3).max(2_000).optional(),
+  confirmed: z.boolean().optional(),
+})
+
+export const travelIssueEnvelopeSchema = governedOperationBaseSchema.extend({
+  payment: providerPayloadSchema.optional(),
+  payload: providerPayloadSchema.optional(),
+  DadosParaEmissao: providerPayloadSchema.optional(),
+  dadosParaEmissao: providerPayloadSchema.optional(),
+}).strip()
+
+export const travelCancellationEnvelopeSchema = governedOperationBaseSchema.extend({
+  reason: z.string().trim().min(3).max(2_000).optional(),
+  payload: providerPayloadSchema.optional(),
+  DadosConsulta: providerPayloadSchema.optional(),
+  dadosConsulta: providerPayloadSchema.optional(),
+  DadosCancelaBilhete: providerPayloadSchema.optional(),
+  dadosCancelaBilhete: providerPayloadSchema.optional(),
+}).strip()
+
+export const travelLookupEnvelopeSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+  payload: providerPayloadSchema.optional(),
+  localizador: z.string().trim().max(240).optional(),
+  sistema: z.string().trim().max(240).optional(),
+  tipoSistema: z.string().trim().max(120).optional(),
+  chaveConsulta: z.string().trim().max(500).optional(),
+}).strip()
+
+export const travelFareEnvelopeSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+  payload: providerPayloadSchema.optional(),
+  DadosTarifas: providerPayloadSchema.optional(),
+  dadosTarifas: providerPayloadSchema.optional(),
+}).strip()
 
 const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a data no formato YYYY-MM-DD.')
 
