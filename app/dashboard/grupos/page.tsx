@@ -3,11 +3,11 @@
 import { addDaysISODate, todayISODate } from '@/lib/date'
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '@/lib/store'
-import { canEditGlobal, getCurrentUser, hasPermission } from '@/lib/auth'
+import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { getEmpresasDoGrupo } from '@/lib/grupos'
 import { montarMetricasRelatorio } from '@/lib/relatorios'
-import { flushPendingRemoteStorage } from '@/lib/storage-quota'
+import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
 import { formatCurrency } from '@/lib/utils'
 import type { Empresa, Funcionario, GrupoEmpresarial } from '@/types'
 import { useCorporateContext } from '@/components/corporate-context-provider'
@@ -21,7 +21,7 @@ import Link from 'next/link'
 
 export default function GruposEmpresariaisPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeGerenciar = canEditGlobal(user) || hasPermission(user, 'gerenciar_empresas_grupo')
+  const podeGerenciar = hasPermission(user, 'gerenciar_empresas_grupo')
   const { refreshAccess } = useCorporateContext()
   const {
     empresas,
@@ -65,12 +65,17 @@ export default function GruposEmpresariaisPage() {
   }
 
   async function sincronizarDiretorio(message: string) {
-    const synced = await flushPendingRemoteStorage()
-    if (!synced) {
+    const result = await flushPendingRemoteStorageWithResult()
+    if (!result.confirmed) {
       toast.error('Alteracao registrada, mas ainda nao sincronizada com o servidor. A sincronizacao sera repetida automaticamente.')
       return
     }
     await refreshAccess().catch(() => undefined)
+    if (!result.fullyAccepted) {
+      toast.error('A alteração não foi aplicada porque seu acesso foi alterado ou não permite esta operação. Recarregando os dados autorizados.')
+      window.setTimeout(() => window.location.reload(), 900)
+      return
+    }
     toast.success(message)
   }
 

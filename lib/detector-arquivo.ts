@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // DETECTOR DE TIPO DE ARQUIVO — V7
 // Recebe um File e devolve o "tipo" identificado, baseado em:
 //   - Extensão

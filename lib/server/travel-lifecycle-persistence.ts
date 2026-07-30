@@ -52,6 +52,12 @@ export async function persistTravelTransitionInTransaction(
   })
   const updated = nextTravelRecord(current, plan)
   const clearActiveApproval = ['approve_merit', 'approve_cost', 'reject', 'cancel', 'expire', 'fail'].includes(command)
+  await client.query(
+    `select
+       set_config('app.lifecycle_command', $1, true),
+       set_config('app.idempotency_key', $2, true)`,
+    [command, input.idempotencyKey],
+  )
   const result = await client.query(
     `update demands set
        lifecycle_status = $4, lifecycle_version = $5, last_transition_at = $6,

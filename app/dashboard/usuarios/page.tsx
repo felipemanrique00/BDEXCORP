@@ -3,7 +3,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import {
-  getCurrentUser, hasPermission, perfilBBTLabel,
+  canManageUserAccess, getCurrentUser, perfilBBTLabel,
 } from '@/lib/auth'
 import { setCachedUserDirectory } from '@/lib/user-directory-client'
 import { Modal } from '@/components/ui/modal'
@@ -22,9 +22,24 @@ import {
   createCorporateAccessDraft,
   type CorporateAccessDraft,
 } from '@/components/users/corporate-access-editor'
-import { CORPORATE_PROFILE_PERMISSIONS, type CorporateProfile } from '@/types'
+import type { CorporateProfile } from '@/types'
 import { CORPORATE_PROFILE_LABELS } from '@/lib/corporate-access'
 import { useCorporateContext } from '@/components/corporate-context-provider'
+import {
+  hasPermissionOverrides,
+  internalPermissionMutationPayload,
+  internalProfileChange,
+  normalizeInternalPermissionBases,
+  normalizePermissionOverrides,
+  permissionsForInternalProfile,
+  sparseOverridesForInternalProfile,
+  type InternalPermissionBases,
+} from '@/lib/permission-overrides'
+import {
+  corporateDraftPermissionState,
+  isCorporateAccessDraftReady,
+} from '@/lib/corporate-access-draft'
+import { userAccessKind } from '@/lib/user-access-kind'
 
 const PERFIS: { value: PerfilBBT; label: string; desc: string }[] = [
   { value: 'lider', label: 'Líder / Dono', desc: 'Acesso total ao sistema' },
@@ -44,11 +59,14 @@ export default function UsuariosPage() {
   const [confirmDelete, setConfirmDelete] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [resendingInviteId, setResendingInviteId] = useState<string | null>(null)
+  const [internalPermissionBases, setInternalPermissionBases] = useState<InternalPermissionBases>(
+    () => normalizeInternalPermissionBases(undefined),
+  )
 
   useEffect(() => {
     const u = getCurrentUser()
     setUser(u)
-    if (!u || !hasPermission(u, 'gerenciar_usuarios')) {
+    if (!canManageUserAccess(u)) {
       toast.error('Acesso negado.')
       router.push('/dashboard')
       return
@@ -63,6 +81,7 @@ export default function UsuariosPage() {
       const payload = await response.json().catch(() => null)
       if (!response.ok || !Array.isArray(payload?.users)) throw new Error(payload?.error || 'Falha ao carregar usuarios.')
       setUsuarios(payload.users)
+      setInternalPermissionBases(normalizeInternalPermissionBases(payload.internalPermissionBases))
       setCachedUserDirectory(payload.users)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao carregar usuarios.')
@@ -78,6 +97,16 @@ export default function UsuariosPage() {
       u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
     )
   }, [usuarios, busca])
+  const canEditOwnAccess = Boolean(
+    user
+    && canManageUserAccess(user)
+    && userAccessKind(user) === 'internal'
+    && (
+      user.platform_admin
+      || user.role_key === 'tenant_admin'
+      || user.corporate_access?.tenantWide === true
+    ),
+  )
 
   function abrirNovo() { setEditando(null); setModalOpen(true) }
   function abrirEditar(u: User) { setEditando(u); setModalOpen(true) }
@@ -199,7 +228,7 @@ export default function UsuariosPage() {
                   </td>
                   <td className="px-4 py-3 text-slate-600 dark:text-slate-300 text-xs">{u.email}</td>
                   <td className="px-4 py-3">
-                    {u.corporate_profile ? (
+                    {userAccessKind(u) === 'corporate' && u.corporate_profile ? (
                       <span className="bbt-badge bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-200 text-xs">
                         <Shield className="w-3 h-3" /> {CORPORATE_PROFILE_LABELS[u.corporate_profile]}
                       </span>
@@ -226,9 +255,11 @@ export default function UsuariosPage() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
-                      <button onClick={() => abrirEditar(u)} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
-                        <Edit2 className="w-4 h-4" />
-                      </button>
+                      {(u.id !== user.id || canEditOwnAccess) && (
+                        <button onClick={() => abrirEditar(u)} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                      )}
                       {!isPlatformAdmin && isInvited && (
                         <button
                           onClick={() => void handleResendInvite(u)}
@@ -263,6 +294,7 @@ export default function UsuariosPage() {
         open={modalOpen}
         onClose={() => { setModalOpen(false); setEditando(null); void reload() }}
         editing={editando}
+        internalPermissionBases={internalPermissionBases}
       />
       <ConfirmDialog
         open={!!confirmDelete}
@@ -277,10 +309,29 @@ export default function UsuariosPage() {
   )
 }
 
-function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () => void; editing: User | null }) {
+function UsuarioModal({
+  open,
+  onClose,
+  editing,
+  internalPermissionBases,
+}: {
+  open: boolean
+  onClose: () => void
+  editing: User | null
+  internalPermissionBases: InternalPermissionBases
+}) {
   const isPlatformAdmin = editing?.platform_admin === true
   const actor = getCurrentUser()
-  const canManageInternalUsers = actor?.platform_admin === true || actor?.role_key === 'tenant_admin'
+  const canManageInternalUsers = Boolean(
+    actor
+    && canManageUserAccess(actor)
+    && userAccessKind(actor) === 'internal'
+    && (
+      actor.platform_admin
+      || actor.role_key === 'tenant_admin'
+      || actor.corporate_access?.tenantWide === true
+    ),
+  )
   const { empresas, gruposEmpresariais } = useStore()
   const { access: corporateAccess } = useCorporateContext()
   const manageableCompanyIds = useMemo(
@@ -331,49 +382,62 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
   const [creationMode, setCreationMode] = useState<'invite' | 'temporary-password'>('invite')
   const [useCustomPermissoes, setUseCustomPermissoes] = useState(false)
   const [permissoes, setPermissoes] = useState<Permissoes>(PERMISSOES_PADRAO_POR_PERFIL.agente)
+  const [permissionOverrides, setPermissionOverrides] = useState<Partial<Permissoes>>({})
   const [empresaIds, setEmpresaIds] = useState<string[]>([])
   const [grupoIds, setGrupoIds] = useState<string[]>([])
   const [accessKind, setAccessKind] = useState<'corporate' | 'internal'>('corporate')
   const [corporateDraft, setCorporateDraft] = useState<CorporateAccessDraft>(() => createCorporateAccessDraft('viewer'))
+  const [loadedCorporateAccessUserId, setLoadedCorporateAccessUserId] = useState<string | null>(null)
   const [loadingCorporateAccess, setLoadingCorporateAccess] = useState(false)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open) return
+    setCorporateDraft(createCorporateAccessDraft(editing?.corporate_profile || 'viewer'))
+    setLoadedCorporateAccessUserId(null)
+    setLoadingCorporateAccess(false)
     if (editing) {
+      const editingProfile = editing.perfil_bbt || 'agente'
+      const editingBase = internalPermissionBases[editingProfile]
+      const rawOverrides = normalizePermissionOverrides(editing.permission_overrides)
+      const sparseOverrides = sparseOverridesForInternalProfile(editingProfile, rawOverrides, editingBase)
       setName(editing.name)
       setEmail(editing.email)
-      setPerfil(editing.perfil_bbt || 'agente')
-      setUseCustomPermissoes(!!editing.permissoes)
-      setPermissoes(editing.permissoes || PERMISSOES_PADRAO_POR_PERFIL[editing.perfil_bbt || 'agente'])
+      setPerfil(editingProfile)
+      setUseCustomPermissoes(hasPermissionOverrides(sparseOverrides))
+      setPermissionOverrides(sparseOverrides)
+      setPermissoes(permissionsForInternalProfile(editingProfile, sparseOverrides, editingBase))
       setEmpresaIds(editing.empresa_ids || [])
       setGrupoIds(editing.grupo_ids || [])
       setPassword('')
       setPasswordConfirm('')
       setCreationMode('temporary-password')
-      setAccessKind(editing.corporate_profile ? 'corporate' : 'internal')
+      setAccessKind(userAccessKind(editing))
     } else {
       setName(''); setEmail(''); setPerfil('agente')
       setPassword(''); setPasswordConfirm('')
       setCreationMode('invite')
       setUseCustomPermissoes(false)
-      setPermissoes(PERMISSOES_PADRAO_POR_PERFIL.agente)
+      setPermissoes(internalPermissionBases.agente)
+      setPermissionOverrides({})
       setEmpresaIds([])
       setGrupoIds([])
       setAccessKind('corporate')
-      setCorporateDraft(createCorporateAccessDraft('viewer'))
     }
-  }, [open, editing])
+  }, [open, editing, internalPermissionBases])
 
   useEffect(() => {
-    if (!open || !editing || !editing.corporate_profile || editing.platform_admin) return
+    if (!open || !editing || userAccessKind(editing) !== 'corporate' || editing.platform_admin) return
     let active = true
     setLoadingCorporateAccess(true)
     fetch(`/api/users/${encodeURIComponent(editing.id)}/access`, { cache: 'no-store' })
       .then(async (response) => {
         const payload = await response.json().catch(() => null)
         if (!response.ok || !payload?.access) throw new Error(payload?.error || 'Falha ao carregar o escopo corporativo.')
-        if (active) setCorporateDraft(accessResponseToDraft(payload.access, editing.corporate_profile!))
+        if (active) {
+          setCorporateDraft(accessResponseToDraft(payload.access, editing.corporate_profile || 'viewer'))
+          setLoadedCorporateAccessUserId(editing.id)
+        }
       })
       .catch((error) => {
         if (active) toast.error(error instanceof Error ? error.message : 'Falha ao carregar o escopo corporativo.')
@@ -384,12 +448,40 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
     return () => { active = false }
   }, [editing, open])
 
-  // Ao trocar perfil, sugerir permissões padrão (se não customizou)
-  useEffect(() => {
-    if (!useCustomPermissoes) {
-      setPermissoes(PERMISSOES_PADRAO_POR_PERFIL[perfil as PerfilBBT])
+  // A personalização pertence ao perfil-base; trocar o perfil aplica o novo template.
+  function changeInternalProfile(nextProfile: PerfilBBT) {
+    if (nextProfile === perfil) return
+    const next = internalProfileChange(nextProfile, internalPermissionBases[nextProfile])
+    setPerfil(next.profile)
+    setUseCustomPermissoes(next.customPermissions)
+    setPermissionOverrides(next.permissionOverrides)
+    setPermissoes(next.permissions)
+  }
+
+  function changeCustomPermissions(enabled: boolean) {
+    setUseCustomPermissoes(enabled)
+    const base = internalPermissionBases[perfil]
+    if (enabled) {
+      setPermissionOverrides({})
+      setPermissoes(base)
+      return
     }
-  }, [perfil, useCustomPermissoes])
+    setPermissionOverrides({})
+    setPermissoes(base)
+  }
+
+  function changePermission(permission: keyof Permissoes, allowed: boolean) {
+    setPermissoes((current) => ({ ...current, [permission]: allowed }))
+    setPermissionOverrides((current) => {
+      const next = { ...current }
+      if (allowed === internalPermissionBases[perfil][permission]) {
+        delete next[permission]
+      } else {
+        next[permission] = allowed
+      }
+      return next
+    })
+  }
 
   function toggleEmpresa(id: string) {
     setEmpresaIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
@@ -404,6 +496,19 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
 
     if (!name.trim() || !email.trim()) {
       toast.error('Preencha nome e e-mail.')
+      return
+    }
+    const existingCorporateUserId = accessKind === 'corporate'
+      && editing
+      && userAccessKind(editing) === 'corporate'
+      ? editing.id
+      : null
+    if (!isCorporateAccessDraftReady(
+      existingCorporateUserId,
+      loadedCorporateAccessUserId,
+      loadingCorporateAccess,
+    )) {
+      toast.error('Aguarde o carregamento completo dos acessos deste usuário antes de salvar.')
       return
     }
     if (accessKind === 'corporate' && !corporateDraft.groupGrants.length && !corporateDraft.companyGrants.length) {
@@ -449,7 +554,9 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
           email: email.trim().toLowerCase(),
           role: accessKind === 'internal' ? 'master' : 'company_admin',
           profile: accessKind === 'internal' ? perfil : undefined,
-          permissions: accessKind === 'internal' && useCustomPermissoes ? permissoes : undefined,
+          permissions: accessKind === 'internal'
+            ? internalPermissionMutationPayload(useCustomPermissoes, permissionOverrides)
+            : undefined,
           companyIds: accessKind === 'internal' ? empresaIds : undefined,
           groupIds: accessKind === 'internal' ? grupoIds : undefined,
           corporateAccess: accessKind === 'corporate' ? corporateDraftToPayload(corporateDraft) : undefined,
@@ -562,7 +669,7 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
               <button
                 key={p.value}
                 type="button"
-                onClick={() => setPerfil(p.value)}
+                onClick={() => changeInternalProfile(p.value)}
                 disabled={isPlatformAdmin}
                 className={`p-3 rounded-lg border-2 text-left transition ${
                   perfil === p.value
@@ -583,24 +690,38 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
             <input
               type="checkbox"
               checked={useCustomPermissoes}
-              onChange={(e) => setUseCustomPermissoes(e.target.checked)}
+              onChange={(e) => changeCustomPermissions(e.target.checked)}
               disabled={isPlatformAdmin}
             />
             <Shield className="w-4 h-4 text-bbt-accent" />
             <strong>Personalizar permissões</strong>
           </label>
           {useCustomPermissoes && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2 border-t border-bbt-gray-100 dark:border-slate-700">
-              {Object.entries(permissoes).map(([key, value]) => (
-                <label key={key} className="flex items-center gap-2 text-xs cursor-pointer p-1.5 hover:bg-bbt-gray-50 dark:hover:bg-slate-800 rounded">
-                  <input
-                    type="checkbox"
-                    checked={value}
-                    onChange={(e) => setPermissoes({ ...permissoes, [key]: e.target.checked })}
-                  />
-                  {formatPermKey(key)}
-                </label>
-              ))}
+            <div className="pt-2 border-t border-bbt-gray-100 dark:border-slate-700">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  As opções abaixo prevalecem sobre o perfil enquanto a personalização estiver ativa.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => changeCustomPermissions(false)}
+                  className="shrink-0 text-xs font-semibold text-bbt-accent hover:underline"
+                >
+                  Restaurar padrão do perfil
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {Object.entries(permissoes).map(([key, value]) => (
+                  <label key={key} className="flex items-center gap-2 text-xs cursor-pointer p-1.5 hover:bg-bbt-gray-50 dark:hover:bg-slate-800 rounded">
+                    <input
+                      type="checkbox"
+                      checked={value}
+                      onChange={(e) => changePermission(key as keyof Permissoes, e.target.checked)}
+                    />
+                    {formatPermKey(key)}
+                  </label>
+                ))}
+              </div>
             </div>
           )}
           {!useCustomPermissoes && (
@@ -716,7 +837,17 @@ function UsuarioModal({ open, onClose, editing }: { open: boolean; onClose: () =
 
         <div className="flex justify-end gap-2 pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
           <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
-          <button type="submit" disabled={saving} className="bbt-button-primary">
+          <button
+            type="submit"
+            disabled={saving || !isCorporateAccessDraftReady(
+              accessKind === 'corporate' && editing && userAccessKind(editing) === 'corporate'
+                ? editing.id
+                : null,
+              loadedCorporateAccessUserId,
+              loadingCorporateAccess,
+            )}
+            className="bbt-button-primary"
+          >
             {saving ? 'Salvando...' : editing ? 'Salvar' : creationMode === 'invite' ? 'Enviar convite' : 'Cadastrar'}
           </button>
         </div>
@@ -745,14 +876,7 @@ function formatPermKey(k: string): string {
 function accessResponseToDraft(access: any, fallbackProfile: CorporateProfile): CorporateAccessDraft {
   const firstGrant = access?.groupGrants?.[0] || access?.companyGrants?.[0]
   const profile = (firstGrant?.profile || fallbackProfile || 'viewer') as CorporateProfile
-  const overrides = firstGrant?.permissionOverrides && typeof firstGrant.permissionOverrides === 'object'
-    ? firstGrant.permissionOverrides as Partial<Permissoes>
-    : {}
-  return {
-    profile,
-    customPermissions: Object.keys(overrides).length > 0,
-    permissions: { ...CORPORATE_PROFILE_PERMISSIONS[profile], ...overrides },
-    groupGrants: Array.isArray(access?.groupGrants) ? access.groupGrants.map((grant: any) => ({
+  const groupGrants = Array.isArray(access?.groupGrants) ? access.groupGrants.map((grant: any) => ({
       groupId: String(grant.groupId || ''),
       profile: (grant.profile || profile) as CorporateProfile,
       permissionOverrides: grant.permissionOverrides && typeof grant.permissionOverrides === 'object'
@@ -764,8 +888,8 @@ function accessResponseToDraft(access: any, fallbackProfile: CorporateProfile): 
       status: grant.status === 'suspended' ? 'suspended' : 'active',
       validFrom: dateInputValue(grant.validFrom),
       validUntil: dateInputValue(grant.validUntil),
-    })) : [],
-    companyGrants: Array.isArray(access?.companyGrants) ? access.companyGrants.map((grant: any) => ({
+    })) : []
+  const companyGrants = Array.isArray(access?.companyGrants) ? access.companyGrants.map((grant: any) => ({
       companyId: String(grant.companyId || ''),
       profile: (grant.profile || profile) as CorporateProfile,
       permissionOverrides: grant.permissionOverrides && typeof grant.permissionOverrides === 'object'
@@ -774,7 +898,12 @@ function accessResponseToDraft(access: any, fallbackProfile: CorporateProfile): 
       status: grant.status === 'suspended' ? 'suspended' : 'active',
       validFrom: dateInputValue(grant.validFrom),
       validUntil: dateInputValue(grant.validUntil),
-    })) : [],
+    })) : []
+  return {
+    profile,
+    ...corporateDraftPermissionState(profile, groupGrants, companyGrants),
+    groupGrants,
+    companyGrants,
     defaultContextKey: access?.defaultContext?.type && access?.defaultContext?.id
       ? `${access.defaultContext.type}:${access.defaultContext.id}`
       : '',

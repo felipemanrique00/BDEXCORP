@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 import { todayISODate } from '@/lib/date'
 import { useState } from 'react'
 import { Upload, FileText, Loader2, CheckCircle2, AlertTriangle, ChevronRight, Sparkles, Hotel as HotelIcon, Users } from 'lucide-react'

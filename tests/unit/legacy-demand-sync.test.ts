@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { lifecycleFromLegacyStatus, parseLegacyDemands } from '@/lib/travel/legacy-demand'
+import {
+  lifecycleFromLegacyStatus,
+  parseLegacyDemands,
+  relationalPriorityToLegacy,
+} from '@/lib/travel/legacy-demand'
 
 describe('legacy demand migration mapping', () => {
   it('preserves stable identifiers and maps operational fields without deleting history', () => {
@@ -70,5 +74,15 @@ describe('legacy demand migration mapping', () => {
     ['em_andamento', 'quoting'],
   ] as const)('maps status %s to %s', (source, expected) => {
     expect(lifecycleFromLegacyStatus(source)).toBe(expected)
+  })
+
+  it.each([
+    ['low', 'baixa'],
+    ['normal', 'media'],
+    ['high', 'alta'],
+    ['urgent', 'urgente'],
+    ['media', 'media'],
+  ] as const)('maps relational priority %s to legacy priority %s', (source, expected) => {
+    expect(relationalPriorityToLegacy(source)).toBe(expected)
   })
 })

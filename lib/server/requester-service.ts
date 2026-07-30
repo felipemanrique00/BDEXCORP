@@ -23,6 +23,7 @@ import {
 } from '@/lib/server/domain-rollout-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import type { SolicitanteEmpresa } from '@/types'
+import { canAssignRequesterMembership } from '@/lib/user-access-kind'
 
 const REQUESTERS_STORAGE_KEY = 'bbt-solicitantes-empresa'
 
@@ -79,19 +80,29 @@ export async function validateRequesterMutation(
   principal: RequestPrincipal,
   rawPayload: unknown,
   rawEditingId?: string,
-): Promise<{ payload: RequesterPayload; editingId: string | null }> {
+): Promise<{ payload: RequesterPayload; editingId: string | null; existingUserId: string | null }> {
   const payload = requesterPayloadSchema.parse(rawPayload)
   const editingId = rawEditingId ? requesterIdentifierSchema.parse(rawEditingId) : null
   await requireCompanyAccess(principal, payload.company_id, 'gerenciar_solicitantes')
 
-  await withTenantTransaction(principal.tenantId, async (client) => {
+  const existingUserId = await withTenantTransaction(principal.tenantId, async (client) => {
     await assertRequesterRelationalWriteEnabled(client, principal.tenantId, payload.company_id)
     await bootstrapLegacyRequesters(client, principal)
-    await assertRequesterReferences(client, principal.tenantId, payload)
     await assertRequesterMutationConflict(client, principal.tenantId, payload, editingId)
+    const existingUserId = editingId
+      ? (await client.query<{ user_id: string | null }>(
+          `select user_id
+           from requesters
+           where tenant_id = $1 and id = $2 and deleted_at is null
+           limit 1`,
+          [principal.tenantId, editingId],
+        )).rows[0]?.user_id || null
+      : null
+    await assertRequesterReferences(client, principal.tenantId, payload, existingUserId)
+    return existingUserId
   })
 
-  return { payload, editingId }
+  return { payload, editingId, existingUserId }
 }
 
 export async function upsertCompanyRequester(
@@ -106,9 +117,14 @@ export async function upsertCompanyRequester(
   const result = await withTenantTransaction(principal.tenantId, async (client) => {
     await assertRequesterRelationalWriteEnabled(client, principal.tenantId, payload.company_id)
     const bootstrap = await bootstrapLegacyRequesters(client, principal)
-    await assertRequesterReferences(client, principal.tenantId, payload)
     const existing = await loadRequesterForMutation(client, principal.tenantId, payload, editingId)
     await assertRequesterMutationConflict(client, principal.tenantId, payload, existing?.id || editingId)
+    await assertRequesterReferences(
+      client,
+      principal.tenantId,
+      payload,
+      existing?.user_id || null,
+    )
 
     const requesterId = existing?.id || `sol_${randomUUID()}`
     const permissions = requesterPermissions(payload)
@@ -204,6 +220,7 @@ async function assertRequesterReferences(
   client: PoolClient,
   tenantId: string,
   payload: RequesterPayload,
+  existingUserId: string | null,
 ): Promise<void> {
   const company = await client.query(
     `select 1
@@ -232,16 +249,31 @@ async function assertRequesterReferences(
   }
 
   if (payload.user_id) {
-    const membership = await client.query(
-      `select 1
-       from tenant_memberships
-       where tenant_id = $1 and user_id = $2 and status in ('active', 'invited')`,
+    const membership = await client.query<{ role_key: string | null }>(
+      `select role_row.role_key
+       from tenant_memberships membership
+       join roles role_row
+         on role_row.id = membership.role_id
+        and (role_row.tenant_id = membership.tenant_id or role_row.tenant_id is null)
+       where membership.tenant_id = $1 and membership.user_id = $2
+         and membership.status in ('active', 'invited')`,
       [tenantId, payload.user_id],
     )
     if (!membership.rowCount) {
       throw new RequesterServiceError(
         'REQUESTER_USER_SCOPE_INVALID',
         'O usuario selecionado nao pertence a este tenant.',
+        409,
+      )
+    }
+    if (!canAssignRequesterMembership({
+      roleKey: membership.rows[0].role_key,
+      requestedUserId: payload.user_id,
+      existingUserId,
+    })) {
+      throw new RequesterServiceError(
+        'REQUESTER_INTERNAL_USER_LINK_DENIED',
+        'Uma conta interna da agencia nao pode ser vinculada como solicitante corporativo.',
         409,
       )
     }
@@ -298,17 +330,17 @@ async function loadRequesterForMutation(
   tenantId: string,
   payload: RequesterPayload,
   editingId: string | null,
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; user_id: string | null } | null> {
   const result = editingId
-    ? await client.query<{ id: string }>(
-        `select id
+    ? await client.query<{ id: string; user_id: string | null }>(
+        `select id, user_id
          from requesters
          where tenant_id = $1 and company_id = $2 and id = $3 and deleted_at is null
          for update`,
         [tenantId, payload.company_id, editingId],
       )
-    : await client.query<{ id: string }>(
-        `select id
+    : await client.query<{ id: string; user_id: string | null }>(
+        `select id, user_id
          from requesters
          where tenant_id = $1 and company_id = $2 and email = $3 and deleted_at is null
          for update`,

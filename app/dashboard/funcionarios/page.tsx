@@ -3,7 +3,7 @@ import { todayISODate } from '@/lib/date'
 import { Suspense, useEffect, useState, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useStore } from '@/lib/store'
-import { getCurrentUser, canEditCompany, getEmpresasPermitidas } from '@/lib/auth'
+import { getCurrentUser, getEmpresasPermitidas, hasPermission } from '@/lib/auth'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { WhatsAppButton } from '@/components/ui/whatsapp-button'
@@ -184,7 +184,7 @@ function FuncionariosInner() {
           <button onClick={exportCSV} className="bbt-button-outline text-sm">
             <Download className="w-4 h-4" /> Exportar CSV
           </button>
-          {user?.role === 'master' && (
+          {hasPermission(user, 'cadastrar_funcionarios') && (
             <button
               onClick={() => { setEditing(null); setModalOpen(true) }}
               className="bbt-button-accent text-sm"
@@ -280,7 +280,7 @@ function FuncionariosInner() {
                         <Link href={`/dashboard/funcionarios/${f.id}`} className="p-2 rounded-lg hover:bg-bbt-accent/10 text-slate-500 hover:text-bbt-accent transition" title="Ver detalhes">
                           <Eye className="w-4 h-4" />
                         </Link>
-                        {user && canEditCompany(user, f.company_id, empresas, gruposEmpresariais) && (
+                        {includesCompany(f.company_id, 'gerenciar_funcionarios') && (
                           <>
                             <button onClick={() => { setEditing(f); setModalOpen(true) }} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
                               <Edit2 className="w-4 h-4" />

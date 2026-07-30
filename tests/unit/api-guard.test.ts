@@ -133,6 +133,64 @@ describe('API tenant administration guard', () => {
   })
 
   it.each([
+    'supervisor',
+    'financial_manager',
+  ])('autoriza auditoria para o perfil interno %s com permissao efetiva', async (roleKey) => {
+    const actor = principal({ roleKey, platformAdmin: false })
+    actor.user.role = 'master'
+    actor.user.permissoes = {
+      ver_auditoria: true,
+    } as RequestPrincipal['user']['permissoes']
+    mocks.getSessionPrincipalFromRequest.mockResolvedValue(actor)
+
+    const result = await guardApiRequest(new Request('http://localhost/api/audit/logs'), {
+      requireAuth: true,
+      permission: 'ver_auditoria',
+      roleKeys: ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'],
+      authorization: { resource: 'audit', action: 'read' },
+    })
+
+    expect(result.response).toBeUndefined()
+  })
+
+  it('nega auditoria ao perfil corporativo mesmo com permissao forjada', async () => {
+    const actor = principal({ roleKey: 'company_admin', platformAdmin: false })
+    actor.user.permissoes = {
+      ver_auditoria: true,
+    } as RequestPrincipal['user']['permissoes']
+    mocks.getSessionPrincipalFromRequest.mockResolvedValue(actor)
+
+    const result = await guardApiRequest(new Request('http://localhost/api/audit/logs'), {
+      requireAuth: true,
+      permission: 'ver_auditoria',
+      roleKeys: ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'],
+      authorization: { resource: 'audit', action: 'read' },
+    })
+
+    expect(result.response?.status).toBe(403)
+    await expect(result.response?.json()).resolves.toMatchObject({ code: 'MEMBERSHIP_ROLE_DENIED' })
+  })
+
+  it('nega auditoria ao perfil interno sem a permissao efetiva', async () => {
+    const actor = principal({ roleKey: 'operator', platformAdmin: false })
+    actor.user.role = 'master'
+    actor.user.permissoes = {
+      ver_auditoria: false,
+    } as RequestPrincipal['user']['permissoes']
+    mocks.getSessionPrincipalFromRequest.mockResolvedValue(actor)
+
+    const result = await guardApiRequest(new Request('http://localhost/api/audit/logs'), {
+      requireAuth: true,
+      permission: 'ver_auditoria',
+      roleKeys: ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'],
+      authorization: { resource: 'audit', action: 'read' },
+    })
+
+    expect(result.response?.status).toBe(403)
+    await expect(result.response?.json()).resolves.toMatchObject({ code: 'PERMISSION_DENIED' })
+  })
+
+  it.each([
     '/api/auth/change-password',
     '/api/auth/mfa/recovery-codes',
   ])('autoriza autoatendimento autenticado em %s', async (path) => {

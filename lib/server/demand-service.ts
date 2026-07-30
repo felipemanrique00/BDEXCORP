@@ -17,7 +17,11 @@ import {
 } from '@/lib/demands/update-governance'
 import { normalizarNomePessoa } from '@/lib/funcionario-identidade'
 import { mergeStorageValues } from '@/lib/storage-merge'
-import { parseLegacyDemands, type RelationalDemandSnapshot } from '@/lib/travel/legacy-demand'
+import {
+  parseLegacyDemands,
+  relationalPriorityToLegacy,
+  type RelationalDemandSnapshot,
+} from '@/lib/travel/legacy-demand'
 import { createApprovalInstance, ApprovalServiceError } from '@/lib/server/approval-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import {
@@ -1988,7 +1992,7 @@ function relationalDemandUpdateSnapshot(row: DemandListRow): DemandUpdateSnapsho
     passageiro_nome: row.passenger_name_snapshot,
     tipo_servico: legacy.tipo_servico || row.service_type,
     status: row.status,
-    prioridade: row.priority,
+    prioridade: relationalPriorityToLegacy(row.priority),
     valor_cotacao: numeric(row.estimated_amount),
     valor_final: numeric(row.final_amount),
     centro_custo: row.cost_center || undefined,
@@ -2465,7 +2469,7 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
     valor_final: numeric(row.final_amount),
     agente_user_id: row.assigned_to_user_id || '',
     status: row.status,
-    prioridade: row.priority,
+    prioridade: relationalPriorityToLegacy(row.priority),
     observacoes: row.observations || '',
     observacoes_internas: row.internal_notes || undefined,
     centro_custo: row.cost_center || undefined,

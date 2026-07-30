@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
-import { corporateAccessConfigurationSchema } from '@/lib/corporate-access-schema'
 import { CorporateAccessDeniedError } from '@/lib/server/corporate-access-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
+import { userMutationSchema } from '@/lib/user-mutation-schema'
 import {
   setTenantUserActive,
   updateTenantUser,
@@ -16,22 +16,7 @@ import {
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const updateSchema = z.object({
-  email: z.string().trim().email().max(254),
-  name: z.string().trim().min(2).max(160),
-  password: z.string().min(12).max(1_024).optional(),
-  role: z.enum(['master', 'company_admin', 'colaborador']),
-  profile: z.enum(['agente', 'lider', 'gestor_financeiro', 'operacional', 'supervisor']).optional(),
-  permissions: z.record(z.boolean()).optional(),
-  companyId: z.string().trim().max(160).nullable().optional(),
-  companyIds: z.array(z.string().trim().min(1).max(160)).max(1_000).optional(),
-  groupIds: z.array(z.string().trim().min(1).max(160)).max(1_000).optional(),
-  avatar: z.string().max(2_000_000).nullable().optional(),
-  active: z.boolean().optional(),
-  corporateAccess: corporateAccessConfigurationSchema.optional(),
-})
-
-const statusSchema = z.object({ active: z.boolean() })
+const statusSchema = z.object({ active: z.boolean() }).strict()
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   const guard = await guardApiRequest(request, {
@@ -47,7 +32,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     const statusOnly = statusSchema.safeParse(raw)
     const user = statusOnly.success
       ? await setTenantUserActive(guard.principal!, id, statusOnly.data.active)
-      : await updateTenantUser(guard.principal!, id, updateSchema.parse(raw))
+      : await updateTenantUser(guard.principal!, id, userMutationSchema.parse(raw))
     await writeAuditEvent({
       action: statusOnly.success ? 'user.status_change' : 'user.update',
       result: 'success',

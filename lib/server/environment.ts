@@ -8,14 +8,24 @@ const optionalBooleanValue = z.preprocess((value) => {
   if (value === false || value === 'false') return false
   return value
 }, z.boolean()).optional()
+const emptyStringAsUndefined = (value: unknown) => (
+  typeof value === 'string' && value.trim() === '' ? undefined : value
+)
+const optionalString = z.preprocess(emptyStringAsUndefined, z.string().optional())
+const optionalTrimmedString = z.preprocess(
+  emptyStringAsUndefined,
+  z.string().trim().min(1).optional(),
+)
+const optionalUrl = z.preprocess(emptyStringAsUndefined, z.string().url().optional())
+const optionalEmail = z.preprocess(emptyStringAsUndefined, z.string().email().optional())
 const positiveInteger = z.coerce.number().int().positive()
 
 const environmentSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  APP_URL: z.string().url().optional(),
-  APP_VERSION: z.string().trim().min(1).optional(),
+  APP_URL: optionalUrl,
+  APP_VERSION: optionalTrimmedString,
   ALLOW_INSECURE_LOCALHOST: optionalBooleanValue.default(false),
-  DATABASE_URL: z.string().min(1).optional(),
+  DATABASE_URL: optionalString,
   DATABASE_SSL: optionalBooleanValue.default(false),
   POSTGRES_POOL_MAX: positiveInteger.max(50).default(10),
   POSTGRES_CONNECT_TIMEOUT_MS: positiveInteger.max(60_000).default(5_000),
@@ -23,38 +33,41 @@ const environmentSchema = z.object({
   AUTOMATION_WORKER_ENABLED: optionalBooleanValue.default(true),
   AUTOMATION_WORKER_INTERVAL_MS: positiveInteger.min(1_000).max(300_000).default(5_000),
   AUTOMATION_WORKER_BATCH_SIZE: positiveInteger.max(100).default(25),
-  AUTH_SECRET: z.string().optional(),
+  AUTH_SECRET: optionalString,
   AUTH_SESSION_HOURS: positiveInteger.max(24 * 30).default(12),
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('bbt_session'),
   MFA_ADMIN_REQUIRED: optionalBooleanValue.default(true),
-  MFA_ENCRYPTION_KEY: z.string().trim().optional(),
+  MFA_ENCRYPTION_KEY: optionalTrimmedString,
   MFA_ISSUER: z.string().trim().min(2).max(80).default('BBT Corporativo'),
   MFA_CHALLENGE_MINUTES: positiveInteger.min(2).max(30).default(10),
   MFA_MAX_ATTEMPTS: positiveInteger.min(3).max(10).default(6),
   STORAGE_ROOT: z.string().min(1).default('.bbt-storage/files'),
   MAX_UPLOAD_BYTES: positiveInteger.max(100 * 1024 * 1024).default(15 * 1024 * 1024),
   SMTP_ENABLED: optionalBooleanValue.default(false),
-  SMTP_HOST: z.string().optional(),
+  SMTP_HOST: optionalString,
   SMTP_PORT: positiveInteger.max(65_535).default(587),
   SMTP_SECURE: optionalBooleanValue.default(false),
-  SMTP_USER: z.string().optional(),
-  SMTP_PASSWORD: z.string().optional(),
-  SMTP_FROM: z.string().email().optional(),
+  SMTP_USER: optionalString,
+  SMTP_PASSWORD: optionalString,
+  SMTP_FROM: optionalEmail,
   SMTP_FROM_NAME: z.string().trim().min(1).max(120).default('BBT Corporativo'),
   PASSWORD_RESET_MINUTES: positiveInteger.max(24 * 60).default(30),
   WHATSAPP_ENABLED: optionalBooleanValue.default(false),
   WHATSAPP_PROVIDER: z.enum(['evolution_api']).default('evolution_api'),
-  WHATSAPP_API_BASE_URL: z.string().url().optional(),
-  WHATSAPP_API_KEY: z.string().optional(),
-  WHATSAPP_INSTANCE_ID: z.string().trim().min(1).max(160).optional(),
+  WHATSAPP_API_BASE_URL: optionalUrl,
+  WHATSAPP_API_KEY: optionalString,
+  WHATSAPP_INSTANCE_ID: z.preprocess(
+    emptyStringAsUndefined,
+    z.string().trim().min(1).max(160).optional(),
+  ),
   TECH_API_ENABLED: optionalBooleanValue.default(false),
-  TECH_API_BASE_URL: z.string().url().optional(),
-  TECH_API_LOGIN: z.string().optional(),
-  TECH_API_PASSWORD: z.string().optional(),
-  TECH_API_KEY: z.string().optional(),
+  TECH_API_BASE_URL: optionalUrl,
+  TECH_API_LOGIN: optionalString,
+  TECH_API_PASSWORD: optionalString,
+  TECH_API_KEY: optionalString,
   TECH_REPORTS_ENABLED: optionalBooleanValue.default(false),
-  TECH_REPORTS_BASE_URL: z.string().url().optional(),
-  TECH_REPORTS_KEY: z.string().optional(),
+  TECH_REPORTS_BASE_URL: optionalUrl,
+  TECH_REPORTS_KEY: optionalString,
 })
 
 export type ServerEnvironment = z.infer<typeof environmentSchema>

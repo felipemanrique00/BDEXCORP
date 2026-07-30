@@ -47,6 +47,8 @@ export interface CorporateAccessConfiguration {
 interface TargetMembershipRow {
   membership_id: string
   platform_admin: boolean
+  role_key: string | null
+  profile_key: string | null
 }
 
 interface ExistingGroupGrantRow {
@@ -80,6 +82,7 @@ export async function getUserCorporateAccessConfiguration(
 ): Promise<CorporateAccessConfiguration> {
   const configuration = await withTenantTransaction(actor.tenantId, async (client) => {
     const target = await requireTargetMembership(client, actor.tenantId, targetUserId)
+    assertActorCanManageTargetMembership(actor, target)
     return loadConfiguration(client, actor.tenantId, target.membership_id)
   })
   const scoped = scopeCorporateAccessConfigurationForActor(actor, configuration)
@@ -98,6 +101,7 @@ export async function replaceUserCorporateAccess(
   targetUserId: string,
   input: CorporateAccessConfigurationInput,
 ): Promise<CorporateAccessConfiguration> {
+  assertActorCanChangeOwnCorporateAccess(actor, targetUserId)
   assertCorporateAccessDelegation(actor, input)
 
   return withTenantTransaction(actor.tenantId, async (client) => {
@@ -106,6 +110,7 @@ export async function replaceUserCorporateAccess(
     if (target.platform_admin) {
       throw new CorporateAccessConflictError('O acesso do administrador da plataforma nao pode ser alterado nesta tela.')
     }
+    assertActorCanManageTargetMembership(actor, target)
     return applyCorporateAccessConfigurationInTransaction(
       client,
       actor,
@@ -121,6 +126,7 @@ export async function mergeUserCorporateAccess(
   input: CorporateAccessConfigurationInput,
   options: { preserveExistingDefault?: boolean } = {},
 ): Promise<CorporateAccessConfiguration> {
+  assertActorCanChangeOwnCorporateAccess(actor, targetUserId)
   assertCorporateAccessDelegation(actor, input)
 
   return withTenantTransaction(actor.tenantId, async (client) => {
@@ -129,6 +135,7 @@ export async function mergeUserCorporateAccess(
     if (target.platform_admin) {
       throw new CorporateAccessConflictError('O acesso do administrador da plataforma nao pode ser alterado nesta tela.')
     }
+    assertActorCanManageTargetMembership(actor, target)
     const current = await loadConfiguration(client, actor.tenantId, target.membership_id)
     const visibleCurrent = scopeCorporateAccessConfigurationForActor(actor, current)
     const merged = mergeCorporateAccessConfigurations(visibleCurrent, input, options)
@@ -202,6 +209,7 @@ export async function requireCompleteCorporateAccessManagement(
   if (isTenantAccessAdministrator(actor)) return
   await withTenantTransaction(actor.tenantId, async (client) => {
     const target = await requireTargetMembership(client, actor.tenantId, targetUserId)
+    assertActorCanManageTargetMembership(actor, target)
     const configuration = await loadConfiguration(client, actor.tenantId, target.membership_id)
     if (!configurationHasGrants(configuration)) {
       throw new CorporateAccessDeniedError('ACCESS_MANAGEMENT_DENIED', 'Usuario fora do seu escopo administrativo.')
@@ -366,8 +374,69 @@ function configurationHasGrants(configuration: CorporateAccessConfiguration): bo
   return configuration.groupGrants.length > 0 || configuration.companyGrants.length > 0
 }
 
+const INTERNAL_AGENCY_ROLE_KEYS = new Set([
+  'tenant_admin',
+  'financial_manager',
+  'supervisor',
+  'agent',
+  'operator',
+])
+
+const INTERNAL_AGENCY_PROFILE_KEYS = new Set([
+  'lider',
+  'gestor_financeiro',
+  'supervisor',
+  'agente',
+  'operacional',
+])
+
+const CORPORATE_MEMBERSHIP_ROLE_KEYS = new Set([
+  'company_admin',
+  'requester',
+  'readonly',
+])
+
+function assertActorCanManageTargetMembership(
+  actor: RequestPrincipal,
+  target: TargetMembershipRow,
+): void {
+  if (isTenantAccessAdministrator(actor)) return
+  const targetRoleKey = target.role_key?.trim() || ''
+  if (CORPORATE_MEMBERSHIP_ROLE_KEYS.has(targetRoleKey)) return
+  if (
+    INTERNAL_AGENCY_ROLE_KEYS.has(targetRoleKey)
+    || (target.profile_key && INTERNAL_AGENCY_PROFILE_KEYS.has(target.profile_key))
+  ) {
+    throw new CorporateAccessDeniedError(
+      'INTERNAL_MEMBERSHIP_MANAGEMENT_DENIED',
+      'Acessos internos da agencia exigem administracao completa do tenant.',
+    )
+  }
+  throw new CorporateAccessDeniedError(
+    'CORPORATE_MEMBERSHIP_ROLE_DENIED',
+    'O perfil do usuario nao e reconhecido como um acesso corporativo administravel.',
+  )
+}
+
+function assertActorCanChangeOwnCorporateAccess(
+  actor: RequestPrincipal,
+  targetUserId: string,
+): void {
+  if (actor.user.id !== targetUserId || isTenantAccessAdministrator(actor)) return
+  throw new CorporateAccessDeniedError(
+    'SELF_ACCESS_MANAGEMENT_DENIED',
+    'Voce nao pode alterar o proprio escopo corporativo por esta tela.',
+  )
+}
+
 function isTenantAccessAdministrator(actor: RequestPrincipal): boolean {
-  return actor.platformAdmin || actor.roleKey === 'tenant_admin'
+  if (actor.platformAdmin) return true
+  if (!INTERNAL_AGENCY_ROLE_KEYS.has(actor.roleKey)) return false
+  if (actor.roleKey !== 'tenant_admin' && actor.corporateAccess?.tenantWide !== true) return false
+  return Boolean(
+    actor.user.permissoes?.gerenciar_usuarios
+    && actor.user.permissoes?.gerenciar_vinculos_acesso,
+  )
 }
 
 export async function applyCorporateAccessConfigurationInTransaction(
@@ -485,9 +554,13 @@ async function requireTargetMembership(
   lock = false,
 ): Promise<TargetMembershipRow> {
   const result = await client.query<TargetMembershipRow>(
-    `select membership.id as membership_id, user_row.platform_admin
+    `select membership.id as membership_id, user_row.platform_admin,
+            role_row.role_key, membership.profile_key
      from tenant_memberships membership
      join users user_row on user_row.id = membership.user_id
+     join roles role_row
+       on role_row.id = membership.role_id
+      and (role_row.tenant_id = membership.tenant_id or role_row.tenant_id is null)
      where membership.tenant_id = $1 and membership.user_id = $2
        and user_row.deleted_at is null
      ${lock ? 'for update of membership' : ''}`,
@@ -757,7 +830,7 @@ export function assertCorporateAccessDelegation(
   input: CorporateAccessConfigurationInput,
   options: { requireAtLeastOneGrant?: boolean } = {},
 ): void {
-  if (actor.platformAdmin || actor.roleKey === 'tenant_admin') return
+  if (isTenantAccessAdministrator(actor)) return
   const access = actor.corporateAccess
   if (!access) throw new CorporateAccessDeniedError('ACCESS_MANAGEMENT_DENIED', 'Escopo corporativo indisponivel.')
   if (options.requireAtLeastOneGrant && input.groupGrants.length === 0 && input.companyGrants.length === 0) {

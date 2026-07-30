@@ -10,9 +10,11 @@ import {
 } from 'react'
 import { toast } from 'sonner'
 
+import { hasCompanyScopeAccess } from '@/lib/corporate-company-scope'
 import type { CorporateAccessSummary, CorporateContextOption, Permissoes, User } from '@/types'
 
 interface CorporateContextState {
+  user: User
   access: CorporateAccessSummary | null
   context: CorporateContextOption | null
   isChanging: boolean
@@ -121,7 +123,7 @@ export function CorporateContextProvider({ children, user }: { children: React.R
   }, [refreshAccess])
 
   return (
-    <CorporateContext.Provider value={{ access, context, isChanging, selectContext, refreshAccess }}>
+    <CorporateContext.Provider value={{ user, access, context, isChanging, selectContext, refreshAccess }}>
       {children}
     </CorporateContext.Provider>
   )
@@ -134,7 +136,7 @@ export function useCorporateContext(): CorporateContextState {
 }
 
 export function useCorporateCompanyScope(): CorporateCompanyScope {
-  const { access, context } = useCorporateContext()
+  const { user, access, context } = useCorporateContext()
   const companyIdsList = useMemo(
     () => context?.companyIds || access?.companyIds || [],
     [access?.companyIds, context?.companyIds],
@@ -144,13 +146,10 @@ export function useCorporateCompanyScope(): CorporateCompanyScope {
     [access, companyIdsList],
   )
   const includesCompany = useCallback(
-    (companyId: string | null | undefined, permission?: keyof Permissoes) => {
-      if (!companyIds) return true
-      if (!companyId || !companyIds.has(companyId)) return false
-      if (!permission) return true
-      return Boolean(access?.companies.find((company) => company.companyId === companyId)?.permissions[permission])
-    },
-    [access, companyIds],
+    (companyId: string | null | undefined, permission?: keyof Permissoes) => (
+      hasCompanyScopeAccess(user, access, companyIds, companyId, permission)
+    ),
+    [access, companyIds, user],
   )
   return {
     companyIds,

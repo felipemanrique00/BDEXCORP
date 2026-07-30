@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 
 import { getTransacoes, getEventos, type Transacao } from '@/lib/audit'
-import { getCurrentUser } from '@/lib/auth'
+import { getCurrentUser, hasPermission } from '@/lib/auth'
 import type { AssistantAuditLog } from '@/lib/assistant/types'
 import type { LogAuditoria, User } from '@/types'
 
@@ -83,7 +83,13 @@ const resultStyles: Record<AuditResult, string> = {
 }
 
 function canViewTenantAudit(user: User | null): boolean {
-  return Boolean(user?.ativo !== false && (user?.platform_admin || user?.role_key === 'tenant_admin'))
+  return Boolean(user?.ativo !== false && (
+    user?.platform_admin
+    || (
+      ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'].includes(user?.role_key || '')
+      && hasPermission(user, 'ver_auditoria')
+    )
+  ))
 }
 
 function formatTimestamp(value: string): string {

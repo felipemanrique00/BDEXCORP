@@ -25,15 +25,17 @@ import {
   aplicarSolicitantesEmpresaDoServidor,
   getSolicitantesPorEmpresa,
 } from '@/lib/solicitantes-storage'
+import { defaultRequesterLoginSelection } from '@/lib/requester-login-access'
 import type { Empresa, Funcionario, SolicitanteEmpresa } from '@/types'
 
 interface Props {
   empresa: Empresa
   funcionarios: Funcionario[]
   canEdit: boolean
+  canManageLogins: boolean
 }
 
-export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props) {
+export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit, canManageLogins }: Props) {
   const [reload, setReload] = useState(0)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<SolicitanteEmpresa | null>(null)
@@ -260,6 +262,7 @@ export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props
         editing={editing}
         empresa={empresa}
         funcionarios={funcionarios}
+        canManageLogins={canManageLogins}
       />
 
       <ConfirmDialog
@@ -280,13 +283,14 @@ export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props
 // ============================================================
 
 function SolicitanteForm({
-  open, onClose, editing, empresa, funcionarios,
+  open, onClose, editing, empresa, funcionarios, canManageLogins,
 }: {
   open: boolean
   onClose: () => void
   editing: SolicitanteEmpresa | null
   empresa: Empresa
   funcionarios: Funcionario[]
+  canManageLogins: boolean
 }) {
   const [funcionarioId, setFuncionarioId] = useState(editing?.funcionario_id || '')
   const [nome, setNome] = useState(editing?.nome || '')
@@ -300,7 +304,9 @@ function SolicitanteForm({
   const [podeVouchers, setPodeVouchers] = useState(editing?.pode_ver_vouchers ?? true)
   const [podeFinanceiro, setPodeFinanceiro] = useState(editing?.pode_ver_financeiro ?? false)
   const [limite, setLimite] = useState(editing?.limite_por_solicitacao || 0)
-  const [criarAcesso, setCriarAcesso] = useState(Boolean(editing?.user_id) || !editing)
+  const [criarAcesso, setCriarAcesso] = useState(
+    defaultRequesterLoginSelection(canManageLogins, editing?.user_id, Boolean(editing)),
+  )
   const [salvando, setSalvando] = useState(false)
 
   useEffect(() => {
@@ -317,9 +323,9 @@ function SolicitanteForm({
     setPodeVouchers(editing?.pode_ver_vouchers ?? true)
     setPodeFinanceiro(editing?.pode_ver_financeiro ?? false)
     setLimite(editing?.limite_por_solicitacao || 0)
-    setCriarAcesso(Boolean(editing?.user_id) || !editing)
+    setCriarAcesso(defaultRequesterLoginSelection(canManageLogins, editing?.user_id, Boolean(editing)))
     setSalvando(false)
-  }, [open, editing, empresa])
+  }, [open, editing, empresa, canManageLogins])
 
   const funcionariosEmpresa = funcionarios.filter((f) => f.company_id === empresa.id)
 
@@ -384,10 +390,14 @@ function SolicitanteForm({
 
       if (result.warning?.message) {
         toast.warning(result.warning.message)
+      } else if (result.access?.state === 'inactive') {
+        toast.warning('Solicitante salvo, mas a conta de login permanece inativa. Revise o estado do usuário.')
       } else {
         toast.success(
-          result.solicitante?.user_id && criarAcesso && !editing?.user_id
+          result.access?.invitationSent
             ? `Solicitante salvo. Um convite seguro foi enviado para ${emailT}.`
+            : result.access?.state === 'active'
+              ? 'Solicitante salvo e acesso de login sincronizado.'
             : editing ? 'Solicitante atualizado.' : 'Solicitante cadastrado.',
         )
       }
@@ -485,7 +495,13 @@ function SolicitanteForm({
               : 'Enviar convite seguro para criar o login'}
             checked={criarAcesso}
             onChange={setCriarAcesso}
+            disabled={!canManageLogins}
           />
+          {!canManageLogins && (
+            <p className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+              Seu perfil pode cadastrar o contato, mas não pode criar nem sincronizar contas de login.
+            </p>
+          )}
           {criarAcesso && (
             <p className="rounded border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900 dark:border-cyan-800 dark:bg-cyan-950/30 dark:text-cyan-100">
               {editing?.user_id
@@ -525,13 +541,24 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+function Toggle({
+  label,
+  checked,
+  onChange,
+  disabled = false,
+}: {
+  label: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  disabled?: boolean
+}) {
   return (
-    <label className="flex items-center justify-between cursor-pointer text-sm">
+    <label className={`flex items-center justify-between text-sm ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
       <span className="text-slate-700 dark:text-slate-200">{label}</span>
       <input
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         className="w-4 h-4 accent-bbt-accent"
       />

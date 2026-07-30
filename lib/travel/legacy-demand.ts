@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import type { TravelLifecycleStatus } from '@/lib/travel-lifecycle/types'
+import type { Prioridade } from '@/types'
 
 const legacyDemandSchema = z.object({
   id: z.string().trim().min(1).max(200),
@@ -179,6 +180,14 @@ export function lifecycleFromLegacyStatus(value: string): TravelLifecycleStatus 
   if (['em_andamento', 'cotando', 'quoting'].includes(normalized)) return 'quoting'
   if (['pendente', 'submitted'].includes(normalized)) return 'submitted'
   return 'draft'
+}
+
+export function relationalPriorityToLegacy(value: string): Prioridade {
+  const normalized = normalize(value)
+  if (normalized === 'urgent' || normalized === 'urgente') return 'urgente'
+  if (normalized === 'high' || normalized === 'alta') return 'alta'
+  if (normalized === 'low' || normalized === 'baixa') return 'baixa'
+  return 'media'
 }
 
 function normalizeServiceType(value: string): string {

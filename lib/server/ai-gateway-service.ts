@@ -8,6 +8,7 @@ import {
   callGemini,
   callOpenAIResponses,
   getPaidAIStatus,
+  OPENAI_TRANSCRIBE_MODEL,
   transcribeAudioWithOpenAI,
   type PaidAIProvider,
 } from '@/lib/server-ai'
@@ -286,7 +287,7 @@ export async function executeAiTranscriptionGateway(
       principal,
       task: 'transcription',
       provider: 'openai',
-      model: process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe',
+      model: OPENAI_TRANSCRIBE_MODEL,
       status: 'completed',
       inputHash,
       inputCharacters: input.base64.length,
@@ -298,7 +299,7 @@ export async function executeAiTranscriptionGateway(
     return {
       transcript,
       provider: 'openai',
-      model: process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe',
+      model: OPENAI_TRANSCRIBE_MODEL,
     }
   } catch (error) {
     const friendly = classifyAIError(error, 'openai')
@@ -306,7 +307,7 @@ export async function executeAiTranscriptionGateway(
       principal,
       task: 'transcription',
       provider: 'openai',
-      model: process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe',
+      model: OPENAI_TRANSCRIBE_MODEL,
       status: 'failed',
       inputHash,
       inputCharacters: input.base64.length,

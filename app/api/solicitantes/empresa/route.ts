@@ -15,9 +15,12 @@ import {
 import {
   createTenantUser,
   getTenantUser,
+  resendTenantUserInvite,
+  setTenantUserActive,
   UserConflictError,
   UserInvitationUnavailableError,
 } from '@/lib/server/user-service'
+import type { User } from '@/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -71,11 +74,33 @@ export async function POST(request: Request) {
     const payload = requesterPayloadSchema.parse(envelope.solicitante ?? input.body)
     const editingId = envelope.id || envelope.editingId
     const validated = await validateRequesterMutation(guard.principal!, payload, editingId)
-    let userId = validated.payload.user_id
+    const canManageUserLinks = canManageCompanyUserLinks(
+      guard.principal!,
+      guard.user,
+      validated.payload.company_id,
+    )
+    const existingUserId = validated.existingUserId || null
+    if (
+      !canManageUserLinks
+      && (validated.payload.user_id || null) !== existingUserId
+    ) {
+      return NextResponse.json(
+        { ok: false, error: 'Permissao para alterar o acesso de login obrigatoria.', requestId: guard.requestId },
+        { status: 403, headers: { 'X-Request-Id': guard.requestId } },
+      )
+    }
+    let userId = canManageUserLinks
+      ? validated.payload.user_id
+      : existingUserId
     let invitationWarning: { code: string; message: string } | null = null
+    let loginProvisioning: {
+      state: 'invited' | 'active' | 'inactive' | 'blocked'
+      invitationSent: boolean
+      existing: boolean
+    } | null = null
 
     if (envelope.criarAcesso) {
-      if (!hasServerPermission(guard.user, 'gerenciar_usuarios')) {
+      if (!canManageUserLinks) {
         return NextResponse.json(
           { ok: false, error: 'Permissao para gerenciar usuarios obrigatoria.', requestId: guard.requestId },
           { status: 403, headers: { 'X-Request-Id': guard.requestId } },
@@ -85,22 +110,50 @@ export async function POST(request: Request) {
       try {
         const corporateAccess = requesterCorporateAccess(validated.payload)
         const existingUser = userId ? await getTenantUser(guard.principal!, userId) : null
-        const portalUser = existingUser
-          ? await updateExistingRequesterAccess(guard.principal!, existingUser.id, corporateAccess)
-          : (await createTenantUser(guard.principal!, {
+        if (existingUser) {
+          const portalUser = await updateExistingRequesterAccess(
+            guard.principal!,
+            existingUser.id,
+            corporateAccess,
+          )
+          userId = portalUser.id
+          loginProvisioning = await provisionExistingRequesterLogin(
+            guard.principal!,
+            portalUser,
+            validated.payload.status,
+          )
+        } else {
+          const created = await createTenantUser(guard.principal!, {
               email: validated.payload.email,
               name: validated.payload.nome,
               role: 'colaborador',
               companyId: validated.payload.company_id,
               active: validated.payload.status !== 'bloqueado',
               corporateAccess,
-            })).user
-        userId = portalUser.id
+            })
+          userId = created.user.id
+          loginProvisioning = created.existing
+            ? await provisionExistingRequesterLogin(
+                guard.principal!,
+                created.user,
+                validated.payload.status,
+              )
+            : {
+                state: created.invited ? 'invited' : created.user.ativo === false ? 'inactive' : 'active',
+                invitationSent: created.invited,
+                existing: false,
+              }
+        }
       } catch (error) {
         if (!(error instanceof UserInvitationUnavailableError)) throw error
         invitationWarning = {
           code: 'REQUESTER_SAVED_INVITATION_PENDING',
           message: 'Solicitante salvo, mas o convite nao foi enviado porque o SMTP ainda nao esta configurado.',
+        }
+        loginProvisioning = {
+          state: 'inactive',
+          invitationSent: false,
+          existing: Boolean(userId),
         }
       }
     }
@@ -116,6 +169,7 @@ export async function POST(request: Request) {
         solicitante: result.requester,
         solicitantes: result.requesters,
         warning: invitationWarning,
+        access: loginProvisioning,
       },
       {
         status: result.created ? 201 : 200,
@@ -125,6 +179,45 @@ export async function POST(request: Request) {
   } catch (error) {
     return requesterErrorResponse(error, guard.requestId)
   }
+}
+
+async function provisionExistingRequesterLogin(
+  principal: Parameters<typeof mergeUserCorporateAccess>[0],
+  user: User,
+  requesterStatus: z.infer<typeof requesterPayloadSchema>['status'],
+) {
+  if (requesterStatus === 'bloqueado') {
+    return { state: 'blocked' as const, invitationSent: false, existing: true }
+  }
+  if (user.status === 'invited') {
+    await resendTenantUserInvite(principal, user.id)
+    return { state: 'invited' as const, invitationSent: true, existing: true }
+  }
+  const activeUser = user.ativo === false
+    ? await setTenantUserActive(principal, user.id, true)
+    : user
+  return {
+    state: activeUser.ativo === false ? 'inactive' as const : 'active' as const,
+    invitationSent: false,
+    existing: true,
+  }
+}
+
+function canManageCompanyUserLinks(
+  principal: NonNullable<Awaited<ReturnType<typeof guardApiRequest>>['principal']>,
+  user: Awaited<ReturnType<typeof guardApiRequest>>['user'],
+  companyId: string,
+): boolean {
+  if (principal.platformAdmin) return true
+  if (principal.corporateAccess) {
+    return Boolean(principal.corporateAccess.companies.find(
+      (company) => company.companyId === companyId
+        && company.permissions.gerenciar_usuarios
+        && company.permissions.gerenciar_vinculos_acesso,
+    ))
+  }
+  return hasServerPermission(user, 'gerenciar_usuarios')
+    && hasServerPermission(user, 'gerenciar_vinculos_acesso')
 }
 
 function requesterCorporateAccess(payload: z.infer<typeof requesterPayloadSchema>) {

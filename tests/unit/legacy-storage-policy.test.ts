@@ -51,6 +51,59 @@ describe('legacy storage policy', () => {
       rollout('vouchers', 'relational', 'relational'),
     )).toMatchObject({ code: 'DOMAIN_API_REQUIRED' })
   })
+
+  it('administrador do tenant respeita overrides negativos no storage legado', () => {
+    const actor = principal({
+      cadastrar_empresas: false,
+      gerenciar_empresas_grupo: false,
+      alterar_configuracoes: false,
+      cadastrar_funcionarios: false,
+      gerenciar_funcionarios: false,
+      cadastrar_hoteis: false,
+      editar_politicas: false,
+    })
+    actor.roleKey = 'tenant_admin'
+
+    expect(evaluateLegacyStorageWrite(
+      actor,
+      entry('bbt-data-v4', 'corporate_directory', 'critical'),
+    )).toMatchObject({ code: 'PERMISSION_DENIED' })
+
+    actor.platformAdmin = true
+    expect(evaluateLegacyStorageWrite(
+      actor,
+      entry('bbt-data-v4', 'corporate_directory', 'critical'),
+    )).toBeNull()
+  })
+
+  it.each([
+    'cadastrar_empresas',
+    'gerenciar_empresas_grupo',
+    'alterar_configuracoes',
+    'cadastrar_funcionarios',
+    'gerenciar_funcionarios',
+    'cadastrar_hoteis',
+    'editar_politicas',
+  ] as Array<keyof Permissoes>)(
+    'aceita escrita do diretorio corporativo com %s e deixa o escopo filtrar os registros',
+    (permission) => {
+      expect(evaluateLegacyStorageWrite(
+        principal({ [permission]: true }),
+        entry('bbt-data-v4', 'corporate_directory', 'critical'),
+      )).toBeNull()
+    },
+  )
+
+  it('deixa excluir_demandas chegar ao filtro fino de tombstones', () => {
+    expect(evaluateLegacyStorageWrite(
+      principal({
+        criar_demandas: false,
+        excluir_demandas: true,
+        importar_planilhas: false,
+      }),
+      entry('bbt-atendimentos', 'demands', 'critical'),
+    )).toBeNull()
+  })
 })
 
 function principal(overrides: Partial<Permissoes>): RequestPrincipal {

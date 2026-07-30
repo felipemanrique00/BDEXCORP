@@ -2,7 +2,11 @@
 import { todayISODate } from '@/lib/date'
 import { useState, useMemo } from 'react'
 import { useStore } from '@/lib/store'
-import { getCurrentUser, canEditGlobal, getEmpresasPermitidas } from '@/lib/auth'
+import { getCurrentUser } from '@/lib/auth'
+import {
+  canCreateCompanyWithoutGroup,
+  companyGroupIdsAvailableForCreation,
+} from '@/lib/company-creation-access'
 import { useCorporateCompanyScope, useCorporateContext } from '@/components/corporate-context-provider'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
@@ -17,11 +21,10 @@ import type { Empresa } from '@/types'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
 import { PageHero } from '@/components/ui/page-hero'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
-import { flushPendingRemoteStorage } from '@/lib/storage-quota'
+import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
 
 export default function EmpresasPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const isMaster = canEditGlobal(user)
   const { includesCompany } = useCorporateCompanyScope()
   const { refreshAccess } = useCorporateContext()
   const { empresas, gruposEmpresariais, funcionarios, addEmpresa, updateEmpresa, deleteEmpresa } = useStore()
@@ -31,20 +34,30 @@ export default function EmpresasPage() {
   const [editing, setEditing] = useState<Empresa | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<Empresa | null>(null)
   const [configCobrancaEmpresa, setConfigCobrancaEmpresa] = useState<Empresa | null>(null)
+  const creatableGroupIds = useMemo(
+    () => companyGroupIdsAvailableForCreation(user, gruposEmpresariais),
+    [gruposEmpresariais, user],
+  )
+  const canCreateCompanyTenantWide = canCreateCompanyWithoutGroup(user)
+  const canCreateCompany = canCreateCompanyTenantWide || creatableGroupIds.size > 0
 
   async function sincronizarDiretorio(message: string) {
-    const synced = await flushPendingRemoteStorage()
-    if (!synced) {
+    const result = await flushPendingRemoteStorageWithResult()
+    if (!result.confirmed) {
       toast.error('Alteracao registrada, mas ainda nao sincronizada com o servidor. A sincronizacao sera repetida automaticamente.')
       return
     }
     await refreshAccess().catch(() => undefined)
+    if (!result.fullyAccepted) {
+      toast.error('A alteração não foi aplicada porque seu acesso foi alterado ou não permite esta operação. Recarregando os dados autorizados.')
+      window.setTimeout(() => window.location.reload(), 900)
+      return
+    }
     toast.success(message)
   }
 
   const visible = useMemo(() => {
-    const filtered = (isMaster ? empresas : getEmpresasPermitidas(user, empresas, gruposEmpresariais))
-      .filter((empresa) => includesCompany(empresa.id, 'ver_empresas'))
+    const filtered = empresas.filter((empresa) => includesCompany(empresa.id, 'ver_empresas'))
     if (!search.trim()) return filtered
     const q = search.toLowerCase()
     return filtered.filter(
@@ -53,7 +66,7 @@ export default function EmpresasPage() {
         e.cnpj.includes(q) ||
         e.responsavel.toLowerCase().includes(q)
     )
-  }, [empresas, gruposEmpresariais, includesCompany, isMaster, search, user])
+  }, [empresas, includesCompany, search])
 
   function exportCSV() {
     const headers = ['Nome', 'CNPJ', 'Grupo', 'Endereço', 'Responsável', 'E-mail', 'Telefone', 'Centro de Custo', 'Ativa']
@@ -94,7 +107,7 @@ export default function EmpresasPage() {
               className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-white text-sm hover:bg-white/15 transition border border-white/15">
               <Download className="w-4 h-4" /> Exportar CSV
             </button>
-            {(isMaster || user?.permissoes?.cadastrar_empresas) && (
+            {canCreateCompany && (
               <button
                 onClick={() => { setEditing(null); setModalOpen(true) }}
                 className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-5 py-3 text-[#061631] font-semibold text-sm hover:brightness-105 transition shadow-lg shadow-cyan-500/20"
@@ -190,7 +203,7 @@ export default function EmpresasPage() {
                           >
                             <Eye className="w-4 h-4" />
                           </Link>
-                          {(isMaster || includesCompany(e.id, 'alterar_configuracoes') || includesCompany(e.id, 'gerenciar_empresas_grupo')) && (
+                          {includesCompany(e.id, 'gerenciar_empresas_grupo') && (
                             <button
                               onClick={() => {
                                 setEditing(e)
@@ -202,7 +215,7 @@ export default function EmpresasPage() {
                               <Edit2 className="w-4 h-4" />
                             </button>
                           )}
-                          {(isMaster || includesCompany(e.id, 'alterar_configuracoes')) && (
+                          {includesCompany(e.id, 'alterar_configuracoes') && (
                             <button
                               onClick={() => setConfigCobrancaEmpresa(e)}
                               className="p-2 rounded-lg hover:bg-green-50 dark:hover:bg-green-900/20 text-slate-500 hover:text-green-600 transition"
@@ -211,7 +224,7 @@ export default function EmpresasPage() {
                               <DollarSign className="w-4 h-4" />
                             </button>
                           )}
-                          {(isMaster || includesCompany(e.id, 'gerenciar_empresas_grupo')) && (
+                          {includesCompany(e.id, 'gerenciar_empresas_grupo') && (
                             <button
                               onClick={() => setConfirmDelete(e)}
                               className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-500 hover:text-red-600 transition"
@@ -235,12 +248,25 @@ export default function EmpresasPage() {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         editing={editing}
-        grupos={gruposEmpresariais}
+        grupos={canCreateCompanyTenantWide
+          ? gruposEmpresariais
+          : gruposEmpresariais.filter((grupo) => (
+              creatableGroupIds.has(grupo.id)
+              || grupo.id === editing?.grupo_id
+            ))}
+        allowWithoutGroup={canCreateCompanyTenantWide || Boolean(editing && !editing.grupo_id)}
         onSave={(data) => {
           if (editing) {
             updateEmpresa(editing.id, data)
             void sincronizarDiretorio('Empresa atualizada.')
           } else {
+            if (
+              !canCreateCompanyTenantWide
+              && !creatableGroupIds.has(String(data.grupo_id || ''))
+            ) {
+              toast.error('Selecione um grupo com permissao para incluir novas empresas.')
+              return
+            }
             addEmpresa({ ...data, ativa: true } as any)
             void sincronizarDiretorio('Empresa cadastrada.')
           }
@@ -296,12 +322,14 @@ function EmpresaModal({
   onClose,
   editing,
   grupos,
+  allowWithoutGroup,
   onSave,
 }: {
   open: boolean
   onClose: () => void
   editing: Empresa | null
   grupos: Array<{ id: string; nome: string; ativo?: boolean }>
+  allowWithoutGroup: boolean
   onSave: (data: Partial<Empresa>) => void
 }) {
   const [form, setForm] = useState<Partial<Empresa>>(
@@ -389,7 +417,7 @@ function EmpresaModal({
             onChange={(e) => setForm({ ...form, grupo_id: e.target.value || null })}
             className="bbt-input"
           >
-            <option value="">Sem grupo</option>
+            {allowWithoutGroup && <option value="">Sem grupo</option>}
             {grupos.filter((grupo) => grupo.ativo !== false).map((grupo) => (
               <option key={grupo.id} value={grupo.id}>{grupo.nome}</option>
             ))}

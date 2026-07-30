@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useStore } from '@/lib/store'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import { canAccessCompanyPermission, canManageUserAccess, getCurrentUser } from '@/lib/auth'
 import { formatDate, maskPhone, formatCurrency, maskCPF } from '@/lib/utils'
 import { WhatsAppButton } from '@/components/ui/whatsapp-button'
 import {
@@ -48,7 +49,8 @@ export default function EmpresaDetalhePage() {
   const { includesCompany } = useCorporateCompanyScope()
   const [tab, setTab] = useState<Tab>('dados')
 
-  const { empresas, funcionarios, politicas, updatePolitica, addPolitica } = useStore()
+  const { empresas, funcionarios, politicas, gruposEmpresariais, updatePolitica, addPolitica } = useStore()
+  const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const empresa = empresas.find((e) => e.id === id)
   const funcs = funcionarios.filter((f) => f.company_id === id)
   const pols = politicas.filter((p) => p.company_id === id)
@@ -57,6 +59,21 @@ export default function EmpresaDetalhePage() {
   const canManageEmployees = includesCompany(id, 'gerenciar_funcionarios')
   const canViewRequesters = includesCompany(id, 'ver_solicitantes')
   const canManageRequesters = includesCompany(id, 'gerenciar_solicitantes')
+  const canManageRequesterLogins = canManageUserAccess(user)
+    && canAccessCompanyPermission(
+      user,
+      id,
+      'gerenciar_usuarios',
+      empresas,
+      gruposEmpresariais,
+    )
+    && canAccessCompanyPermission(
+      user,
+      id,
+      'gerenciar_vinculos_acesso',
+      empresas,
+      gruposEmpresariais,
+    )
   const canEditPolicies = includesCompany(id, 'editar_politicas')
   const canViewDemands = includesCompany(id, 'ver_demandas')
   const canViewEmissions = includesCompany(id, 'ver_emissoes')
@@ -187,7 +204,12 @@ export default function EmpresaDetalhePage() {
       )}
 
       {tab === 'solicitantes' && (
-        <SolicitantesEmpresaTab empresa={empresa} funcionarios={funcionarios} canEdit={canManageRequesters} />
+        <SolicitantesEmpresaTab
+          empresa={empresa}
+          funcionarios={funcionarios}
+          canEdit={canManageRequesters}
+          canManageLogins={canManageRequesterLogins}
+        />
       )}
 
       {tab === 'politicas' && (

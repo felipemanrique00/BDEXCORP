@@ -26,7 +26,19 @@ import {
 import { emailConfigured, sendTransactionalEmail } from '@/lib/server/email'
 import { getServerEnvironment } from '@/lib/server/environment'
 import { logError } from '@/lib/server/logger'
+import {
+  applyPermissionOverrides,
+  normalizeInternalPermissionBases,
+  normalizePermissionOverrides,
+  permissionOverridesFromEffective,
+  type InternalPermissionBases,
+} from '@/lib/permission-overrides'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import {
+  isSelfDeactivation,
+  isUnsafeSelfAdministrationChange,
+  resolveUserAvatarUpdate,
+} from '@/lib/user-mutation'
 import { createOpaqueToken, hashSecureToken } from '@/lib/server/secure-token'
 import {
   PERMISSOES_PADRAO_POR_PERFIL,
@@ -54,6 +66,15 @@ interface MembershipUserRow {
   role_key: string
   corporate_profile: import('@/types').CorporateProfile | null
   permissions: Record<string, unknown> | null
+  permission_overrides: Record<string, unknown> | null
+}
+
+const INTERNAL_PROFILE_BY_ROLE_KEY: Record<string, PerfilBBT> = {
+  tenant_admin: 'lider',
+  financial_manager: 'gestor_financeiro',
+  supervisor: 'supervisor',
+  agent: 'agente',
+  operator: 'operacional',
 }
 
 export interface UserMutationInput {
@@ -79,6 +100,36 @@ export interface TenantUserCreationResult {
 
 export async function listTenantUsers(principal: RequestPrincipal): Promise<User[]> {
   return queryTenantUsers(principal, 'management')
+}
+
+export async function listTenantInternalPermissionBases(
+  principal: RequestPrincipal,
+): Promise<InternalPermissionBases> {
+  const configured = await withTenantTransaction(principal.tenantId, async (client) => {
+    const result = await client.query<{
+      role_key: string
+      permissions: Record<string, unknown> | null
+    }>(
+      `select
+         role_row.role_key,
+         coalesce(
+           jsonb_object_agg(permission.permission_key, permission.allowed)
+             filter (where permission.permission_key is not null),
+           '{}'::jsonb
+         ) as permissions
+       from roles role_row
+       left join role_permissions permission on permission.role_id = role_row.id
+       where role_row.tenant_id = $1
+         and role_row.role_key = any($2::text[])
+       group by role_row.id, role_row.role_key`,
+      [principal.tenantId, Object.keys(INTERNAL_PROFILE_BY_ROLE_KEY)],
+    )
+    return Object.fromEntries(result.rows.flatMap((row) => {
+      const profile = INTERNAL_PROFILE_BY_ROLE_KEY[row.role_key]
+      return profile ? [[profile, row.permissions || {}]] : []
+    }))
+  })
+  return normalizeInternalPermissionBases(configured)
 }
 
 export async function listTenantDirectory(principal: RequestPrincipal): Promise<User[]> {
@@ -129,6 +180,7 @@ export async function createTenantUser(
   const email = input.email.trim().toLowerCase()
   const name = input.name.trim()
   assertLegacyUserMutationAllowed(principal, input)
+  assertMembershipPermissionOverridesAllowed(principal, input.permissions)
   if (input.corporateAccess) {
     assertCorporateAccessDelegation(principal, input.corporateAccess, { requireAtLeastOneGrant: true })
   }
@@ -178,11 +230,27 @@ export async function createTenantUser(
     )
     if (duplicate.rowCount) throw new UserConflictError('Ja existe usuario com este e-mail.')
 
-    const role = await client.query(
-      'select id from roles where tenant_id = $1 and role_key = $2',
+    const role = await client.query<{
+      id: string
+      permissions: Record<string, unknown> | null
+    }>(
+      `select
+         role_row.id,
+         coalesce(
+           jsonb_object_agg(permission.permission_key, permission.allowed)
+             filter (where permission.permission_key is not null),
+           '{}'::jsonb
+         ) as permissions
+       from roles role_row
+       left join role_permissions permission on permission.role_id = role_row.id
+       where role_row.tenant_id = $1 and role_row.role_key = $2
+       group by role_row.id`,
       [principal.tenantId, roleKey],
     )
     if (!role.rowCount) throw new Error('Perfil de acesso nao configurado para o tenant.')
+    const targetProfile = input.profile || profileFromRoleKey(roleKey)
+    const rolePermissionBase = normalizePermissions(role.rows[0].permissions, targetProfile)
+    const permissionPatch = normalizePermissionPatch(input.permissions, rolePermissionBase)
 
     await client.query(
       `insert into users (id, email, name, avatar_url, status, email_verified_at)
@@ -205,8 +273,8 @@ export async function createTenantUser(
         userId,
         role.rows[0].id,
         invited ? 'invited' : input.active === false ? 'inactive' : 'active',
-        input.profile || profileFromRoleKey(roleKey),
-        JSON.stringify(normalizePermissionPatch(input.permissions)),
+        targetProfile,
+        JSON.stringify(permissionPatch),
         input.companyId || null,
         uniqueStrings(input.companyIds || []),
         uniqueStrings(input.groupIds || []),
@@ -312,6 +380,9 @@ export async function updateTenantUser(
   userId: string,
   input: UserMutationInput,
 ): Promise<User> {
+  if (isSelfDeactivation(principal.user.id, userId, input.active)) {
+    throw new UserConflictError('Voce nao pode desativar o proprio acesso.')
+  }
   const current = await getTenantUser(principal, userId)
   if (!current) throw new UserNotFoundError()
   if (current.platform_admin && userId !== principal.user.id) {
@@ -319,10 +390,12 @@ export async function updateTenantUser(
   }
   if (input.password) assertStrongPassword(input.password)
   assertLegacyUserMutationAllowed(principal, input)
+  assertMembershipPermissionOverridesAllowed(principal, input.permissions)
   if (input.corporateAccess) assertCorporateAccessDelegation(principal, input.corporateAccess)
+  const nextAvatar = resolveUserAvatarUpdate(current.avatar, input.avatar)
   const changesSharedIdentity = input.name.trim() !== current.name
     || input.email.trim().toLowerCase() !== current.email.toLowerCase()
-    || (input.avatar || null) !== (current.avatar || null)
+    || nextAvatar !== (current.avatar || null)
     || Boolean(input.password)
 
   if (!isTenantAccessAdministrator(principal)) {
@@ -357,6 +430,23 @@ export async function updateTenantUser(
   const roleKey = corporateProfile
     ? corporateProfileToMembershipRoleKey(corporateProfile)
     : roleKeyFrom(input.role, input.profile)
+  if (isUnsafeSelfAdministrationChange({
+    actorUserId: principal.user.id,
+    targetUserId: userId,
+    actorRoleKey: principal.roleKey,
+    nextRoleKey: roleKey,
+    platformAdmin: principal.platformAdmin,
+    hasExplicitScope: Boolean(
+      input.corporateAccess
+      || input.companyId
+      || input.companyIds?.length
+      || input.groupIds?.length,
+    ),
+  })) {
+    throw new UserConflictError(
+      'Voce nao pode alterar o proprio perfil ou escopo de forma que remova sua administracao de usuarios.',
+    )
+  }
   const nextMembershipStatus = current.status === 'invited'
     ? input.password ? 'active' : 'invited'
     : input.active === false ? 'inactive' : 'active'
@@ -385,11 +475,40 @@ export async function updateTenantUser(
     )
     if (duplicate.rowCount) throw new UserConflictError('Ja existe usuario com este e-mail.')
 
-    const role = await client.query(
-      'select id from roles where tenant_id = $1 and role_key = $2',
+    const role = await client.query<{
+      id: string
+      permissions: Record<string, unknown> | null
+    }>(
+      `select
+         role_row.id,
+         coalesce(
+           jsonb_object_agg(permission.permission_key, permission.allowed)
+             filter (where permission.permission_key is not null),
+           '{}'::jsonb
+         ) as permissions
+       from roles role_row
+       left join role_permissions permission on permission.role_id = role_row.id
+       where role_row.tenant_id = $1 and role_row.role_key = $2
+       group by role_row.id`,
       [principal.tenantId, roleKey],
     )
     if (!role.rowCount) throw new Error('Perfil de acesso nao configurado para o tenant.')
+    const targetProfile = input.profile || profileFromRoleKey(roleKey)
+    const rolePermissionBase = normalizePermissions(role.rows[0].permissions, targetProfile)
+    const permissionPatch = normalizePermissionPatch(input.permissions, rolePermissionBase)
+    const targetPermissions = applyPermissionOverrides(rolePermissionBase, permissionPatch)
+    if (
+      userId === principal.user.id
+      && !principal.platformAdmin
+      && (
+        !targetPermissions.gerenciar_usuarios
+        || !targetPermissions.gerenciar_vinculos_acesso
+      )
+    ) {
+      throw new UserConflictError(
+        'Voce nao pode remover o proprio acesso de administracao de usuarios.',
+      )
+    }
 
     await client.query(
       `update users set
@@ -402,7 +521,7 @@ export async function updateTenantUser(
         userId,
         input.email.trim().toLowerCase(),
         input.name.trim(),
-        input.avatar || null,
+        nextAvatar,
         current.status === 'invited' && Boolean(input.password),
       ],
     )
@@ -422,8 +541,8 @@ export async function updateTenantUser(
         userId,
         role.rows[0].id,
         nextMembershipStatus,
-        input.profile || profileFromRoleKey(roleKey),
-        JSON.stringify(normalizePermissionPatch(input.permissions)),
+        targetProfile,
+        JSON.stringify(permissionPatch),
         Boolean(input.corporateAccess),
         input.companyId || null,
         uniqueStrings(input.companyIds || []),
@@ -545,7 +664,8 @@ function userSelect(): string {
     coalesce((
       select jsonb_object_agg(rp.permission_key, rp.allowed)
       from role_permissions rp where rp.role_id = r.id
-    ), '{}'::jsonb) || m.custom_permissions as permissions
+    ), '{}'::jsonb) || m.custom_permissions as permissions,
+    m.custom_permissions as permission_overrides
   from tenant_memberships m
   join users u on u.id = m.user_id
   join user_credentials c on c.user_id = u.id
@@ -592,6 +712,7 @@ function rowToUser(
     perfil_bbt: profile,
     corporate_profile: row.corporate_profile || undefined,
     permissoes: permissions,
+    permission_overrides: normalizePermissionOverrides(row.permission_overrides),
     avatar: row.avatar_url || undefined,
     ativo: row.status === 'active' && row.membership_status === 'active',
     status: effectiveUserStatus(row.status, row.membership_status),
@@ -688,9 +809,16 @@ function normalizePermissions(value: Record<string, unknown> | null, profile: Pe
   ])) as unknown as Permissoes
 }
 
-function normalizePermissionPatch(value: Partial<Permissoes> | undefined): Record<string, boolean> {
-  if (!value) return {}
-  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean'))
+function normalizePermissionPatch(
+  value: Partial<Permissoes> | undefined,
+  base?: Permissoes,
+): Record<string, boolean> {
+  const normalized = normalizePermissionOverrides(value)
+  if (!base) return normalized as Record<string, boolean>
+  return permissionOverridesFromEffective(
+    base,
+    applyPermissionOverrides(base, normalized),
+  ) as Record<string, boolean>
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -732,8 +860,28 @@ function assertLegacyUserMutationAllowed(principal: RequestPrincipal, input: Use
   )
 }
 
+function assertMembershipPermissionOverridesAllowed(
+  principal: RequestPrincipal,
+  permissions: Partial<Permissoes> | undefined,
+): void {
+  if (
+    isTenantAccessAdministrator(principal)
+    || Object.keys(normalizePermissionOverrides(permissions)).length === 0
+  ) return
+  throw new CorporateAccessDeniedError(
+    'MEMBERSHIP_PERMISSION_DELEGATION_DENIED',
+    'Administradores corporativos devem personalizar somente as permissoes dos vinculos delegados.',
+  )
+}
+
 function isTenantAccessAdministrator(principal: RequestPrincipal): boolean {
-  return principal.platformAdmin || principal.roleKey === 'tenant_admin'
+  if (principal.platformAdmin) return true
+  if (!Object.prototype.hasOwnProperty.call(INTERNAL_PROFILE_BY_ROLE_KEY, principal.roleKey)) return false
+  if (principal.roleKey !== 'tenant_admin' && principal.corporateAccess?.tenantWide !== true) return false
+  return Boolean(
+    principal.user.permissoes?.gerenciar_usuarios
+    && principal.user.permissoes?.gerenciar_vinculos_acesso,
+  )
 }
 
 function userVisibilityParameters(
@@ -743,7 +891,8 @@ function userVisibilityParameters(
   const companyIds = principalCompanyIdsForScope(principal, scope)
   return [
     principal.tenantId,
-    isTenantAccessAdministrator(principal) || Boolean(principal.corporateAccess?.tenantWide),
+    isTenantAccessAdministrator(principal)
+      || (scope === 'visible' && Boolean(principal.corporateAccess?.tenantWide)),
     principal.user.id,
     companyIds,
   ]

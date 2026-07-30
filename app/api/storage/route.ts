@@ -11,6 +11,7 @@ import {
 import { guardApiRequest, runInApiGuardContext } from '@/lib/security/api-guard'
 import { readJsonBody, requestBodyErrorResponse } from '@/lib/security/request-body'
 import {
+  hasAcceptedStorageMutation,
   isRestrictedStorageUser,
   scopeStorageEntriesForRead,
   scopeStorageEntriesForWrite,
@@ -118,12 +119,26 @@ export async function PUT(request: Request) {
         ),
       )
       const policyRejectedKeys = policy.rejected.map((item) => item.key)
-      const rejectedKeys = Array.from(new Set([...staleClearKeys, ...policyRejectedKeys]))
-      const rejectedKeySet = new Set(rejectedKeys)
+      const initiallyRejectedKeys = Array.from(new Set([...staleClearKeys, ...policyRejectedKeys]))
+      const rejectedKeySet = new Set(initiallyRejectedKeys)
       const acceptedEntries = Object.fromEntries(
         Object.entries(policy.accepted).filter(([key]) => !rejectedKeySet.has(key)),
       )
-      const allowedEntries = scopeStorageEntriesForWrite(acceptedEntries, existingEntries, guard.user)
+      const scopedEntries = scopeStorageEntriesForWrite(acceptedEntries, existingEntries, guard.user)
+      const scopeRejectedKeys = Object.keys(acceptedEntries).filter(
+        (key) => (
+          !Object.prototype.hasOwnProperty.call(scopedEntries, key)
+          || (
+            hasAcceptedStorageMutation(key, acceptedEntries[key], existingEntries[key])
+            && !hasAcceptedStorageMutation(key, scopedEntries[key], existingEntries[key])
+          )
+        ),
+      )
+      const rejectedKeys = Array.from(new Set([...initiallyRejectedKeys, ...scopeRejectedKeys]))
+      const scopeRejectedKeySet = new Set(scopeRejectedKeys)
+      const allowedEntries = Object.fromEntries(
+        Object.entries(scopedEntries).filter(([key]) => !scopeRejectedKeySet.has(key)),
+      )
       const saved = await setStorageEntries(allowedEntries)
       const mergedEntries: Record<string, unknown> = {}
       const storageEntries = saved > 0 ? await getStorageEntries() : existingEntries
@@ -131,10 +146,10 @@ export async function PUT(request: Request) {
       for (const key of Object.keys(allowedEntries)) {
         if (Object.prototype.hasOwnProperty.call(visibleEntries, key)) mergedEntries[key] = visibleEntries[key]
       }
-      if (saved > 0 || policy.rejected.length > 0) {
+      if (saved > 0 || rejectedKeys.length > 0) {
         await writeAuditEvent({
-          action: policy.rejected.length > 0 ? 'storage.batch_write_restricted' : 'storage.batch_write',
-          result: policy.rejected.length > 0 ? 'denied' : 'success',
+          action: rejectedKeys.length > 0 ? 'storage.batch_write_restricted' : 'storage.batch_write',
+          result: rejectedKeys.length > 0 ? 'denied' : 'success',
           entityType: 'tenant_storage',
           metadata: {
             keys: Object.keys(allowedEntries).sort(),

@@ -447,6 +447,7 @@ export interface User {
   grupo_ids?: string[]
   perfil_bbt?: PerfilBBT
   permissoes?: Permissoes
+  permission_overrides?: Partial<Permissoes>
   corporate_profile?: CorporateProfile
   corporate_access?: CorporateAccessSummary
   avatar?: string

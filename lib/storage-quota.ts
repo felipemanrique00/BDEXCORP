@@ -24,6 +24,12 @@ type JsonValue = any
 
 type RemoteEntries = Record<string, JsonValue>
 
+export interface RemoteStorageFlushResult {
+  confirmed: boolean
+  fullyAccepted: boolean
+  rejectedKeys: string[]
+}
+
 const STORAGE_API = '/api/storage'
 const REMOTE_SYNC_DEBOUNCE_MS = 450
 const REMOTE_HYDRATE_TIMEOUT_MS = 3500
@@ -312,6 +318,17 @@ export async function flushPendingRemoteStorage(): Promise<boolean> {
   return flushRemoteStorage()
 }
 
+export async function flushPendingRemoteStorageWithResult(): Promise<RemoteStorageFlushResult> {
+  if (typeof window === 'undefined') {
+    return { confirmed: false, fullyAccepted: false, rejectedKeys: [] }
+  }
+  if (syncTimer) {
+    window.clearTimeout(syncTimer)
+    syncTimer = null
+  }
+  return flushRemoteStorageWithResult()
+}
+
 export async function commitPendingRemoteStorage(): Promise<void> {
   if (!await flushPendingRemoteStorage()) {
     throw new Error('Nao foi possivel confirmar a gravacao no servidor. Verifique a conexao e tente novamente.')
@@ -459,9 +476,17 @@ function scheduleRemoteFlush(delayMs = REMOTE_SYNC_DEBOUNCE_MS): void {
 }
 
 async function flushRemoteStorage(): Promise<boolean> {
-  if (typeof window === 'undefined') return false
+  return (await flushRemoteStorageWithResult()).confirmed
+}
+
+async function flushRemoteStorageWithResult(): Promise<RemoteStorageFlushResult> {
+  if (typeof window === 'undefined') {
+    return { confirmed: false, fullyAccepted: false, rejectedKeys: [] }
+  }
   const entries = pendingRemoteEntries
   const deletes = Array.from(pendingRemoteDeletes)
+  let entriesToRetry = entries
+  let rejectedKeys: string[] = []
   pendingRemoteEntries = {}
   pendingRemoteDeletes = new Set()
   syncTimer = null
@@ -477,7 +502,8 @@ async function flushRemoteStorage(): Promise<boolean> {
 
       const payload = await response.json().catch(() => null)
       await applyRemoteClearMetadata(payload?.metadata)
-      for (const key of normalizeRejectedKeys(payload?.rejectedKeys)) {
+      rejectedKeys = normalizeRejectedKeys(payload?.rejectedKeys)
+      for (const key of rejectedKeys) {
         if (Object.prototype.hasOwnProperty.call(pendingRemoteEntries, key)) continue
         if (pendingRemoteDeletes.has(key)) continue
         removeLocalOnly(key)
@@ -491,6 +517,7 @@ async function flushRemoteStorage(): Promise<boolean> {
         if (pendingRemoteDeletes.has(key)) continue
         writeLocalOnly(key, valueToRaw(value))
       }
+      entriesToRetry = {}
     }
     const effectiveDeletes = deletes.filter(
       (key) => !Object.prototype.hasOwnProperty.call(pendingRemoteEntries, key),
@@ -506,10 +533,14 @@ async function flushRemoteStorage(): Promise<boolean> {
       await applyRemoteClearMetadata(payload?.metadata)
     }
     remoteRetryDelayMs = 5_000
-    return true
+    return {
+      confirmed: true,
+      fullyAccepted: rejectedKeys.length === 0,
+      rejectedKeys,
+    }
   } catch (error) {
     reportClientFailure('shared_storage_flush_failed', error)
-    for (const [key, value] of Object.entries(entries)) {
+    for (const [key, value] of Object.entries(entriesToRetry)) {
       pendingRemoteEntries[key] = Object.prototype.hasOwnProperty.call(pendingRemoteEntries, key)
         ? combineStorageSyncValues(key, value, pendingRemoteEntries[key])
         : value
@@ -519,7 +550,7 @@ async function flushRemoteStorage(): Promise<boolean> {
     })
     scheduleRemoteFlush(remoteRetryDelayMs)
     remoteRetryDelayMs = Math.min(remoteRetryDelayMs * 2, 30_000)
-    return false
+    return { confirmed: false, fullyAccepted: false, rejectedKeys }
   }
 }
 

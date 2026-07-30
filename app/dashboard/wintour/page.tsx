@@ -172,7 +172,7 @@ export default function WintourPage() {
   const [emissorMap, setEmissorMap] = useState<Record<string, WintourEmissorMap>>(() => getWintourEmissorMap())
   const [emissorSavingCode, setEmissorSavingCode] = useState<string | null>(null)
 
-  const podeImportar = !user || hasPermission(user, 'importar_planilhas') || hasPermission(user, 'gerenciar_usuarios')
+  const podeImportar = !user || hasPermission(user, 'importar_planilhas')
   const agentesBBT = useMemo(() => getAgentesBBT(), [])
   const emissoresDetectados = useMemo(() => {
     const byCodigo = new Map<string, { codigo: string; nome: string; qtd: number }>()

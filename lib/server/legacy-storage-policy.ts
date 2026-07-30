@@ -46,12 +46,14 @@ const DOMAIN_WRITE_PERMISSIONS: Record<string, Array<keyof Permissoes>> = {
   assistant: ['gerenciar_ia'],
   corporate_directory: [
     'cadastrar_empresas',
+    'gerenciar_empresas_grupo',
+    'alterar_configuracoes',
     'cadastrar_funcionarios',
     'gerenciar_funcionarios',
     'cadastrar_hoteis',
     'editar_politicas',
   ],
-  demands: ['criar_demandas', 'importar_planilhas'],
+  demands: ['criar_demandas', 'excluir_demandas', 'importar_planilhas'],
   emissions: ['operar_emissoes', 'importar_planilhas'],
   finance: ['editar_financeiro'],
   imports: ['importar_planilhas', 'gerenciar_integracoes'],
@@ -138,7 +140,7 @@ export function evaluateLegacyStorageWrite(
 }
 
 function canWriteLegacyDomain(principal: RequestPrincipal, domain: string): boolean {
-  if (principal.platformAdmin || principal.roleKey === 'tenant_admin') return true
+  if (principal.platformAdmin) return true
   const required = DOMAIN_WRITE_PERMISSIONS[domain]
   if (!required?.length) return false
   if (required.some((permission) => principal.user.permissoes?.[permission])) return true
