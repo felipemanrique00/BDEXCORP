@@ -59,7 +59,7 @@ async function walk(directory) {
 
 function isForbiddenEnvironmentFile(path) {
   const name = path.split('/').at(-1) || ''
-  return name.startsWith('.env') && name !== '.env.example'
+  return name.startsWith('.env') && !name.endsWith('.example')
 }
 
 async function readTrackedFiles(directory) {
