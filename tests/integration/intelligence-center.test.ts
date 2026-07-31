@@ -174,6 +174,18 @@ describeWithDatabase('PostgreSQL intelligence center', () => {
       accessModes: ['selected_companies'],
       profiles: ['manager'],
     }]
+    groupedPrincipal.corporateAccess!.groupIds = ['group-intelligence']
+    groupedPrincipal.corporateAccess!.contexts = [
+      {
+        type: 'group',
+        id: 'group-intelligence',
+        label: 'Intelligence Group',
+        groupId: 'group-intelligence',
+        companyIds: [companyA, companyB],
+        canViewConsolidated: true,
+      },
+      ...groupedPrincipal.corporateAccess!.contexts,
+    ]
     const groupScope = await getIntelligenceOverview(groupedPrincipal, {
       startDate: '2025-01-01',
       endDate: '2025-01-31',

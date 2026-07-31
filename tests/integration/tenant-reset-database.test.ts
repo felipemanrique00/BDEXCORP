@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { closeDatabasePool } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import { resetTenantBusinessData } from '@/lib/server/system-reset-service'
+import { TENANT_BUSINESS_RESET_TABLES } from '@/lib/system-reset-policy'
 import { PERMISSOES_PADRAO_POR_PERFIL } from '@/types'
 import { testDatabaseUrl } from '../support/test-database'
 
@@ -83,7 +84,7 @@ describeWithDatabase('PostgreSQL tenant reset', () => {
 
   it('clears all business tables and preserves tenant identity records', async () => {
     const result = await resetTenantBusinessData(principal)
-    expect(result.clearedTables).toBe(139)
+    expect(result.clearedTables).toBe(TENANT_BUSINESS_RESET_TABLES.length)
     expect(result.deletedRecords).toBeGreaterThanOrEqual(5)
 
     const state = await tenantTransaction(pool, tenantId, async (client) => {
