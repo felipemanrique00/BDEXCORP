@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import { buildSidebarMenu } from '@/lib/navigation'
-import { PERMISSOES_PADRAO_POR_PERFIL, type Permissoes, type User } from '@/types'
+import {
+  PERMISSOES_PADRAO_POR_PERFIL,
+  type PerfilBBT,
+  type Permissoes,
+  type User,
+} from '@/types'
 
 function corporateUser(permissions: Partial<Permissoes>): User {
   const denied = Object.fromEntries(
@@ -18,6 +23,30 @@ function corporateUser(permissions: Partial<Permissoes>): User {
     permissoes: {
       ...denied,
       ...permissions,
+    },
+  }
+}
+
+function internalUser(profile: PerfilBBT, overrides: Partial<Permissoes> = {}): User {
+  const roleKeys: Record<PerfilBBT, string> = {
+    lider: 'tenant_admin',
+    supervisor: 'supervisor',
+    agente: 'agent',
+    gestor_financeiro: 'financial_manager',
+    operacional: 'operator',
+  }
+  return {
+    id: `internal-${profile}`,
+    email: `${profile}@test.invalid`,
+    name: profile,
+    role: 'master',
+    role_key: roleKeys[profile],
+    company_id: null,
+    perfil_bbt: profile,
+    ativo: true,
+    permissoes: {
+      ...PERMISSOES_PADRAO_POR_PERFIL[profile],
+      ...overrides,
     },
   }
 }
@@ -67,5 +96,73 @@ describe('menu por permissao efetiva', () => {
       .toContain('/dashboard/minha-viagem')
     expect(visibleRoutes(corporateUser({ acessar_portal_viajante: false })))
       .not.toContain('/dashboard/minha-viagem')
+  })
+
+  it.each([
+    'lider',
+    'supervisor',
+    'agente',
+    'gestor_financeiro',
+    'operacional',
+  ] as PerfilBBT[])('mantem a consulta de empresas visivel para o perfil interno %s', (profile) => {
+    expect(visibleRoutes(internalUser(profile))).toContain('/dashboard/empresas')
+  })
+
+  it('restringe administracao de usuarios e grupos aos perfis com a permissao correspondente', () => {
+    expect(visibleRoutes(internalUser('lider'))).toEqual(expect.arrayContaining([
+      '/dashboard/usuarios',
+      '/dashboard/grupos',
+    ]))
+
+    for (const profile of ['supervisor', 'agente', 'gestor_financeiro', 'operacional'] as PerfilBBT[]) {
+      expect(visibleRoutes(internalUser(profile))).not.toContain('/dashboard/usuarios')
+      expect(visibleRoutes(internalUser(profile))).not.toContain('/dashboard/grupos')
+    }
+  })
+
+  it('nao transforma uma permissao interna isolada em administracao integral do tenant', () => {
+    expect(visibleRoutes(internalUser('supervisor', { gerenciar_usuarios: true })))
+      .not.toContain('/dashboard/usuarios')
+    expect(visibleRoutes(internalUser('operacional', { gerenciar_vinculos_acesso: true })))
+      .not.toContain('/dashboard/usuarios')
+    expect(visibleRoutes(internalUser('supervisor', {
+      gerenciar_usuarios: true,
+      gerenciar_vinculos_acesso: true,
+    }))).toContain('/dashboard/usuarios')
+  })
+
+  it.each([
+    'lider',
+    'supervisor',
+    'gestor_financeiro',
+  ] as PerfilBBT[])('exibe auditoria para o perfil interno autorizado %s', (profile) => {
+    expect(visibleRoutes(internalUser(profile))).toContain('/dashboard/auditoria')
+  })
+
+  it.each([
+    'agente',
+    'operacional',
+  ] as PerfilBBT[])('oculta auditoria do perfil interno sem permissao %s', (profile) => {
+    expect(visibleRoutes(internalUser(profile))).not.toContain('/dashboard/auditoria')
+  })
+
+  it('respeita concessao e revogacao personalizadas de auditoria somente na equipe interna', () => {
+    expect(visibleRoutes(internalUser('supervisor', { ver_auditoria: false })))
+      .not.toContain('/dashboard/auditoria')
+    expect(visibleRoutes(internalUser('operacional', { ver_auditoria: true })))
+      .toContain('/dashboard/auditoria')
+    expect(visibleRoutes(corporateUser({ ver_auditoria: true })))
+      .not.toContain('/dashboard/auditoria')
+  })
+
+  it('nao usa gerenciar_usuarios para reabrir financeiro ou importacoes revogados', () => {
+    const routes = visibleRoutes(internalUser('lider', {
+      ver_financeiro: false,
+      importar_planilhas: false,
+    }))
+
+    expect(routes.filter((route) => route.startsWith('/dashboard/financeiro'))).toEqual([])
+    expect(routes).not.toContain('/dashboard/wintour')
+    expect(routes).not.toContain('/dashboard/importar')
   })
 })

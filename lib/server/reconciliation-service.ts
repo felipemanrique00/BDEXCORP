@@ -29,11 +29,11 @@ import { writeAuditEvent } from '@/lib/server/audit-log'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import { relationalPriorityToLegacy } from '@/lib/travel/legacy-demand'
 import type {
   Atendimento,
   Empresa,
   Funcionario,
-  Prioridade,
   StatusAtendimento,
   TipoServico,
 } from '@/types'
@@ -820,7 +820,7 @@ function mapDemand(row: DemandRow): Atendimento {
     valor_final: numeric(row.final_amount),
     agente_user_id: '',
     status: normalizeStatus(row.status),
-    prioridade: normalizePriority(row.priority),
+    prioridade: relationalPriorityToLegacy(row.priority),
     observacoes: '',
     data_atendimento: dateOnly(row.created_at) || '',
     created_at: toIso(row.created_at),
@@ -913,14 +913,6 @@ function normalizeStatus(value: string): StatusAtendimento {
   if (['aguardando_cliente', 'waiting_customer'].includes(normalized)) return 'aguardando_cliente'
   if (['pendente', 'pending', 'draft'].includes(normalized)) return 'pendente'
   return 'em_andamento'
-}
-
-function normalizePriority(value: string): Prioridade {
-  const normalized = value.toLowerCase()
-  if (['urgent', 'urgente'].includes(normalized)) return 'urgente'
-  if (['high', 'alta'].includes(normalized)) return 'alta'
-  if (['low', 'baixa'].includes(normalized)) return 'baixa'
-  return 'media'
 }
 
 function employeeRole(value: string | null): Funcionario['cargo'] {

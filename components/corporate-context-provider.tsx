@@ -10,12 +10,30 @@ import {
 } from 'react'
 import { toast } from 'sonner'
 
+import { hasCompanyScopeAccess } from '@/lib/corporate-company-scope'
+import {
+  canSelectAllCompanies,
+  contextForCompanySelection,
+  corporateSelectionLabel,
+  createCorporateViewSelection,
+  defaultCorporateViewSelection,
+  reconcileCorporateViewSelection,
+  selectedCompanyIdsForSelection,
+  type CorporateViewSelection,
+} from '@/lib/corporate-context-selection'
 import type { CorporateAccessSummary, CorporateContextOption, Permissoes, User } from '@/types'
 
 interface CorporateContextState {
+  user: User
   access: CorporateAccessSummary | null
   context: CorporateContextOption | null
+  selectedCompanyIds: string[]
+  selectionLabel: string
+  isAllCompaniesSelected: boolean
+  canSelectAll: boolean
   isChanging: boolean
+  selectCompanyIds: (companyIds: string[]) => boolean
+  selectAllCompanies: () => boolean
   selectContext: (type: 'company' | 'group', id: string) => Promise<void>
   refreshAccess: () => Promise<void>
 }
@@ -33,29 +51,78 @@ export const CORPORATE_CONTEXT_CHANGED_EVENT = 'bbt-corporate-context-changed'
 
 export function CorporateContextProvider({ children, user }: { children: React.ReactNode; user: User }) {
   const [access, setAccess] = useState<CorporateAccessSummary | null>(user.corporate_access || null)
-  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [selection, setSelection] = useState<CorporateViewSelection>(
+    () => defaultCorporateViewSelection(user.corporate_access),
+  )
   const [isChanging, setIsChanging] = useState(false)
-  const storageKey = `bbt-corporate-context-v1:${user.tenant_id || 'tenant'}:${user.id}`
+  const ownerKey = `${user.tenant_id || 'tenant'}:${user.id}`
+  const [selectionOwnerKey, setSelectionOwnerKey] = useState(ownerKey)
 
   useEffect(() => {
-    setAccess(user.corporate_access || null)
-  }, [user.corporate_access])
+    const nextAccess = user.corporate_access || null
+    setAccess(nextAccess)
+    setSelection((current) => (
+      selectionOwnerKey === ownerKey
+        ? reconcileCorporateViewSelection(nextAccess, current)
+        : defaultCorporateViewSelection(nextAccess)
+    ))
+    if (selectionOwnerKey !== ownerKey) setSelectionOwnerKey(ownerKey)
+  }, [ownerKey, selectionOwnerKey, user.corporate_access])
 
-  useEffect(() => {
-    const currentAccess = user.corporate_access
-    if (!currentAccess) {
-      setSelectedKey(null)
-      return
-    }
-    const stored = readStoredKey(storageKey)
-    const preferred = contextByKey(currentAccess, stored) || contextByReference(currentAccess, currentAccess.defaultContext)
-    setSelectedKey(contextKey(preferred || currentAccess.contexts[0] || null))
-  }, [storageKey, user.corporate_access])
+  const selectedCompanyIds = useMemo(
+    () => selectedCompanyIdsForSelection(access, selection),
+    [access, selection],
+  )
 
   const context = useMemo(
-    () => contextByKey(access, selectedKey) || contextByReference(access, access?.defaultContext) || access?.contexts[0] || null,
-    [access, selectedKey],
+    () => contextForCompanySelection(access, selectedCompanyIds),
+    [access, selectedCompanyIds],
   )
+  const selectionLabel = useMemo(
+    () => corporateSelectionLabel(access, selectedCompanyIds),
+    [access, selectedCompanyIds],
+  )
+  const isAllCompaniesSelected = Boolean(
+    access
+    && selectedCompanyIds.length === access.companyIds.length
+    && access.companyIds.every((companyId) => selectedCompanyIds.includes(companyId)),
+  )
+  const canSelectAll = canSelectAllCompanies(access)
+
+  const notifySelectionChange = useCallback((nextAccess: CorporateAccessSummary | null, nextSelection: CorporateViewSelection) => {
+    if (typeof window === 'undefined') return
+    const companyIds = selectedCompanyIdsForSelection(nextAccess, nextSelection)
+    window.dispatchEvent(new CustomEvent(CORPORATE_CONTEXT_CHANGED_EVENT, {
+      detail: {
+        context: contextForCompanySelection(nextAccess, companyIds),
+        companyIds,
+      },
+    }))
+  }, [])
+
+  const selectCompanyIds = useCallback((companyIds: string[]): boolean => {
+    const next = createCorporateViewSelection(access, companyIds)
+    if (!next) {
+      toast.error(companyIds.length === 0
+        ? 'Selecione pelo menos uma empresa.'
+        : 'Esta combinacao de empresas nao possui visao consolidada autorizada.')
+      return false
+    }
+    setSelection(next)
+    notifySelectionChange(access, next)
+    return true
+  }, [access, notifySelectionChange])
+
+  const selectAllCompanies = useCallback((): boolean => {
+    if (!access || !canSelectAllCompanies(access)) {
+      toast.error('A visao consolidada de todas as empresas nao esta autorizada.')
+      return false
+    }
+    const next: CorporateViewSelection = { mode: 'all', companyIds: [] }
+    setSelection(next)
+    notifySelectionChange(access, next)
+    return true
+  }, [access, notifySelectionChange])
 
   const refreshAccess = useCallback(async () => {
     const response = await fetch('/api/me/corporate-contexts', { cache: 'no-store' })
@@ -63,27 +130,23 @@ export function CorporateContextProvider({ children, user }: { children: React.R
     if (!response.ok || !payload?.access) throw new Error(payload?.error || 'Falha ao atualizar o escopo corporativo.')
     const next = payload.access as CorporateAccessSummary
     setAccess(next)
-    const stored = readStoredKey(storageKey)
-    const valid = contextByKey(next, stored) || contextByReference(next, next.defaultContext) || next.contexts[0] || null
-    const validKey = contextKey(valid)
-    setSelectedKey(validKey)
-    writeStoredKey(storageKey, validKey)
-    window.dispatchEvent(new CustomEvent(CORPORATE_CONTEXT_CHANGED_EVENT, { detail: valid }))
-  }, [storageKey])
+    setSelection((current) => {
+      const reconciled = reconcileCorporateViewSelection(next, current)
+      notifySelectionChange(next, reconciled)
+      return reconciled
+    })
+  }, [notifySelectionChange])
 
   const selectContext = useCallback(async (type: 'company' | 'group', id: string) => {
     const next = access?.contexts.find((item) => item.type === type && item.id === id)
-    if (!next || contextKey(next) === selectedKey || isChanging) return
+    if (!next || isChanging) return
 
-    const previous = contextByKey(access, selectedKey)
-      || contextByReference(access, access?.defaultContext)
-      || access?.contexts[0]
-      || null
-    const nextKey = contextKey(next)
+    const previousSelection = selection
+    const nextSelection = createCorporateViewSelection(access, next.companyIds)
+    if (!nextSelection) return
     setIsChanging(true)
-    setSelectedKey(nextKey)
-    writeStoredKey(storageKey, nextKey)
-    window.dispatchEvent(new CustomEvent(CORPORATE_CONTEXT_CHANGED_EVENT, { detail: next }))
+    setSelection(nextSelection)
+    notifySelectionChange(access, nextSelection)
 
     try {
       const response = await fetch('/api/me/corporate-contexts', {
@@ -97,16 +160,14 @@ export function CorporateContextProvider({ children, user }: { children: React.R
       try {
         await refreshAccess()
       } catch {
-        const previousKey = contextKey(previous)
-        setSelectedKey(previousKey)
-        writeStoredKey(storageKey, previousKey)
-        window.dispatchEvent(new CustomEvent(CORPORATE_CONTEXT_CHANGED_EVENT, { detail: previous }))
+        setSelection(previousSelection)
+        notifySelectionChange(access, previousSelection)
       }
       toast.error(error instanceof Error ? error.message : 'Nao foi possivel alterar o contexto corporativo.')
     } finally {
       setIsChanging(false)
     }
-  }, [access, isChanging, refreshAccess, selectedKey, storageKey])
+  }, [access, isChanging, notifySelectionChange, refreshAccess, selection])
 
   useEffect(() => {
     const refreshWhenVisible = () => {
@@ -121,7 +182,20 @@ export function CorporateContextProvider({ children, user }: { children: React.R
   }, [refreshAccess])
 
   return (
-    <CorporateContext.Provider value={{ access, context, isChanging, selectContext, refreshAccess }}>
+    <CorporateContext.Provider value={{
+      user,
+      access,
+      context,
+      selectedCompanyIds,
+      selectionLabel,
+      isAllCompaniesSelected,
+      canSelectAll,
+      isChanging,
+      selectCompanyIds,
+      selectAllCompanies,
+      selectContext,
+      refreshAccess,
+    }}>
       {children}
     </CorporateContext.Provider>
   )
@@ -134,62 +208,22 @@ export function useCorporateContext(): CorporateContextState {
 }
 
 export function useCorporateCompanyScope(): CorporateCompanyScope {
-  const { access, context } = useCorporateContext()
-  const companyIdsList = useMemo(
-    () => context?.companyIds || access?.companyIds || [],
-    [access?.companyIds, context?.companyIds],
-  )
+  const { user, access, selectedCompanyIds } = useCorporateContext()
+  const companyIdsList = selectedCompanyIds
   const companyIds = useMemo(
     () => access ? new Set(companyIdsList) : null,
     [access, companyIdsList],
   )
   const includesCompany = useCallback(
-    (companyId: string | null | undefined, permission?: keyof Permissoes) => {
-      if (!companyIds) return true
-      if (!companyId || !companyIds.has(companyId)) return false
-      if (!permission) return true
-      return Boolean(access?.companies.find((company) => company.companyId === companyId)?.permissions[permission])
-    },
-    [access, companyIds],
+    (companyId: string | null | undefined, permission?: keyof Permissoes) => (
+      hasCompanyScopeAccess(user, access, companyIds, companyId, permission)
+    ),
+    [access, companyIds, user],
   )
   return {
     companyIds,
     companyIdsList,
-    isConsolidated: context?.type === 'group',
+    isConsolidated: companyIdsList.length > 1,
     includesCompany,
-  }
-}
-
-function contextByKey(access: CorporateAccessSummary | null | undefined, key: string | null): CorporateContextOption | null {
-  if (!access || !key) return null
-  return access.contexts.find((context) => contextKey(context) === key) || null
-}
-
-function contextByReference(
-  access: CorporateAccessSummary | null | undefined,
-  reference: { type: 'company' | 'group'; id: string } | null | undefined,
-): CorporateContextOption | null {
-  if (!access || !reference) return null
-  return access.contexts.find((context) => context.type === reference.type && context.id === reference.id) || null
-}
-
-function contextKey(context: Pick<CorporateContextOption, 'type' | 'id'> | null): string | null {
-  return context ? `${context.type}:${context.id}` : null
-}
-
-function readStoredKey(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key)
-  } catch {
-    return null
-  }
-}
-
-function writeStoredKey(key: string, value: string | null): void {
-  try {
-    if (value) window.localStorage.setItem(key, value)
-    else window.localStorage.removeItem(key)
-  } catch {
-    // A preferencia local e opcional; a autorizacao permanece no servidor.
   }
 }

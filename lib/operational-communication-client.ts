@@ -4,6 +4,7 @@ import type {
   OperationalCommunicationOverview,
   TravelDeskNote,
 } from '@/lib/operational-communications'
+import { appendCompanyIdsQuery } from '@/lib/company-selection-query'
 
 const Endpoint = '/api/operations/communications'
 
@@ -11,6 +12,7 @@ export async function loadOperationalCommunicationOverview(filters: {
   startDate: string
   endDate: string
   companyId?: string
+  companyIds?: string[]
   groupId?: string
   serviceType?: string
 }): Promise<OperationalCommunicationOverview> {
@@ -19,6 +21,7 @@ export async function loadOperationalCommunicationOverview(filters: {
     endDate: filters.endDate,
   })
   if (filters.companyId) query.set('companyId', filters.companyId)
+  appendCompanyIdsQuery(query, filters.companyIds)
   if (filters.groupId) query.set('groupId', filters.groupId)
   if (filters.serviceType) query.set('serviceType', filters.serviceType)
   const payload = await request(`${Endpoint}?${query.toString()}`, {

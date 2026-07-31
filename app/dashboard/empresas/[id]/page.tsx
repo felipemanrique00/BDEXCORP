@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useStore } from '@/lib/store'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import { canAccessCompanyPermission, canManageUserAccess, getCurrentUser } from '@/lib/auth'
 import { formatDate, maskPhone, formatCurrency, maskCPF } from '@/lib/utils'
 import { WhatsAppButton } from '@/components/ui/whatsapp-button'
 import {
@@ -17,6 +18,7 @@ import { Modal } from '@/components/ui/modal'
 import { toast } from 'sonner'
 import { PoliticaModal } from '@/components/ui/politica-modal'
 import { SolicitantesEmpresaTab } from '@/components/empresas/solicitantes-empresa-tab'
+import { CostCentersCompanyTab } from '@/components/empresas/cost-centers-company-tab'
 import { getEmissoesByEmpresa, getRankingHoteisByEmpresa, type Emissao } from '@/lib/emissoes-storage'
 import { loadManualHotelBookingsFromServer } from '@/lib/manual-hotel-booking-client'
 import { getEstatisticas, getAtendimentosByEmpresa, getEstatisticasPorTipo } from '@/lib/atendimentos-storage'
@@ -40,7 +42,7 @@ const ImportarEmpresaModal = dynamic(
   { ssr: false },
 )
 
-type Tab = 'dados' | 'funcionarios' | 'politicas' | 'emissoes' | 'atendimentos' | 'solicitantes'
+type Tab = 'dados' | 'funcionarios' | 'politicas' | 'emissoes' | 'atendimentos' | 'solicitantes' | 'centros_custo'
 
 export default function EmpresaDetalhePage() {
   const { id } = useParams<{ id: string }>()
@@ -48,7 +50,8 @@ export default function EmpresaDetalhePage() {
   const { includesCompany } = useCorporateCompanyScope()
   const [tab, setTab] = useState<Tab>('dados')
 
-  const { empresas, funcionarios, politicas, updatePolitica, addPolitica } = useStore()
+  const { empresas, funcionarios, politicas, gruposEmpresariais, updatePolitica, addPolitica } = useStore()
+  const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const empresa = empresas.find((e) => e.id === id)
   const funcs = funcionarios.filter((f) => f.company_id === id)
   const pols = politicas.filter((p) => p.company_id === id)
@@ -57,6 +60,23 @@ export default function EmpresaDetalhePage() {
   const canManageEmployees = includesCompany(id, 'gerenciar_funcionarios')
   const canViewRequesters = includesCompany(id, 'ver_solicitantes')
   const canManageRequesters = includesCompany(id, 'gerenciar_solicitantes')
+  const canViewCostCenters = includesCompany(id, 'ver_centros_custo')
+  const canManageCostCenters = includesCompany(id, 'gerenciar_centros_custo')
+  const canManageRequesterLogins = canManageUserAccess(user)
+    && canAccessCompanyPermission(
+      user,
+      id,
+      'gerenciar_usuarios',
+      empresas,
+      gruposEmpresariais,
+    )
+    && canAccessCompanyPermission(
+      user,
+      id,
+      'gerenciar_vinculos_acesso',
+      empresas,
+      gruposEmpresariais,
+    )
   const canEditPolicies = includesCompany(id, 'editar_politicas')
   const canViewDemands = includesCompany(id, 'ver_demandas')
   const canViewEmissions = includesCompany(id, 'ver_emissoes')
@@ -90,6 +110,7 @@ export default function EmpresaDetalhePage() {
     { id: 'dados', label: 'Dados', icon: Building2 },
     ...(canViewEmployees ? [{ id: 'funcionarios' as const, label: 'Funcionários', icon: Users, count: funcs.length }] : []),
     ...(canViewRequesters ? [{ id: 'solicitantes' as const, label: 'Acessos', icon: UserRound, count: getSolicitantesPorEmpresa(id).length }] : []),
+    ...(canViewCostCenters ? [{ id: 'centros_custo' as const, label: 'Centros de custo', icon: DollarSign }] : []),
     { id: 'politicas', label: 'Políticas', icon: Briefcase },
     ...(canViewDemands ? [{ id: 'atendimentos' as const, label: 'Atendimentos', icon: BarChart3 }] : []),
     ...(canViewEmissions ? [{ id: 'emissoes' as const, label: 'Hotéis Emitidos', icon: FileText }] : []),
@@ -187,7 +208,20 @@ export default function EmpresaDetalhePage() {
       )}
 
       {tab === 'solicitantes' && (
-        <SolicitantesEmpresaTab empresa={empresa} funcionarios={funcionarios} canEdit={canManageRequesters} />
+        <SolicitantesEmpresaTab
+          empresa={empresa}
+          funcionarios={funcionarios}
+          canEdit={canManageRequesters}
+          canManageLogins={canManageRequesterLogins}
+        />
+      )}
+
+      {canViewCostCenters && tab === 'centros_custo' && (
+        <CostCentersCompanyTab
+          companyId={empresa.id}
+          companyName={empresa.nome}
+          canManage={canManageCostCenters}
+        />
       )}
 
       {tab === 'politicas' && (

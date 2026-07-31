@@ -3,12 +3,14 @@
 import { addDaysISODate, todayISODate } from '@/lib/date'
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '@/lib/store'
-import { canEditGlobal, getCurrentUser } from '@/lib/auth'
+import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { getEmpresasDoGrupo } from '@/lib/grupos'
 import { montarMetricasRelatorio } from '@/lib/relatorios'
+import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
 import { formatCurrency } from '@/lib/utils'
 import type { Empresa, Funcionario, GrupoEmpresarial } from '@/types'
+import { useCorporateContext } from '@/components/corporate-context-provider'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { SearchInput } from '@/components/ui/search-input'
@@ -19,7 +21,8 @@ import Link from 'next/link'
 
 export default function GruposEmpresariaisPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeGerenciar = canEditGlobal(user)
+  const podeGerenciar = hasPermission(user, 'gerenciar_empresas_grupo')
+  const { refreshAccess } = useCorporateContext()
   const {
     empresas,
     funcionarios,
@@ -61,6 +64,21 @@ export default function GruposEmpresariaisPage() {
     setModalOpen(true)
   }
 
+  async function sincronizarDiretorio(message: string) {
+    const result = await flushPendingRemoteStorageWithResult()
+    if (!result.confirmed) {
+      toast.error('Alteracao registrada, mas ainda nao sincronizada com o servidor. A sincronizacao sera repetida automaticamente.')
+      return
+    }
+    await refreshAccess().catch(() => undefined)
+    if (!result.fullyAccepted) {
+      toast.error('A alteração não foi aplicada porque seu acesso foi alterado ou não permite esta operação. Recarregando os dados autorizados.')
+      window.setTimeout(() => window.location.reload(), 900)
+      return
+    }
+    toast.success(message)
+  }
+
   function salvarGrupo(data: Partial<GrupoEmpresarial>) {
     if (!data.nome?.trim()) {
       toast.error('Informe o nome do grupo.')
@@ -68,8 +86,8 @@ export default function GruposEmpresariaisPage() {
     }
     if (editing) {
       updateGrupoEmpresarial(editing.id, data)
-      toast.success('Grupo atualizado.')
       setSelectedId(editing.id)
+      void sincronizarDiretorio('Grupo atualizado.')
     } else {
       const novo = addGrupoEmpresarial({
         nome: data.nome.trim(),
@@ -82,11 +100,21 @@ export default function GruposEmpresariaisPage() {
         empresa_ids: data.empresa_ids || [],
       })
       if (novo) {
-        toast.success('Grupo cadastrado.')
         setSelectedId(novo.id)
+        void sincronizarDiretorio('Grupo cadastrado.')
       }
     }
     setModalOpen(false)
+  }
+
+  function vincularEmpresa(empresaId: string, grupoId: string) {
+    vincularEmpresaGrupo(empresaId, grupoId)
+    void sincronizarDiretorio('Empresa vinculada.')
+  }
+
+  function desvincularEmpresa(empresaId: string) {
+    desvincularEmpresaGrupo(empresaId)
+    void sincronizarDiretorio('Empresa desvinculada.')
   }
 
   function abrirRelatorio(grupoId: string, visao: 'cliente' | 'agencia') {
@@ -192,8 +220,8 @@ export default function GruposEmpresariaisPage() {
               onExcluir={() => setConfirmDelete(grupoSelecionado)}
               onRelatorio={abrirRelatorio}
               onRelatorioEmpresa={abrirRelatorioEmpresa}
-              onVincular={vincularEmpresaGrupo}
-              onDesvincular={desvincularEmpresaGrupo}
+              onVincular={vincularEmpresa}
+              onDesvincular={desvincularEmpresa}
             />
           ) : (
             <div className="bbt-card p-8 text-center text-sm text-slate-400">Selecione ou cadastre um grupo.</div>
@@ -211,7 +239,7 @@ export default function GruposEmpresariaisPage() {
                       <div className="truncate text-sm font-semibold text-bbt-primary dark:text-white">{empresa.nome}</div>
                       <div className="text-xs text-slate-500">{empresa.cnpj}</div>
                     </div>
-                    <button onClick={() => { vincularEmpresaGrupo(empresa.id, grupoSelecionado.id); toast.success('Empresa vinculada.') }} className="bbt-button-ghost h-8 text-xs">
+                    <button onClick={() => vincularEmpresa(empresa.id, grupoSelecionado.id)} className="bbt-button-ghost h-8 text-xs">
                       Vincular
                     </button>
                   </div>
@@ -230,7 +258,7 @@ export default function GruposEmpresariaisPage() {
         onConfirm={() => {
           if (!confirmDelete) return
           deleteGrupoEmpresarial(confirmDelete.id)
-          toast.success('Grupo removido. Empresas foram desvinculadas.')
+          void sincronizarDiretorio('Grupo removido. Empresas foram desvinculadas.')
           setConfirmDelete(null)
           setSelectedId(null)
         }}
@@ -334,7 +362,7 @@ function GrupoDetalhe({
                       Interno
                     </button>
                     {podeGerenciar && (
-                      <button onClick={() => { onDesvincular(empresa.id); toast.success('Empresa desvinculada.') }} className="rounded-md p-2 text-slate-500 hover:bg-red-50 hover:text-red-600" title="Desvincular">
+                      <button onClick={() => onDesvincular(empresa.id)} className="rounded-md p-2 text-slate-500 hover:bg-red-50 hover:text-red-600" title="Desvincular">
                         <Unlink className="h-4 w-4" />
                       </button>
                     )}

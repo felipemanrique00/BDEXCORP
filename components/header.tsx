@@ -9,7 +9,7 @@ import {
   Network, Plane, TicketCheck, ShieldCheck, Workflow,
 } from 'lucide-react'
 import { SYSTEM_NAME, SYSTEM_TAGLINE } from '@/lib/branding'
-import { getCurrentUser, hasPermission, logout, roleLabel, perfilBBTLabel } from '@/lib/auth'
+import { hasPermission, logout, roleLabel, perfilBBTLabel } from '@/lib/auth'
 import { TransferenciasPendentesPainel } from '@/components/ui/transferencias-pendentes-painel'
 import { safeSetRaw } from '@/lib/storage-quota'
 import { searchUniversalClient } from '@/lib/universal-search-client'
@@ -27,12 +27,12 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 interface HeaderProps {
+  user: User
   onOpenNavigation?: () => void
 }
 
-export function Header({ onOpenNavigation }: HeaderProps) {
+export function Header({ user, onOpenNavigation }: HeaderProps) {
   const router = useRouter()
-  const [user, setUser] = useState<User | null>(null)
   const [darkMode, setDarkMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -43,8 +43,6 @@ export function Header({ onOpenNavigation }: HeaderProps) {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const profileRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => { setUser(getCurrentUser()) }, [])
 
   useEffect(() => {
     const saved = localStorage.getItem('bbt-theme')
@@ -148,8 +146,6 @@ export function Header({ onOpenNavigation }: HeaderProps) {
     setSearchQuery('')
     router.push(`/dashboard/ia-chat?pergunta=${encodeURIComponent(`Pesquise hotéis para: ${query}`)}`)
   }
-
-  if (!user) return null
 
   return (
     <header className="bbt-app-header top-0 z-20 border-b border-bbt-gray-100 bg-white/95 backdrop-blur-md dark:border-slate-800 dark:bg-slate-900/95">
@@ -308,7 +304,7 @@ export function Header({ onOpenNavigation }: HeaderProps) {
 
         {/* DIREITA — Ações rápidas */}
         <div className="flex shrink-0 items-center gap-1">
-          <TransferenciasPendentesPainel />
+          <TransferenciasPendentesPainel userId={user.id} />
           {installPrompt && (
             <button onClick={installPWA}
               className="p-2.5 rounded-lg hover:bg-bbt-gray-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition"

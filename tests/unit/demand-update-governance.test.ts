@@ -14,6 +14,7 @@ const base: DemandUpdateSnapshot = {
   route: 'Goiania',
   startDate: '2026-08-10',
   endDate: '2026-08-12',
+  costCenterId: null,
   costCenter: 'TI',
   project: 'EXPANSAO',
   paymentMethod: 'invoice',

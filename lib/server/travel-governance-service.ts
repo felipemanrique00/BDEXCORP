@@ -24,6 +24,7 @@ import { createApprovalInstance } from '@/lib/server/approval-service'
 import {
   getAccessibleCompanyIds,
   requireCompanyAccess,
+  requireCompanySelectionAccess,
   requireGroupAccess,
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
@@ -422,8 +423,11 @@ export class TravelGovernanceError extends Error {
 
 async function resolveTravelReadCompanyIds(
   principal: RequestPrincipal,
-  filters: { companyId?: string; groupId?: string },
+  filters: { companyId?: string; companyIds?: string[]; groupId?: string },
 ): Promise<string[]> {
+  if (filters.companyIds?.length) {
+    return requireCompanySelectionAccess(principal, filters.companyIds, 'ver_reservas')
+  }
   if (filters.companyId) {
     await requireCompanyAccess(principal, filters.companyId, 'ver_reservas')
   }
@@ -446,6 +450,7 @@ export async function listGovernedTravelQuotes(
   principal: RequestPrincipal,
   filters: {
     companyId?: string
+    companyIds?: string[]
     groupId?: string
     demandId?: string
     status?: GovernedTravelQuoteSummary['status']
@@ -567,6 +572,7 @@ export async function listGovernedTravelReservations(
   principal: RequestPrincipal,
   filters: {
     companyId?: string
+    companyIds?: string[]
     groupId?: string
     demandId?: string
     status?: GovernedTravelReservationSummary['status']

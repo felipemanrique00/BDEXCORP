@@ -1079,6 +1079,7 @@ export async function listApprovalAuthorities(
       `select authority.id, authority.membership_id as "membershipId", user_row.name as "memberName",
               authority.approval_kind as "approvalKind", authority.company_id as "companyId",
               authority.group_id as "groupId", authority.cost_center_id as "costCenterId",
+              cost_center.code as "costCenterCode", cost_center.name as "costCenterName",
               authority.project_id as "projectId", authority.max_amount::float8 as "maxAmount",
               authority.accumulated_amount_limit::float8 as "accumulatedAmountLimit",
               authority.accumulation_period_days as "accumulationPeriodDays",
@@ -1094,6 +1095,10 @@ export async function listApprovalAuthorities(
        join tenant_memberships membership
          on membership.tenant_id = authority.tenant_id and membership.id = authority.membership_id
        join users user_row on user_row.id = membership.user_id
+       left join cost_centers cost_center
+         on cost_center.tenant_id = authority.tenant_id
+        and cost_center.id = authority.cost_center_id
+        and cost_center.deleted_at is null
        where ${clauses.join(' and ')}
        order by authority.created_at desc, authority.id
        limit $${values.length - 1} offset $${values.length}`,
@@ -2130,10 +2135,26 @@ async function validateApprovalEntityOwnership(
   if (input.demandId) await assertEntityCompany(client, 'demands', input.demandId, input.companyId, tenantId)
   if (input.reservationId) await assertEntityCompany(client, 'reservations', input.reservationId, input.companyId, tenantId)
   if (input.employeeId) await assertEntityCompany(client, 'employees', input.employeeId, input.companyId, tenantId)
+  const subjectCostCenterId = typeof input.subject.costCenterId === 'string'
+    ? input.subject.costCenterId
+    : null
+  if (subjectCostCenterId) {
+    await assertEntityCompany(client, 'cost_centers', subjectCostCenterId, input.companyId, tenantId)
+  }
 }
 
-async function assertEntityCompany(client: PoolClient, table: 'demands' | 'reservations' | 'employees', id: string, companyId: string, tenantId: string): Promise<void> {
-  const result = await client.query(`select 1 from ${table} where tenant_id = $1 and id = $2 and company_id = $3`, [tenantId, id, companyId])
+async function assertEntityCompany(
+  client: PoolClient,
+  table: 'demands' | 'reservations' | 'employees' | 'cost_centers',
+  id: string,
+  companyId: string,
+  tenantId: string,
+): Promise<void> {
+  const result = await client.query(
+    `select 1 from ${table}
+     where tenant_id = $1 and id = $2 and company_id = $3 and deleted_at is null`,
+    [tenantId, id, companyId],
+  )
   if (!result.rowCount) throw new ApprovalServiceError('APPROVAL_ENTITY_SCOPE_MISMATCH', 'Entidade nao pertence a empresa informada.', 409)
 }
 

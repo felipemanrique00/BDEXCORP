@@ -17,7 +17,11 @@ import {
 } from '@/lib/demands/update-governance'
 import { normalizarNomePessoa } from '@/lib/funcionario-identidade'
 import { mergeStorageValues } from '@/lib/storage-merge'
-import { parseLegacyDemands, type RelationalDemandSnapshot } from '@/lib/travel/legacy-demand'
+import {
+  parseLegacyDemands,
+  relationalPriorityToLegacy,
+  type RelationalDemandSnapshot,
+} from '@/lib/travel/legacy-demand'
 import { createApprovalInstance, ApprovalServiceError } from '@/lib/server/approval-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import {
@@ -91,6 +95,7 @@ interface CompanyRow extends QueryResultRow {
   group_id: string | null
   legal_name: string
   trade_name: string | null
+  default_cost_center_id: string | null
   default_cost_center: string | null
   metadata: Record<string, unknown>
   billing_settings: Record<string, unknown>
@@ -103,6 +108,7 @@ interface RequesterRow extends QueryResultRow {
 
 interface ReferenceContext {
   costCenterId: string | null
+  costCenterCode: string | null
   costCenterActive: boolean | null
   projectId: string | null
   projectActive: boolean | null
@@ -144,6 +150,7 @@ interface DemandListRow extends QueryResultRow {
   travel_start_date: string | Date | null
   travel_end_date: string | Date | null
   destination: string | null
+  cost_center_id: string | null
   cost_center: string | null
   estimated_amount: string | number
   final_amount: string | number
@@ -194,6 +201,7 @@ export interface RelationalDemandListItem {
   travelStartDate: string | null
   travelEndDate: string | null
   destination: string | null
+  costCenterId: string | null
   costCenter: string | null
   estimatedAmount: number
   finalAmount: number
@@ -485,6 +493,7 @@ export async function updateDemandDetails(
       client,
       principal.tenantId,
       snapshot.companyId,
+      snapshot.costCenterId || company.default_cost_center_id,
       snapshot.costCenter || company.default_cost_center,
       textValue(snapshot.metadata.project),
     )
@@ -492,7 +501,8 @@ export async function updateDemandDetails(
     const nextSnapshot = parsedDemandUpdateSnapshot(
       snapshot,
       identity.resolution.employeeId,
-      snapshot.costCenter || company.default_cost_center,
+      references.costCenterCode,
+      references.costCenterId,
     )
     const reapproval = assessDemandUpdate(previousSnapshot, nextSnapshot)
     if (reapproval.material && !lifecycleAllowsMaterialDemandEdit(current.lifecycle_status)) {
@@ -604,6 +614,8 @@ export async function updateDemandDetails(
         empresa_id: snapshot.companyId,
         passageiro_nome: snapshot.passengerName,
         tipo_servico: input.demand.tipo_servico,
+        cost_center_id: references.costCenterId,
+        centro_custo: references.costCenterCode,
       },
       {
         id: demandId,
@@ -674,18 +686,19 @@ export async function updateDemandDetails(
          travel_start_date = $18::date,
          travel_end_date = $19::date,
          destination = $20,
-         cost_center = $21,
-         estimated_amount = $22,
-         final_amount = $23,
-         observations = $24,
-         internal_notes = $25,
-         metadata = $26::jsonb,
+         cost_center_id = $21,
+         cost_center = $22,
+         estimated_amount = $23,
+         final_amount = $24,
+         observations = $25,
+         internal_notes = $26,
+         metadata = $27::jsonb,
          submitted_at = case
            when $12 <> 'draft' then coalesce(submitted_at, $15::timestamptz)
            else submitted_at
          end,
          version = version + 1,
-         updated_by = $27,
+         updated_by = $28,
          updated_at = $15::timestamptz
        where tenant_id = $1 and id = $2 and version = $3 and deleted_at is null`,
       [
@@ -709,7 +722,8 @@ export async function updateDemandDetails(
         snapshot.travelStartDate,
         snapshot.travelEndDate,
         snapshot.destination,
-        snapshot.costCenter || company.default_cost_center,
+        references.costCenterId,
+        references.costCenterCode,
         snapshot.estimatedAmount,
         snapshot.finalAmount,
         snapshot.observations,
@@ -1099,20 +1113,40 @@ export async function createRelationalDemand(
   const inputHash = sha256({ tenantId: principal.tenantId, demand: input.demand, submit: input.submit })
   await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
 
-  let preparation = await withTenantTransaction(principal.tenantId, async (client) => {
+  const createAttempt = () => withTenantTransaction(principal.tenantId, async (client) => {
     const existing = await loadDemandByIdempotency(client, principal.tenantId, idempotencyKey)
     if (existing) return replayCreation(existing, inputHash)
     return createDemandInTransaction(client, principal, snapshot, input.demand, input.submit, idempotencyKey, inputHash)
-  }).catch((error) => {
-    if (isUniqueViolation(error)) {
-      throw new DemandServiceError(
-        'DEMAND_IDEMPOTENCY_CONFLICT',
-        'Outra operacao utilizou o mesmo identificador ou chave de idempotencia.',
-        409,
-      )
-    }
-    throw error
   })
+  const replayConcurrentCreation = () => withTenantTransaction(principal.tenantId, async (client) => {
+    const existing = await loadDemandByIdempotency(client, principal.tenantId, idempotencyKey)
+    return existing ? replayCreation(existing, inputHash) : null
+  })
+
+  let preparation: DemandCreationPreparation
+  try {
+    preparation = await createAttempt()
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error
+    const replayed = await replayConcurrentCreation()
+    if (replayed) {
+      preparation = replayed
+    } else if (uniqueViolationConstraint(error) === 'demands_tenant_id_demand_number_key') {
+      try {
+        preparation = await createAttempt()
+      } catch (retryError) {
+        if (!isUniqueViolation(retryError)) throw retryError
+        const concurrentReplay = await replayConcurrentCreation()
+        if (concurrentReplay) {
+          preparation = concurrentReplay
+        } else {
+          throw demandCreationUniqueViolation(retryError)
+        }
+      }
+    } else {
+      throw demandCreationUniqueViolation(error)
+    }
+  }
 
   if (
     preparation.approval.required
@@ -1169,11 +1203,23 @@ async function createDemandInTransaction(
       name: snapshot.passengerName,
     },
   )
+  const references = await loadReferenceContext(
+    client,
+    principal.tenantId,
+    snapshot.companyId,
+    snapshot.costCenterId || company.default_cost_center_id,
+    snapshot.costCenter || company.default_cost_center,
+    textValue(snapshot.metadata.project),
+  )
   const demandNumber = await nextDemandNumber(client, principal.tenantId)
   const now = new Date().toISOString()
   const demandId = snapshot.id || `atd-${randomUUID()}`
   const assignedTo = principal.user.id
-  const initialLegacy = legacyDemandSnapshot(rawDemand, {
+  const initialLegacy = legacyDemandSnapshot({
+    ...rawDemand,
+    cost_center_id: references.costCenterId,
+    centro_custo: references.costCenterCode,
+  }, {
     id: demandId,
     serial: demandNumber,
     employeeId: identity.resolution.employeeId,
@@ -1198,13 +1244,13 @@ async function createDemandInTransaction(
        employee_match_status, employee_match_confidence, assigned_to_user_id,
        demand_number, service_type, passenger_name_snapshot, status,
        lifecycle_status, lifecycle_version, priority, travel_start_date,
-       travel_end_date, destination, cost_center, estimated_amount, final_amount,
+       travel_end_date, destination, cost_center_id, cost_center, estimated_amount, final_amount,
        observations, internal_notes, metadata, create_idempotency_key,
        create_input_hash, created_by, updated_by, created_at, updated_at
      ) values (
        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-       'draft', 1, $13, $14::date, $15::date, $16, $17, $18, $19,
-       $20, $21, $22::jsonb, $23, $24, $25, $25, now(), now()
+       'draft', 1, $13, $14::date, $15::date, $16, $17, $18, $19, $20,
+       $21, $22, $23::jsonb, $24, $25, $26, $26, now(), now()
      )`,
     [
       demandId,
@@ -1223,7 +1269,8 @@ async function createDemandInTransaction(
       snapshot.travelStartDate,
       snapshot.travelEndDate,
       snapshot.destination,
-      snapshot.costCenter || company.default_cost_center,
+      references.costCenterId,
+      references.costCenterCode,
       snapshot.estimatedAmount,
       snapshot.finalAmount,
       snapshot.observations,
@@ -1248,13 +1295,6 @@ async function createDemandInTransaction(
     ],
   )
 
-  const references = await loadReferenceContext(
-    client,
-    principal.tenantId,
-    snapshot.companyId,
-    snapshot.costCenter || company.default_cost_center,
-    textValue(snapshot.metadata.project),
-  )
   const facts = buildDemandPolicyFacts(principal, snapshot, company, identity, requester, references, demandId, demandNumber, now)
   const scopes = demandPolicyScopes(principal, snapshot, company, identity, requester, references)
   const checkpoints = submit ? ['profile', 'request', 'submission'] : ['profile', 'request']
@@ -1582,7 +1622,8 @@ function replayCreation(row: DemandCreationRow, inputHash: string): DemandCreati
 
 async function loadCompany(client: PoolClient, tenantId: string, companyId: string): Promise<CompanyRow> {
   const result = await client.query<CompanyRow>(
-    `select id, group_id, legal_name, trade_name, default_cost_center, metadata, billing_settings
+    `select id, group_id, legal_name, trade_name, default_cost_center_id,
+            default_cost_center, metadata, billing_settings
      from companies
      where tenant_id = $1 and id = $2 and status = 'active' and deleted_at is null`,
     [tenantId, companyId],
@@ -1617,17 +1658,34 @@ async function loadRequester(
   return result.rows[0]
 }
 
-async function nextDemandNumber(client: PoolClient, tenantId: string): Promise<string> {
+export async function nextDemandNumber(client: PoolClient, tenantId: string): Promise<string> {
   const compactDate = new Date().toISOString().slice(0, 10).replace(/-/g, '')
   const key = `demand-os:${compactDate}`
   const result = await client.query<{ current_value: string | number }>(
-    `insert into tenant_number_sequences (tenant_id, sequence_key, current_value)
-     values ($1, $2, 1)
-     on conflict (tenant_id, sequence_key) do update set
-       current_value = tenant_number_sequences.current_value + 1,
-       updated_at = now()
-     returning current_value`,
-    [tenantId, key],
+    `with existing_max as (
+       select coalesce(max((substring(demand_number from $3))::bigint), 0) as current_value
+       from demands
+       where tenant_id = $1 and demand_number ~ $4
+     ),
+     allocated as (
+       insert into tenant_number_sequences (tenant_id, sequence_key, current_value)
+       select $1, $2, existing_max.current_value + 1
+       from existing_max
+       on conflict (tenant_id, sequence_key) do update set
+         current_value = greatest(
+           tenant_number_sequences.current_value + 1,
+           excluded.current_value
+         ),
+         updated_at = now()
+       returning current_value
+     )
+     select current_value from allocated`,
+    [
+      tenantId,
+      key,
+      `^OS-${compactDate}-([0-9]{1,12})$`,
+      `^OS-${compactDate}-[0-9]{1,12}$`,
+    ],
   )
   const sequence = Number(result.rows[0]?.current_value)
   if (!Number.isSafeInteger(sequence) || sequence < 1) {
@@ -1640,18 +1698,27 @@ async function loadReferenceContext(
   client: PoolClient,
   tenantId: string,
   companyId: string,
+  costCenterId: string | null,
   costCenter: string | null,
   project: string | null,
 ): Promise<ReferenceContext> {
-  const centerResult = costCenter
-    ? await client.query<{ id: string; status: string }>(
-        `select id, status from cost_centers
-         where tenant_id = $1 and company_id = $2 and deleted_at is null
-           and (lower(code) = lower($3) or lower(name) = lower($3))
-         order by (status = 'active') desc, updated_at desc limit 1`,
-        [tenantId, companyId, costCenter],
+  const centerResult = costCenterId
+    ? await client.query<{ id: string; code: string; status: string }>(
+        `select id, code, status
+         from cost_centers
+         where tenant_id = $1 and company_id = $2 and id = $3 and deleted_at is null
+         limit 1`,
+        [tenantId, companyId, costCenterId],
       )
-    : { rows: [] as Array<{ id: string; status: string }> }
+    : costCenter
+      ? await client.query<{ id: string; code: string; status: string }>(
+          `select id, code, status from cost_centers
+           where tenant_id = $1 and company_id = $2 and status = 'active' and deleted_at is null
+              and (lower(code) = lower($3) or lower(name) = lower($3))
+            order by updated_at desc limit 1`,
+          [tenantId, companyId, costCenter],
+        )
+      : { rows: [] as Array<{ id: string; code: string; status: string }> }
   const projectResult = project
     ? await client.query<{ id: string; status: string }>(
         `select id, status from projects
@@ -1662,6 +1729,20 @@ async function loadReferenceContext(
       )
     : { rows: [] as Array<{ id: string; status: string }> }
   const center = centerResult.rows[0] || null
+  if (costCenterId && !center) {
+    throw new DemandServiceError(
+      'DEMAND_COST_CENTER_SCOPE_INVALID',
+      'O centro de custo selecionado nao pertence a esta empresa.',
+      409,
+    )
+  }
+  if (costCenterId && center?.status !== 'active') {
+    throw new DemandServiceError(
+      'DEMAND_COST_CENTER_INACTIVE',
+      'O centro de custo selecionado esta inativo.',
+      409,
+    )
+  }
   const selectedProject = projectResult.rows[0] || null
   const budgetResult = await client.query<{
     id: string
@@ -1684,6 +1765,7 @@ async function loadReferenceContext(
   const used = numeric(budget?.committed_amount) + numeric(budget?.consumed_amount)
   return {
     costCenterId: center?.id || null,
+    costCenterCode: center?.code || costCenter,
     costCenterActive: center ? center.status === 'active' : costCenter ? false : null,
     projectId: selectedProject?.id || null,
     projectActive: selectedProject ? selectedProject.status === 'active' : project ? false : null,
@@ -1951,9 +2033,10 @@ function relationalDemandUpdateSnapshot(row: DemandListRow): DemandUpdateSnapsho
     passageiro_nome: row.passenger_name_snapshot,
     tipo_servico: legacy.tipo_servico || row.service_type,
     status: row.status,
-    prioridade: row.priority,
+    prioridade: relationalPriorityToLegacy(row.priority),
     valor_cotacao: numeric(row.estimated_amount),
     valor_final: numeric(row.final_amount),
+    cost_center_id: row.cost_center_id,
     centro_custo: row.cost_center || undefined,
     observacoes: row.observations || undefined,
     observacoes_internas: row.internal_notes || undefined,
@@ -1969,19 +2052,21 @@ function relationalDemandUpdateSnapshot(row: DemandListRow): DemandUpdateSnapsho
       route: row.destination,
       startDate: optionalIsoDate(row.travel_start_date),
       endDate: optionalIsoDate(row.travel_end_date),
+      costCenterId: row.cost_center_id,
       costCenter: row.cost_center,
       project: null,
       paymentMethod: null,
       passengerName: row.passenger_name_snapshot,
     }
   }
-  return parsedDemandUpdateSnapshot(parsed, row.employee_id, row.cost_center)
+  return parsedDemandUpdateSnapshot(parsed, row.employee_id, row.cost_center, row.cost_center_id)
 }
 
 function parsedDemandUpdateSnapshot(
   snapshot: RelationalDemandSnapshot,
   employeeId: string | null,
   costCenter: string | null,
+  costCenterId: string | null,
 ): DemandUpdateSnapshot {
   const metadata = recordValue(snapshot.metadata)
   const legacyDetails = recordValue(metadata.serviceDetails)
@@ -1993,6 +2078,7 @@ function parsedDemandUpdateSnapshot(
     route: snapshot.destination,
     startDate: snapshot.travelStartDate,
     endDate: snapshot.travelEndDate,
+    costCenterId,
     costCenter,
     project: nullableString(metadata.project),
     paymentMethod: nullableString(recordValue(legacyDetails).paymentMethod),
@@ -2428,9 +2514,10 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
     valor_final: numeric(row.final_amount),
     agente_user_id: row.assigned_to_user_id || '',
     status: row.status,
-    prioridade: row.priority,
+    prioridade: relationalPriorityToLegacy(row.priority),
     observacoes: row.observations || '',
     observacoes_internas: row.internal_notes || undefined,
+    cost_center_id: row.cost_center_id,
     centro_custo: row.cost_center || undefined,
     created_at: createdAt,
     updated_at: updatedAt,
@@ -2454,6 +2541,7 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
     travelStartDate: optionalIsoDate(row.travel_start_date),
     travelEndDate: optionalIsoDate(row.travel_end_date),
     destination: row.destination,
+    costCenterId: row.cost_center_id,
     costCenter: row.cost_center,
     estimatedAmount: numeric(row.estimated_amount),
     finalAmount: numeric(row.final_amount),
@@ -2552,6 +2640,46 @@ function numeric(value: unknown): number {
 
 function isUniqueViolation(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === '23505')
+}
+
+function uniqueViolationConstraint(error: unknown): string | null {
+  if (!isUniqueViolation(error)) return null
+  const constraint = (error as { constraint?: unknown }).constraint
+  return typeof constraint === 'string' ? constraint : null
+}
+
+function demandCreationUniqueViolation(error: unknown): DemandServiceError {
+  const constraint = uniqueViolationConstraint(error)
+  if (constraint === 'demands_create_idempotency_uidx') {
+    return new DemandServiceError(
+      'DEMAND_IDEMPOTENCY_CONFLICT',
+      'A chave de idempotencia ja foi utilizada com outro conteudo.',
+      409,
+    )
+  }
+  if (
+    constraint === 'demands_pkey'
+    || constraint === 'demands_tenant_id_id_key'
+    || constraint === 'demands_tenant_id_id_company_unique'
+  ) {
+    return new DemandServiceError(
+      'DEMAND_IDENTIFIER_CONFLICT',
+      'O identificador da demanda ja pertence a outro registro.',
+      409,
+    )
+  }
+  if (constraint === 'demands_tenant_id_demand_number_key') {
+    return new DemandServiceError(
+      'DEMAND_NUMBER_CONFLICT',
+      'Nao foi possivel reservar um numero de OS exclusivo. Tente novamente.',
+      409,
+    )
+  }
+  return new DemandServiceError(
+    'DEMAND_UNIQUE_CONSTRAINT_CONFLICT',
+    'Outro registro foi criado simultaneamente. Atualize os dados e tente novamente.',
+    409,
+  )
 }
 
 function isPolicyCheckpointSummary(value: unknown): value is DemandPolicyCheckpointSummary {

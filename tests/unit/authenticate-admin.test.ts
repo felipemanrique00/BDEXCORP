@@ -69,6 +69,44 @@ describe('administrative E2E authentication', () => {
     })).rejects.toThrow('E2E_ADMIN_TOTP_SECRET e obrigatoria')
   })
 
+  it('reuses the secret enrolled earlier in the same isolated E2E execution', async () => {
+    delete process.env.E2E_ADMIN_TOTP_SECRET
+    process.env.E2E_RUN_ID = `enrollment-${process.pid}-${Date.now()}`
+    const enrolledSecret = generateTotpSecret()
+    let loginCount = 0
+    let verifiedCode = ''
+    const request = {
+      post: vi.fn(async (url: string, options: { data?: Record<string, unknown> }) => {
+        if (url === '/api/auth/login') {
+          loginCount += 1
+          return response(202, {
+            code: loginCount === 1 ? 'MFA_ENROLLMENT_REQUIRED' : 'MFA_REQUIRED',
+            challengeToken: `enrollment-challenge-${loginCount}`,
+          })
+        }
+        if (url === '/api/auth/mfa/enroll') {
+          return response(200, { secret: enrolledSecret })
+        }
+        if (url === '/api/auth/mfa/verify') {
+          verifiedCode = String(options.data?.code || '')
+          return response(200, { ok: true })
+        }
+        throw new Error(`Endpoint inesperado: ${url}`)
+      }),
+    } as unknown as APIRequestContext
+    const credentials = {
+      email: `enrollment-${process.pid}@example.invalid`,
+      password: 'irrelevant-test-password',
+      baseUrl: 'http://127.0.0.1:3000',
+    }
+
+    await authenticateAdministrativeTestUser(request, credentials)
+    await authenticateAdministrativeTestUser(request, credentials)
+
+    expect(loginCount).toBe(2)
+    expect(verifiedCode).toMatch(/^\d{6}$/)
+  })
+
   it('does not reuse the TOTP step state from a previous E2E execution', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-24T15:00:15.000Z'))

@@ -87,7 +87,7 @@ export async function syncTravelDemandsFromStorage(
          id, tenant_id, company_id, requester_id, employee_id,
          employee_match_status, employee_match_confidence, assigned_to_user_id,
          demand_number, service_type, passenger_name_snapshot, status, lifecycle_status,
-         priority, travel_start_date, travel_end_date, destination, cost_center,
+         priority, travel_start_date, travel_end_date, destination, cost_center_id, cost_center,
          estimated_amount, final_amount, observations, internal_notes, metadata,
          created_by, updated_by, created_at, updated_at
        ) values (
@@ -96,8 +96,13 @@ export async function syncTravelDemandsFromStorage(
          (select id from employees where tenant_id = $2 and id = $5 and company_id = $3 and deleted_at is null),
          $6, $7,
          (select user_id from tenant_memberships where tenant_id = $2 and user_id = $8 and status = 'active'),
-         $9, $10, $11, $12, $13, $14, $15::date, $16::date, $17, $18,
-         $19, $20, $21, $22, $23::jsonb, $24, $24, $25::timestamptz, $26::timestamptz
+         $9, $10, $11, $12, $13, $14, $15::date, $16::date, $17,
+         (select id from cost_centers
+          where tenant_id = $2 and company_id = $3 and status = 'active' and deleted_at is null
+            and (($18::uuid is not null and id = $18::uuid)
+              or ($18::uuid is null and lower(code) = lower($19)))
+          limit 1),
+         $19, $20, $21, $22, $23, $24::jsonb, $25, $25, $26::timestamptz, $27::timestamptz
        )
        on conflict (id) do update set
          company_id = excluded.company_id,
@@ -127,6 +132,7 @@ export async function syncTravelDemandsFromStorage(
          travel_start_date = excluded.travel_start_date,
          travel_end_date = excluded.travel_end_date,
          destination = excluded.destination,
+         cost_center_id = excluded.cost_center_id,
          cost_center = excluded.cost_center,
          estimated_amount = excluded.estimated_amount,
          final_amount = excluded.final_amount,
@@ -144,7 +150,7 @@ export async function syncTravelDemandsFromStorage(
         identity.status, identity.confidence, demand.assignedToUserId, demand.demandNumber,
         demand.serviceType, demand.passengerName, demand.legacyStatus, demand.lifecycleStatus,
         demand.priority, demand.travelStartDate, demand.travelEndDate, demand.destination,
-        demand.costCenter, demand.estimatedAmount, demand.finalAmount, demand.observations,
+        demand.costCenterId, demand.costCenter, demand.estimatedAmount, demand.finalAmount, demand.observations,
         demand.internalNotes, JSON.stringify({ ...demand.metadata, identityResolution: identityEvidence(identity) }),
         actorUserId, demand.sourceCreatedAt, demand.sourceUpdatedAt,
       ],

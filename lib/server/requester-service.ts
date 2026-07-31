@@ -23,6 +23,7 @@ import {
 } from '@/lib/server/domain-rollout-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import type { SolicitanteEmpresa } from '@/types'
+import { canAssignRequesterMembership } from '@/lib/user-access-kind'
 
 const REQUESTERS_STORAGE_KEY = 'bbt-solicitantes-empresa'
 
@@ -36,6 +37,7 @@ interface RequesterRow extends QueryResultRow {
   phone: string | null
   department: string | null
   job_title: string | null
+  cost_center_id: string | null
   cost_center: string | null
   status: string
   permissions: Record<string, unknown> | null
@@ -79,19 +81,34 @@ export async function validateRequesterMutation(
   principal: RequestPrincipal,
   rawPayload: unknown,
   rawEditingId?: string,
-): Promise<{ payload: RequesterPayload; editingId: string | null }> {
+): Promise<{ payload: RequesterPayload; editingId: string | null; existingUserId: string | null }> {
   const payload = requesterPayloadSchema.parse(rawPayload)
   const editingId = rawEditingId ? requesterIdentifierSchema.parse(rawEditingId) : null
   await requireCompanyAccess(principal, payload.company_id, 'gerenciar_solicitantes')
 
-  await withTenantTransaction(principal.tenantId, async (client) => {
+  const validated = await withTenantTransaction(principal.tenantId, async (client) => {
     await assertRequesterRelationalWriteEnabled(client, principal.tenantId, payload.company_id)
     await bootstrapLegacyRequesters(client, principal)
-    await assertRequesterReferences(client, principal.tenantId, payload)
     await assertRequesterMutationConflict(client, principal.tenantId, payload, editingId)
+    const existingUserId = editingId
+      ? (await client.query<{ user_id: string | null }>(
+          `select user_id
+           from requesters
+           where tenant_id = $1 and id = $2 and deleted_at is null
+           limit 1`,
+          [principal.tenantId, editingId],
+        )).rows[0]?.user_id || null
+      : null
+    const normalizedPayload = await assertRequesterReferences(
+      client,
+      principal.tenantId,
+      payload,
+      existingUserId,
+    )
+    return { existingUserId, payload: normalizedPayload }
   })
 
-  return { payload, editingId }
+  return { payload: validated.payload, editingId, existingUserId: validated.existingUserId }
 }
 
 export async function upsertCompanyRequester(
@@ -106,16 +123,21 @@ export async function upsertCompanyRequester(
   const result = await withTenantTransaction(principal.tenantId, async (client) => {
     await assertRequesterRelationalWriteEnabled(client, principal.tenantId, payload.company_id)
     const bootstrap = await bootstrapLegacyRequesters(client, principal)
-    await assertRequesterReferences(client, principal.tenantId, payload)
     const existing = await loadRequesterForMutation(client, principal.tenantId, payload, editingId)
     await assertRequesterMutationConflict(client, principal.tenantId, payload, existing?.id || editingId)
+    const normalizedPayload = await assertRequesterReferences(
+      client,
+      principal.tenantId,
+      payload,
+      existing?.user_id || null,
+    )
 
     const requesterId = existing?.id || `sol_${randomUUID()}`
-    const permissions = requesterPermissions(payload)
+    const permissions = requesterPermissions(normalizedPayload)
     const row = existing
-      ? await updateRequester(client, principal, requesterId, payload, permissions)
-      : await insertRequester(client, principal, requesterId, payload, permissions)
-    const requesters = await loadCompanyRequesters(client, principal.tenantId, payload.company_id)
+      ? await updateRequester(client, principal, requesterId, normalizedPayload, permissions)
+      : await insertRequester(client, principal, requesterId, normalizedPayload, permissions)
+    const requesters = await loadCompanyRequesters(client, principal.tenantId, normalizedPayload.company_id)
     await syncRequesterCompatibilityProjection(client, principal, bootstrap.unresolved)
     return {
       requester: mapRequesterRow(row),
@@ -204,7 +226,8 @@ async function assertRequesterReferences(
   client: PoolClient,
   tenantId: string,
   payload: RequesterPayload,
-): Promise<void> {
+  existingUserId: string | null,
+): Promise<RequesterPayload> {
   const company = await client.query(
     `select 1
      from companies
@@ -232,10 +255,14 @@ async function assertRequesterReferences(
   }
 
   if (payload.user_id) {
-    const membership = await client.query(
-      `select 1
-       from tenant_memberships
-       where tenant_id = $1 and user_id = $2 and status in ('active', 'invited')`,
+    const membership = await client.query<{ role_key: string | null }>(
+      `select role_row.role_key
+       from tenant_memberships membership
+       join roles role_row
+         on role_row.id = membership.role_id
+        and (role_row.tenant_id = membership.tenant_id or role_row.tenant_id is null)
+       where membership.tenant_id = $1 and membership.user_id = $2
+         and membership.status in ('active', 'invited')`,
       [tenantId, payload.user_id],
     )
     if (!membership.rowCount) {
@@ -245,7 +272,74 @@ async function assertRequesterReferences(
         409,
       )
     }
+    if (!canAssignRequesterMembership({
+      roleKey: membership.rows[0].role_key,
+      requestedUserId: payload.user_id,
+      existingUserId,
+    })) {
+      throw new RequesterServiceError(
+        'REQUESTER_INTERNAL_USER_LINK_DENIED',
+        'Uma conta interna da agencia nao pode ser vinculada como solicitante corporativo.',
+        409,
+      )
+    }
   }
+
+  return resolveRequesterCostCenter(client, tenantId, payload)
+}
+
+async function resolveRequesterCostCenter(
+  client: PoolClient,
+  tenantId: string,
+  payload: RequesterPayload,
+): Promise<RequesterPayload> {
+  if (payload.cost_center_id) {
+    const result = await client.query<{ id: string; code: string }>(
+      `select id, code
+       from cost_centers
+       where tenant_id = $1
+         and company_id = $2
+         and id = $3
+         and status = 'active'
+         and deleted_at is null
+       limit 1`,
+      [tenantId, payload.company_id, payload.cost_center_id],
+    )
+    const center = result.rows[0]
+    if (!center) {
+      throw new RequesterServiceError(
+        'REQUESTER_COST_CENTER_SCOPE_INVALID',
+        'O centro de custo selecionado nao esta ativo ou nao pertence a esta empresa.',
+        409,
+      )
+    }
+    return { ...payload, cost_center_id: center.id, centro_custo: center.code }
+  }
+
+  const legacyValue = payload.centro_custo?.trim()
+  if (!legacyValue) return { ...payload, cost_center_id: null, centro_custo: '' }
+
+  const resolved = await client.query<{ id: string; code: string }>(
+    `select id, code
+     from cost_centers
+     where tenant_id = $1
+       and company_id = $2
+       and lower(code) = lower($3)
+       and status = 'active'
+       and deleted_at is null
+     limit 2`,
+    [tenantId, payload.company_id, legacyValue],
+  )
+  if (resolved.rowCount === 1) {
+    return {
+      ...payload,
+      cost_center_id: resolved.rows[0].id,
+      centro_custo: resolved.rows[0].code,
+    }
+  }
+
+  // Compatibilidade: clientes antigos ainda podem enviar apenas o snapshot textual.
+  return { ...payload, cost_center_id: null, centro_custo: legacyValue }
 }
 
 async function assertRequesterMutationConflict(
@@ -298,17 +392,17 @@ async function loadRequesterForMutation(
   tenantId: string,
   payload: RequesterPayload,
   editingId: string | null,
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; user_id: string | null } | null> {
   const result = editingId
-    ? await client.query<{ id: string }>(
-        `select id
+    ? await client.query<{ id: string; user_id: string | null }>(
+        `select id, user_id
          from requesters
          where tenant_id = $1 and company_id = $2 and id = $3 and deleted_at is null
          for update`,
         [tenantId, payload.company_id, editingId],
       )
-    : await client.query<{ id: string }>(
-        `select id
+    : await client.query<{ id: string; user_id: string | null }>(
+        `select id, user_id
          from requesters
          where tenant_id = $1 and company_id = $2 and email = $3 and deleted_at is null
          for update`,
@@ -327,12 +421,12 @@ async function insertRequester(
   const result = await client.query<RequesterRow>(
     `insert into requesters (
        id, tenant_id, company_id, employee_id, user_id, name, email, phone,
-       department, job_title, cost_center, status, permissions, request_limit,
+       department, job_title, cost_center_id, cost_center, status, permissions, request_limit,
        notes, created_by, updated_by
      ) values (
        $1, $2, $3, $4, $5, $6, $7, $8,
-       $9, $10, $11, $12, $13::jsonb, $14,
-       $15, $16, $16
+       $9, $10, $11, $12, $13, $14::jsonb, $15,
+       $16, $17, $17
      )
      returning *`,
     [
@@ -346,6 +440,7 @@ async function insertRequester(
       payload.telefone || null,
       payload.departamento || null,
       payload.cargo || null,
+      payload.cost_center_id,
       payload.centro_custo || null,
       requesterStatusToDatabase(payload.status),
       JSON.stringify(permissions),
@@ -373,12 +468,13 @@ async function updateRequester(
          phone = $8,
          department = $9,
          job_title = $10,
-         cost_center = $11,
-         status = $12,
-         permissions = $13::jsonb,
-         request_limit = $14,
-         notes = $15,
-         updated_by = $16,
+         cost_center_id = $11,
+         cost_center = $12,
+         status = $13,
+         permissions = $14::jsonb,
+         request_limit = $15,
+         notes = $16,
+         updated_by = $17,
          version = version + 1
      where tenant_id = $1 and company_id = $2 and id = $3 and deleted_at is null
      returning *`,
@@ -393,6 +489,7 @@ async function updateRequester(
       payload.telefone || null,
       payload.departamento || null,
       payload.cargo || null,
+      payload.cost_center_id,
       payload.centro_custo || null,
       requesterStatusToDatabase(payload.status),
       JSON.stringify(permissions),
@@ -554,15 +651,25 @@ async function bootstrapLegacyRequesters(
        )
        insert into requesters (
          id, tenant_id, company_id, employee_id, user_id, name, email, phone,
-         department, job_title, cost_center, status, permissions, request_limit,
+         department, job_title, cost_center_id, cost_center, status, permissions, request_limit,
          notes, created_by, updated_by, created_at, updated_at
        )
        select
          input.id, $1, input.company_id, input.employee_id, input.user_id,
          input.name, input.email, input.phone, input.department, input.job_title,
-         input.cost_center, input.status, input.permissions, input.request_limit,
+         center.id, input.cost_center, input.status, input.permissions, input.request_limit,
          input.notes, $3, $3, input.created_at, input.updated_at
        from input
+       left join lateral (
+         select id
+         from cost_centers
+         where tenant_id = $1
+           and company_id = input.company_id
+           and lower(code) = lower(input.cost_center)
+           and status = 'active'
+           and deleted_at is null
+         limit 1
+       ) center on true
        on conflict do nothing`,
       [principal.tenantId, JSON.stringify(pendingInserts), principal.user.id],
     )
@@ -612,6 +719,7 @@ function mapRequesterRow(row: RequesterRow): SolicitanteEmpresa {
     telefone: row.phone || '',
     cargo: row.job_title || '',
     departamento: row.department || '',
+    cost_center_id: row.cost_center_id,
     centro_custo: row.cost_center || '',
     status: requesterStatusFromDatabase(row.status),
     pode_criar_demanda: permissions.canCreateDemand !== false,

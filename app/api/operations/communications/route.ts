@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
+import { companyIdsQuerySchema } from '@/lib/company-selection-query'
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { readJsonBodyResult } from '@/lib/security/request-body'
 import {
@@ -19,6 +20,7 @@ const querySchema = z.object({
   startDate: z.string().date(),
   endDate: z.string().date(),
   companyId: z.string().trim().min(1).max(200).optional(),
+  companyIds: companyIdsQuerySchema.optional(),
   groupId: z.string().trim().min(1).max(200).optional(),
   serviceType: z.string().trim().min(1).max(80).optional(),
 }).strict()
@@ -26,9 +28,11 @@ const querySchema = z.object({
     message: 'Periodo invalido.',
     path: ['endDate'],
   })
-  .refine((value) => !(value.companyId && value.groupId), {
-    message: 'Informe empresa ou grupo, nao ambos.',
-    path: ['groupId'],
+  .refine((value) => (
+    [value.companyId, value.groupId, value.companyIds?.length ? 'companies' : undefined].filter(Boolean).length <= 1
+  ), {
+    message: 'Informe somente um filtro corporativo.',
+    path: ['companyIds'],
   })
 
 const noteSchema = z.object({
@@ -51,6 +55,7 @@ export async function GET(request: Request) {
       startDate: url.searchParams.get('startDate'),
       endDate: url.searchParams.get('endDate'),
       companyId: url.searchParams.get('companyId') || undefined,
+      companyIds: url.searchParams.get('companyIds') || undefined,
       groupId: url.searchParams.get('groupId') || undefined,
       serviceType: url.searchParams.get('serviceType') || undefined,
     })

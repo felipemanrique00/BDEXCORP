@@ -49,6 +49,24 @@ describe('requester schema', () => {
     expect(result.success).toBe(false)
   })
 
+  it('normalizes the relational cost center identifier', () => {
+    const result = requesterPayloadSchema.parse({
+      company_id: 'company-a',
+      nome: 'Ana Souza',
+      email: 'ana@example.com',
+      cost_center_id: '00000000-0000-4000-8000-000000000123',
+      centro_custo: 'ADM-001',
+    })
+
+    expect(result.cost_center_id).toBe('00000000-0000-4000-8000-000000000123')
+    expect(requesterPayloadSchema.safeParse({
+      company_id: 'company-a',
+      nome: 'Ana Souza',
+      email: 'ana@example.com',
+      cost_center_id: 'outro-tenant',
+    }).success).toBe(false)
+  })
+
   it('converts database statuses without exposing internal values to the UI', () => {
     expect(requesterStatusToDatabase('ativo')).toBe('active')
     expect(requesterStatusToDatabase('bloqueado')).toBe('blocked')

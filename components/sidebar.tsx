@@ -15,21 +15,21 @@ import {
 
 import { BBTLogo } from '@/components/branding/bbt-logo'
 import { CorporateContextSelector } from '@/components/corporate-context-selector'
-import { getCurrentUser, logout } from '@/lib/auth'
+import { logout } from '@/lib/auth'
 import { getUltimaVista, NOVA_DEMANDA_EVENT } from '@/lib/notificacoes'
 import { buildSidebarMenu, type SidebarMenuItem } from '@/lib/navigation'
 import { cn } from '@/lib/utils'
 import type { User } from '@/types'
 
 interface SidebarProps {
+  user: User
   mobileOpen?: boolean
   onMobileClose?: () => void
 }
 
-export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
+export function Sidebar({ user, mobileOpen = false, onMobileClose }: SidebarProps) {
   const pathname = usePathname()
   const [collapsed, setCollapsed] = useState(false)
-  const [user, setUser] = useState<User | null>(null)
   const [naoLidas, setNaoLidas] = useState(0)
   const [novasDemandas, setNovasDemandas] = useState(0)
   const [alertasHoje, setAlertasHoje] = useState(0)
@@ -53,7 +53,6 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
 
   useEffect(() => {
     if (pathname.startsWith('/dashboard/demandas')) pendingNewDemandsRef.current = 0
-    setUser(getCurrentUser())
     void atualizarBadges()
     const interval = window.setInterval(() => void atualizarBadges(), 15_000)
     const handleNovaDemanda = () => {
@@ -84,8 +83,6 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
       // Os ultimos indicadores validos permanecem visiveis durante indisponibilidade temporaria.
     }
   }
-
-  if (!user) return null
 
   const grupos = buildSidebarMenu({ user, naoLidas, novasDemandas, alertasHoje })
 

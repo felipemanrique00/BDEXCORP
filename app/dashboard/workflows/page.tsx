@@ -780,7 +780,13 @@ function scopeLabel(scope: { type: string; id?: string | null }): string {
 function authorityScope(item: Record<string, unknown>): string {
   if (textField(item, 'companyId')) return `Empresa ${textField(item, 'companyId')}`
   if (textField(item, 'groupId')) return `Grupo ${textField(item, 'groupId')}`
-  if (textField(item, 'costCenterId')) return `Centro de custo ${textField(item, 'costCenterId')}`
+  if (textField(item, 'costCenterId')) {
+    const code = textField(item, 'costCenterCode')
+    const name = textField(item, 'costCenterName')
+    return code
+      ? `Centro de custo ${code}${name ? ` · ${name}` : ''}`
+      : `Centro de custo ${textField(item, 'costCenterId')}`
+  }
   if (textField(item, 'projectId')) return `Projeto ${textField(item, 'projectId')}`
   return 'Todo o escopo autorizado'
 }

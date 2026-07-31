@@ -1,9 +1,11 @@
 'use client'
 
 import type { GovernedTravelReservationList } from '@/lib/travel/reservation-records'
+import { appendCompanyIdsQuery } from '@/lib/company-selection-query'
 
 export async function listTravelReservationsFromServer(filters: {
   companyId?: string
+  companyIds?: string[]
   groupId?: string
   demandId?: string
   status?: 'draft' | 'prepared' | 'reserved' | 'issued' | 'cancelled' | 'failed'
@@ -12,6 +14,7 @@ export async function listTravelReservationsFromServer(filters: {
 } = {}, signal?: AbortSignal): Promise<GovernedTravelReservationList> {
   const search = new URLSearchParams()
   if (filters.companyId) search.set('companyId', filters.companyId)
+  appendCompanyIdsQuery(search, filters.companyIds)
   if (filters.groupId) search.set('groupId', filters.groupId)
   if (filters.demandId) search.set('demandId', filters.demandId)
   if (filters.status) search.set('status', filters.status)

@@ -222,9 +222,60 @@ describeWithDatabase('PostgreSQL tenant user management isolation', () => {
     await setTenantUserActive(principal, sharedUserId, true)
   })
 
-  it('mantem a auditoria do reset no tenant vinculado ao token', async () => {
+  it('redefine a senha e invalida MFA em todos os tenants da identidade', async () => {
     const rawToken = `reset-${randomUUID()}`
     const resetId = randomUUID()
+    const mfaMethodA = randomUUID()
+    const mfaMethodB = randomUUID()
+    const challengeA = randomUUID()
+    const challengeB = randomUUID()
+
+    await tenantTransaction(pool, tenantA, async (client) => {
+      await client.query(
+        `insert into user_mfa_methods (
+           id, tenant_id, membership_id, user_id, status,
+           secret_ciphertext, secret_iv, secret_auth_tag, last_used_step, enabled_at
+         ) values ($1, $2, $3, $4, 'enabled', 'cipher-a', 'iv-a', 'tag-a', 100, now())`,
+        [mfaMethodA, tenantA, sharedMembershipA, sharedUserId],
+      )
+      await client.query(
+        `insert into user_mfa_recovery_codes (
+           tenant_id, mfa_method_id, membership_id, user_id, code_hash
+         ) values ($1, $2, $3, $4, $5)`,
+        [tenantA, mfaMethodA, sharedMembershipA, sharedUserId, 'c'.repeat(64)],
+      )
+      await client.query(
+        `insert into auth_mfa_challenges (
+           id, tenant_id, membership_id, user_id, token_hash, purpose,
+           max_attempts, expires_at
+         ) values ($1, $2, $3, $4, $5, 'login', 6, now() + interval '10 minutes')`,
+        [challengeA, tenantA, sharedMembershipA, sharedUserId, 'd'.repeat(64)],
+      )
+    })
+
+    await tenantTransaction(pool, tenantB, async (client) => {
+      await client.query(
+        `insert into user_mfa_methods (
+           id, tenant_id, membership_id, user_id, status,
+           secret_ciphertext, secret_iv, secret_auth_tag, last_used_step, enabled_at
+         ) values ($1, $2, $3, $4, 'enabled', 'cipher-b', 'iv-b', 'tag-b', 200, now())`,
+        [mfaMethodB, tenantB, sharedMembershipB, sharedUserId],
+      )
+      await client.query(
+        `insert into user_mfa_recovery_codes (
+           tenant_id, mfa_method_id, membership_id, user_id, code_hash
+         ) values ($1, $2, $3, $4, $5)`,
+        [tenantB, mfaMethodB, sharedMembershipB, sharedUserId, 'e'.repeat(64)],
+      )
+      await client.query(
+        `insert into auth_mfa_challenges (
+           id, tenant_id, membership_id, user_id, token_hash, purpose,
+           max_attempts, expires_at
+         ) values ($1, $2, $3, $4, $5, 'login', 6, now() + interval '10 minutes')`,
+        [challengeB, tenantB, sharedMembershipB, sharedUserId, 'f'.repeat(64)],
+      )
+    })
+
     await pool.query(
       `insert into password_reset_tokens (
          id, tenant_id, user_id, token_hash, expires_at
@@ -238,17 +289,63 @@ describeWithDatabase('PostgreSQL tenant user management isolation', () => {
       userAgent: 'vitest',
     })
 
+    for (const tenantId of [tenantA, tenantB]) {
+      const mfaState = await tenantTransaction(pool, tenantId, (client) => client.query<{
+        disabled_methods: number
+        available_recovery_codes: number
+        pending_challenges: number
+      }>(
+        `select
+           count(*) filter (
+             where method.status = 'disabled'
+               and method.disabled_at is not null
+               and method.last_used_step is null
+           )::int as disabled_methods,
+           (
+             select count(*)::int
+             from user_mfa_recovery_codes recovery
+             where recovery.tenant_id = $1 and recovery.user_id = $2 and recovery.used_at is null
+           ) as available_recovery_codes,
+           (
+             select count(*)::int
+             from auth_mfa_challenges challenge
+             where challenge.tenant_id = $1 and challenge.user_id = $2 and challenge.status = 'pending'
+           ) as pending_challenges
+         from user_mfa_methods method
+         where method.tenant_id = $1 and method.user_id = $2`,
+        [tenantId, sharedUserId],
+      ))
+      expect(mfaState.rows[0]).toEqual({
+        disabled_methods: 1,
+        available_recovery_codes: 0,
+        pending_challenges: 0,
+      })
+    }
+
     const audit = await tenantTransaction(pool, tenantB, (client) => client.query<{
       tenant_id: string
       entity_id: string
+      metadata: {
+        mfaMethodsDisabled: number
+        mfaRecoveryCodesRevoked: number
+        mfaChallengesExpired: number
+      }
     }>(
-      `select tenant_id, entity_id
+      `select tenant_id, entity_id, metadata
          from audit_logs
         where action = 'auth.password_reset_completed'
           and entity_id = $1`,
       [resetId],
     ))
-    expect(audit.rows).toEqual([{ tenant_id: tenantB, entity_id: resetId }])
+    expect(audit.rows).toEqual([{
+      tenant_id: tenantB,
+      entity_id: resetId,
+      metadata: {
+        mfaMethodsDisabled: 2,
+        mfaRecoveryCodesRevoked: 2,
+        mfaChallengesExpired: 2,
+      },
+    }])
   })
 })
 

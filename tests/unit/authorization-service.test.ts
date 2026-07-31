@@ -203,6 +203,56 @@ describe('fine-grained authorization', () => {
       action: 'read',
     })
   })
+
+  it('classifica o cadastro de centros de custo e aplica o escopo da empresa', async () => {
+    const authorization = await authorizationForApiRequest(new Request(
+      'http://localhost/api/cost-centers?companyId=company-a',
+    ))
+
+    expect(authorization).toMatchObject({
+      resource: 'cost_centers',
+      action: 'read',
+      scope: { companyId: 'company-a' },
+    })
+    expect(evaluateAuthorization(principal(), authorization)).toMatchObject({
+      allowed: true,
+      permission: 'ver_centros_custo',
+      companyIds: ['company-a'],
+    })
+  })
+
+  it.each([
+    ['/api/auth/change-password', 'account', 'update'],
+    ['/api/auth/mfa/recovery-codes', 'account', 'update'],
+    ['/api/auth/logout', 'session', 'delete'],
+  ] as const)('classifica o comando de conta %s como %s/%s', async (path, resource, action) => {
+    const authorization = await authorizationForApiRequest(new Request(`http://localhost${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }))
+
+    expect(authorization).toMatchObject({
+      resource,
+      action,
+      allowSelf: true,
+    })
+    expect(evaluateAuthorization(principal(), authorization)).toMatchObject({
+      allowed: true,
+      code: 'AUTHORIZED',
+    })
+  })
+
+  it('continua negando criacao generica de conta', () => {
+    expect(evaluateAuthorization(principal(), {
+      resource: 'account',
+      action: 'create',
+      allowSelf: true,
+    })).toMatchObject({
+      allowed: false,
+      code: 'AUTHORIZATION_POLICY_MISSING',
+    })
+  })
 })
 
 function principal(grants: AuthorizationScopeGrant[] = []): RequestPrincipal {

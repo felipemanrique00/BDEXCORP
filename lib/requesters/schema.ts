@@ -35,6 +35,13 @@ export const requesterPayloadSchema = z.object({
   company_id: requesterCompanyIdentifierSchema,
   user_id: nullableIdentifier.default(null),
   funcionario_id: nullableIdentifier.default(null),
+  cost_center_id: z.preprocess(
+    (value) => {
+      const normalized = String(value ?? '').trim()
+      return normalized || null
+    },
+    z.string().uuid().nullable(),
+  ).default(null),
   nome: z.string().trim().min(2).max(200),
   email: z.string().trim().toLowerCase().email().max(320),
   telefone: optionalText(40).default(''),
@@ -84,6 +91,7 @@ export function normalizeLegacyRequester(value: unknown): SolicitanteEmpresa | n
     telefone: record.telefone,
     cargo: record.cargo,
     departamento: record.departamento,
+    cost_center_id: record.cost_center_id,
     centro_custo: record.centro_custo,
     status: record.status,
     pode_criar_demanda: record.pode_criar_demanda,

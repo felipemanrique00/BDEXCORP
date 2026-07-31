@@ -175,6 +175,18 @@ async function releaseTenantResetReferences(
     [tenantId],
   )
   await client.query(
+    `update companies
+     set default_cost_center_id = null
+     where tenant_id = $1 and default_cost_center_id is not null`,
+    [tenantId],
+  )
+  await client.query(
+    `update cost_center_definitions
+     set parent_id = null
+     where tenant_id = $1 and parent_id is not null`,
+    [tenantId],
+  )
+  await client.query(
     `update cost_centers
      set parent_id = null
      where tenant_id = $1 and parent_id is not null`,

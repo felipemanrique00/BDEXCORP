@@ -13,6 +13,7 @@ import { AutomationServiceError } from '@/lib/server/automation-service'
 import { TechIntegrationError } from '@/lib/integrations/tech/tech-errors'
 import { CorporateAccessDeniedError } from '@/lib/server/corporate-access-service'
 import { CorporateFinanceServiceError } from '@/lib/server/corporate-finance-service'
+import { CostCenterServiceError } from '@/lib/server/cost-center-service'
 import { DemandServiceError } from '@/lib/server/demand-service'
 import { DemandTransferError } from '@/lib/server/demand-transfer-service'
 import { DomainRolloutError } from '@/lib/server/domain-rollout-service'
@@ -66,6 +67,7 @@ export function governanceErrorResponse(error: unknown, requestId: string): Next
   }
   if (
     error instanceof DemandServiceError
+    || error instanceof CostCenterServiceError
     || error instanceof DemandTransferError
     || error instanceof DomainRolloutError
     || error instanceof FinanceServiceError

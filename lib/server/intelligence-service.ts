@@ -16,6 +16,7 @@ import { authorizeOrThrow } from '@/lib/server/authorization-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import {
   requireCompanyAccess,
+  requireCompanySelectionAccess,
   requireGroupAccess,
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
@@ -403,8 +404,9 @@ export async function transitionIntelligenceInsightState(
     metadata: {
       fromStatus: currentInsight.status,
       toStatus: input.status,
-      contextType: input.contextType || 'tenant',
-      contextId: input.contextId || null,
+      contextType: overview.scope.type,
+      contextId: overview.scope.id,
+      companyIds: overview.scope.companyIds,
     },
   })
   return updated
@@ -416,6 +418,53 @@ async function resolveIntelligenceScope(
 ): Promise<IntelligenceScope> {
   const allowedCompanies = (principal.corporateAccess?.companies || [])
     .filter((company) => company.permissions.ver_inteligencia)
+
+  if (filters.companyIds?.length) {
+    const companyIds = await requireCompanySelectionAccess(
+      principal,
+      filters.companyIds,
+      'ver_inteligencia',
+    )
+    const companies = companyIds.map((companyId) => {
+      const company = allowedCompanies.find((item) => item.companyId === companyId)
+      return { id: companyId, name: company?.companyName || companyId }
+    })
+
+    if (companyIds.length === 1) {
+      return {
+        type: 'company',
+        id: companyIds[0],
+        label: companies[0]?.name || companyIds[0],
+        companyIds,
+        companies,
+      }
+    }
+
+    const selectedIds = new Set(companyIds)
+    const exactGroup = principal.corporateAccess?.contexts.find((context) => (
+      context.type === 'group'
+      && context.canViewConsolidated
+      && context.companyIds.length === selectedIds.size
+      && context.companyIds.every((companyId) => selectedIds.has(companyId))
+    ))
+    if (exactGroup) {
+      return {
+        type: 'group',
+        id: exactGroup.id,
+        label: exactGroup.label,
+        companyIds,
+        companies,
+      }
+    }
+
+    return {
+      type: 'tenant',
+      id: null,
+      label: `Selecao personalizada (${companyIds.length} empresas)`,
+      companyIds,
+      companies,
+    }
+  }
 
   if (filters.contextType === 'company' && filters.contextId) {
     const access = await requireCompanyAccess(principal, filters.contextId, 'ver_inteligencia')
@@ -827,6 +876,7 @@ async function syncInsightStates(
       companyName: draft.companyName,
       evidence: draft.evidence,
       period: { startDate: filters.startDate, endDate: filters.endDate },
+      companyIds: scope.companyIds,
     }
     const result = await client.query<InsightStateRow>(
       `insert into intelligence_insight_states (

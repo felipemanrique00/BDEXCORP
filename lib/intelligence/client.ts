@@ -4,6 +4,7 @@ import type {
   IntelligenceInsightTransitionInput,
   IntelligenceOverview,
 } from '@/lib/intelligence'
+import { appendCompanyIdsQuery } from '@/lib/company-selection-query'
 import {
   governanceJsonBody,
   requestGovernanceJson,
@@ -35,8 +36,10 @@ export async function transitionIntelligenceInsight(
 
 function queryString(filters: IntelligenceFilters): string {
   const query = new URLSearchParams()
-  Object.entries(filters).forEach(([key, value]) => {
-    if (value) query.set(key, value)
-  })
+  query.set('startDate', filters.startDate)
+  query.set('endDate', filters.endDate)
+  if (filters.contextType) query.set('contextType', filters.contextType)
+  if (filters.contextId) query.set('contextId', filters.contextId)
+  appendCompanyIdsQuery(query, filters.companyIds)
   return `?${query.toString()}`
 }

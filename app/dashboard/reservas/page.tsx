@@ -117,11 +117,15 @@ const INITIAL_FORM: FormState = {
 export default function ReservasPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const { empresas, funcionarios } = useStore()
-  const { context } = useCorporateContext()
-  const { includesCompany } = useCorporateCompanyScope()
+  const { context, isAllCompaniesSelected } = useCorporateContext()
+  const { companyIdsList, includesCompany } = useCorporateCompanyScope()
   const empresasNoContexto = useMemo(
     () => empresas.filter((item) => includesCompany(item.id, 'ver_reservas')),
     [empresas, includesCompany],
+  )
+  const selectedReservationCompanyIds = useMemo(
+    () => companyIdsList.filter((companyId) => includesCompany(companyId, 'ver_reservas')),
+    [companyIdsList, includesCompany],
   )
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<string[]>([])
@@ -212,12 +216,17 @@ export default function ReservasPage() {
   }, [reload])
 
   useEffect(() => {
+    if (!isAllCompaniesSelected && selectedReservationCompanyIds.length === 0) {
+      setQuotes([])
+      setQuotesError('')
+      setQuotesLoading(false)
+      return
+    }
     const controller = new AbortController()
     setQuotesLoading(true)
     setQuotesError('')
     void listTravelQuotesFromServer({
-      companyId: context?.type === 'company' ? context.id : undefined,
-      groupId: context?.type === 'group' ? context.id : undefined,
+      companyIds: isAllCompaniesSelected ? undefined : selectedReservationCompanyIds,
       limit: 120,
     }, controller.signal)
       .then((result) => {
@@ -232,15 +241,20 @@ export default function ReservasPage() {
         if (!controller.signal.aborted) setQuotesLoading(false)
       })
     return () => controller.abort()
-  }, [context?.id, context?.type, reload])
+  }, [isAllCompaniesSelected, reload, selectedReservationCompanyIds])
 
   useEffect(() => {
+    if (!isAllCompaniesSelected && selectedReservationCompanyIds.length === 0) {
+      setRelationalReservations([])
+      setReservationsError('')
+      setReservationsLoading(false)
+      return
+    }
     const controller = new AbortController()
     setReservationsLoading(true)
     setReservationsError('')
     void listTravelReservationsFromServer({
-      companyId: context?.type === 'company' ? context.id : undefined,
-      groupId: context?.type === 'group' ? context.id : undefined,
+      companyIds: isAllCompaniesSelected ? undefined : selectedReservationCompanyIds,
       limit: 120,
     }, controller.signal)
       .then((result) => {
@@ -255,7 +269,7 @@ export default function ReservasPage() {
         if (!controller.signal.aborted) setReservationsLoading(false)
       })
     return () => controller.abort()
-  }, [context?.id, context?.type, reload])
+  }, [isAllCompaniesSelected, reload, selectedReservationCompanyIds])
 
   useEffect(() => {
     setForm((current) => {

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 
 import { disconnectWhatsApp } from '@/lib/assistant/messaging'
-import { guardApiRequest } from '@/lib/security/api-guard'
+import { guardApiRequest, runInApiGuardContext } from '@/lib/security/api-guard'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -13,5 +13,7 @@ export async function POST(request: Request) {
     rateLimit: { key: 'assistant-wa-disconnect', limit: 20, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
-  return NextResponse.json({ ok: true, session: await disconnectWhatsApp() })
+  return runInApiGuardContext(guard, async () => (
+    NextResponse.json({ ok: true, session: await disconnectWhatsApp() })
+  ))
 }

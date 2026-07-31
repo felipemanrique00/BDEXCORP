@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { lifecycleFromLegacyStatus, parseLegacyDemands } from '@/lib/travel/legacy-demand'
+import {
+  lifecycleFromLegacyStatus,
+  parseLegacyDemands,
+  relationalPriorityToLegacy,
+} from '@/lib/travel/legacy-demand'
 
 describe('legacy demand migration mapping', () => {
   it('preserves stable identifiers and maps operational fields without deleting history', () => {
@@ -13,6 +17,8 @@ describe('legacy demand migration mapping', () => {
       tipo_servico: 'Aereo',
       status: 'pendente',
       prioridade: 'urgente',
+      cost_center_id: '00000000-0000-4000-8000-000000000123',
+      centro_custo: 'ADM-001',
       valor_cotacao: 1200.5,
       data_atendimento: '22/07/2026',
       detalhes_aereo: {
@@ -36,6 +42,8 @@ describe('legacy demand migration mapping', () => {
       travelStartDate: '2026-08-15',
       travelEndDate: '2026-08-18',
       destination: 'GRU',
+      costCenterId: '00000000-0000-4000-8000-000000000123',
+      costCenter: 'ADM-001',
       estimatedAmount: 1200.5,
       metadata: {
         legacySnapshot: expect.objectContaining({
@@ -70,5 +78,15 @@ describe('legacy demand migration mapping', () => {
     ['em_andamento', 'quoting'],
   ] as const)('maps status %s to %s', (source, expected) => {
     expect(lifecycleFromLegacyStatus(source)).toBe(expected)
+  })
+
+  it.each([
+    ['low', 'baixa'],
+    ['normal', 'media'],
+    ['high', 'alta'],
+    ['urgent', 'urgente'],
+    ['media', 'media'],
+  ] as const)('maps relational priority %s to legacy priority %s', (source, expected) => {
+    expect(relationalPriorityToLegacy(source)).toBe(expected)
   })
 })

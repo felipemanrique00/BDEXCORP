@@ -63,7 +63,7 @@ export default function FinanceiroPage() {
     () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_financeiro')),
     [empresas, includesCompany],
   )
-  const podeVer = empresasNoContexto.length > 0 && (hasPermission(user, 'ver_financeiro') || hasPermission(user, 'gerenciar_usuarios'))
+  const podeVer = empresasNoContexto.length > 0 && hasPermission(user, 'ver_financeiro')
   const podeEditarEmpresa = (companyId: string | null | undefined) => includesCompany(companyId, 'editar_financeiro')
   const podeEditarNoContexto = empresasNoContexto.some((empresa) => podeEditarEmpresa(empresa.id))
   const podeReprocessar = !user?.corporate_profile && hasPermission(user, 'editar_financeiro')

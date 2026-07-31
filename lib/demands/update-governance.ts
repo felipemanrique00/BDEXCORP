@@ -23,6 +23,7 @@ export interface DemandUpdateSnapshot {
   route: string | null
   startDate: string | null
   endDate: string | null
+  costCenterId: string | null
   costCenter: string | null
   project: string | null
   paymentMethod: string | null
@@ -49,7 +50,7 @@ export function assessDemandUpdate(
       route: previous.route,
       startDate: previous.startDate,
       endDate: previous.endDate,
-      costCenterId: previous.costCenter,
+      costCenterId: previous.costCenterId || previous.costCenter,
       projectId: previous.project,
       paymentMethodId: previous.paymentMethod,
       passengerName: previous.passengerName,
@@ -62,7 +63,7 @@ export function assessDemandUpdate(
       route: current.route,
       startDate: current.startDate,
       endDate: current.endDate,
-      costCenterId: current.costCenter,
+      costCenterId: current.costCenterId || current.costCenter,
       projectId: current.project,
       paymentMethodId: current.paymentMethod,
       passengerName: current.passengerName,

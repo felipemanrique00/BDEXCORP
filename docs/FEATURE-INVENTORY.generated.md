@@ -2,7 +2,7 @@
 
 > Arquivo gerado por `npm run inventory:features`. Nao editar manualmente.
 
-Paginas encontradas: **61**. Rotas de API encontradas: **166**.
+Paginas encontradas: **61**. Rotas de API encontradas: **170**.
 
 ## Paginas
 
@@ -125,6 +125,10 @@ Paginas encontradas: **61**. Rotas de API encontradas: **166**.
 | `/api/automations/process` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/automations` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/automations/runs` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/cost-center-plans/[id]/activate` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/cost-center-plans` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/cost-centers/[id]` | `GET, PATCH, DELETE` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/cost-centers` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands/[id]/assignment` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands/[id]` | `GET, PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands/[id]/status` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |

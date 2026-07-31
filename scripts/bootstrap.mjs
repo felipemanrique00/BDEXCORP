@@ -213,6 +213,7 @@ function roleDefinitions() {
         'operar_cancelamentos', 'gerenciar_integracoes', 'ver_politicas', 'ver_aprovacoes',
         'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos',
         'gerenciar_arquivos', 'usar_busca_global', 'acessar_portal_viajante',
+        'ver_centros_custo',
       ],
     },
     {
@@ -227,6 +228,7 @@ function roleDefinitions() {
         'operar_cotacoes', 'ver_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
         'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos', 'ver_auditoria',
         'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos', 'gerenciar_orcamentos',
+        'ver_centros_custo',
       ],
     },
     {
@@ -247,6 +249,7 @@ function roleDefinitions() {
         'ver_arquivos', 'gerenciar_arquivos', 'ver_auditoria', 'ver_inteligencia',
         'usar_busca_global', 'ver_orcamentos', 'gerenciar_orcamentos',
         'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
+        'ver_centros_custo', 'gerenciar_centros_custo',
       ],
     },
     {
@@ -260,6 +263,7 @@ function roleDefinitions() {
         'operar_cancelamentos', 'gerenciar_integracoes', 'ver_workflows',
         'executar_workflows', 'usar_ia', 'ver_arquivos', 'gerenciar_arquivos',
         'usar_busca_global', 'acessar_portal_viajante',
+        'ver_centros_custo',
       ],
     },
     {
@@ -277,6 +281,7 @@ function roleDefinitions() {
         'usar_ia', 'gerenciar_ia', 'ver_arquivos', 'gerenciar_arquivos', 'ver_auditoria',
         'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos', 'gerenciar_orcamentos',
         'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
+        'ver_centros_custo', 'gerenciar_centros_custo',
       ],
     },
     {
@@ -288,6 +293,7 @@ function roleDefinitions() {
         'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
         'ver_politicas', 'ver_aprovacoes', 'ver_workflows', 'usar_ia',
         'ver_arquivos', 'usar_busca_global', 'acessar_portal_viajante',
+        'ver_centros_custo',
       ],
     },
     {
@@ -299,6 +305,7 @@ function roleDefinitions() {
         'ver_reservas', 'ver_emissoes', 'ver_vouchers', 'ver_relatorios',
         'ver_politicas', 'ver_workflows', 'usar_ia', 'ver_arquivos',
         'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos',
+        'ver_centros_custo',
       ],
     },
   ]

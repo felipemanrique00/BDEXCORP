@@ -3,7 +3,7 @@ import { todayISODate } from '@/lib/date'
 import { Suspense, useEffect, useState, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useStore } from '@/lib/store'
-import { getCurrentUser, canEditCompany, getEmpresasPermitidas } from '@/lib/auth'
+import { getCurrentUser, getEmpresasPermitidas, hasPermission } from '@/lib/auth'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { WhatsAppButton } from '@/components/ui/whatsapp-button'
@@ -46,6 +46,13 @@ interface DocumentoFuncionarioExtraido {
   precisa_revisao?: boolean
   provedor?: string
   modelo?: string
+}
+
+interface CostCenterOption {
+  id: string
+  code: string
+  name: string
+  hierarchyLevel: number
 }
 
 /** Normaliza texto: sem acento, lowercase, trim - para busca tolerante */
@@ -184,7 +191,7 @@ function FuncionariosInner() {
           <button onClick={exportCSV} className="bbt-button-outline text-sm">
             <Download className="w-4 h-4" /> Exportar CSV
           </button>
-          {user?.role === 'master' && (
+          {hasPermission(user, 'cadastrar_funcionarios') && (
             <button
               onClick={() => { setEditing(null); setModalOpen(true) }}
               className="bbt-button-accent text-sm"
@@ -280,7 +287,7 @@ function FuncionariosInner() {
                         <Link href={`/dashboard/funcionarios/${f.id}`} className="p-2 rounded-lg hover:bg-bbt-accent/10 text-slate-500 hover:text-bbt-accent transition" title="Ver detalhes">
                           <Eye className="w-4 h-4" />
                         </Link>
-                        {user && canEditCompany(user, f.company_id, empresas, gruposEmpresariais) && (
+                        {includesCompany(f.company_id, 'gerenciar_funcionarios') && (
                           <>
                             <button onClick={() => { setEditing(f); setModalOpen(true) }} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
                               <Edit2 className="w-4 h-4" />
@@ -388,10 +395,75 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   const [docLoading, setDocLoading] = useState(false)
   const [docResult, setDocResult] = useState<DocumentoFuncionarioExtraido | null>(null)
   const [docError, setDocError] = useState('')
+  const [costCenters, setCostCenters] = useState<CostCenterOption[]>([])
+  const [costCentersLoading, setCostCentersLoading] = useState(false)
+  const [costCentersUnavailable, setCostCentersUnavailable] = useState(false)
+  const [costCentersLoaded, setCostCentersLoaded] = useState(false)
+
+  useEffect(() => {
+    if (!open || !form.company_id) {
+      setCostCenters([])
+      setCostCentersLoading(false)
+      setCostCentersUnavailable(false)
+      setCostCentersLoaded(false)
+      return
+    }
+    const controller = new AbortController()
+    setCostCenters([])
+    setCostCentersLoading(true)
+    setCostCentersUnavailable(false)
+    setCostCentersLoaded(false)
+    void fetch(`/api/cost-centers?companyId=${encodeURIComponent(form.company_id)}`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok || !result?.ok) throw new Error(result?.error || 'Falha ao carregar centros de custo.')
+        const rows = Array.isArray(result.items) ? result.items : []
+        const options = rows.flatMap((item: any): CostCenterOption[] => {
+          const id = String(item?.projectionId || item?.projection_id || item?.companyCostCenterId || '')
+          const code = String(item?.code || '').trim()
+          if (!id || !code || item?.isActive === false) return []
+          return [{
+            id,
+            code,
+            name: String(item?.name || code),
+            hierarchyLevel: Number(item?.hierarchyLevel || item?.hierarchy_level || 1),
+          }]
+        })
+        setCostCenters(options)
+        setCostCentersLoaded(true)
+      })
+      .catch((error) => {
+        if (error?.name !== 'AbortError') {
+          setCostCentersUnavailable(true)
+          setCostCentersLoaded(false)
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCostCentersLoading(false)
+      })
+    return () => controller.abort()
+  }, [open, form.company_id])
+
+  const selectedCostCenterUnavailable = Boolean(
+    costCentersLoaded
+    && form.cost_center_id
+    && !costCenters.some((item) => item.id === form.cost_center_id),
+  )
 
   function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.nome || !form.company_id) { toast.error('Preencha nome e empresa.'); return }
+    if (costCentersLoading) {
+      toast.error('Aguarde o carregamento dos centros de custo.')
+      return
+    }
+    if (selectedCostCenterUnavailable) {
+      toast.error('O centro de custo do funcionário está inativo ou indisponível. Selecione outro centro ou remova o vínculo.')
+      return
+    }
     onSave(form)
   }
 
@@ -575,12 +647,63 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
             </select>
           </Field>
           <Field label="Empresa *">
-            <select required value={form.company_id || ''} onChange={(e) => setForm({ ...form, company_id: e.target.value })} className="bbt-input">
+            <select
+              required
+              value={form.company_id || ''}
+              onChange={(e) => setForm({
+                ...form,
+                company_id: e.target.value,
+                cost_center_id: null,
+                centro_custo: '',
+              })}
+              className="bbt-input"
+            >
               <option value="">Selecione...</option>
               {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
             </select>
           </Field>
-          <Field label="Centro de Custo"><input value={form.centro_custo || ''} onChange={(e) => setForm({ ...form, centro_custo: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Centro de Custo">
+            {costCentersUnavailable ? (
+              <input
+                value={form.centro_custo || ''}
+                onChange={(e) => setForm({ ...form, cost_center_id: null, centro_custo: e.target.value })}
+                className="bbt-input"
+                placeholder="Código legado do centro de custo"
+              />
+            ) : (
+              <select
+                value={form.cost_center_id || ''}
+                onChange={(e) => {
+                  const selected = costCenters.find((item) => item.id === e.target.value)
+                  setForm({
+                    ...form,
+                    cost_center_id: e.target.value || null,
+                    centro_custo: selected?.code || '',
+                  })
+                }}
+                className="bbt-input"
+                disabled={costCentersLoading || !form.company_id}
+              >
+                {selectedCostCenterUnavailable && (
+                  <option value={form.cost_center_id || ''} disabled>
+                    {`Indisponível: ${form.centro_custo || form.cost_center_id}`}
+                  </option>
+                )}
+                <option value="">
+                  {costCentersLoading
+                    ? 'Carregando...'
+                    : form.centro_custo && !form.cost_center_id
+                      ? `Legado: ${form.centro_custo}`
+                      : 'Sem centro de custo'}
+                </option>
+                {costCenters.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {`${'— '.repeat(Math.max(0, item.hierarchyLevel - 1))}${item.code} · ${item.name}`}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
           <Field label="Passaporte"><input value={form.passaporte || ''} onChange={(e) => setForm({ ...form, passaporte: e.target.value })} className="bbt-input" /></Field>
           <Field label="Validade Passaporte"><input type="date" value={form.passaporte_validade || ''} onChange={(e) => setForm({ ...form, passaporte_validade: e.target.value })} className="bbt-input" /></Field>
           <Field label="Registro CNH"><input value={form.cnh_registro || ''} onChange={(e) => setForm({ ...form, cnh_registro: e.target.value })} className="bbt-input" /></Field>

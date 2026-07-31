@@ -68,7 +68,7 @@ function mergeRecordArrays(currentItems: any[], incomingItems: any[]): any[] {
 
   const addItems = (items: any[]) => {
     for (const item of items) {
-      const deletedKey = getDeleteRecordKey(item)
+      const deletedKey = getStorageDeleteRecordKey(item)
       if (deletedKey) {
         map.delete(deletedKey)
         continue
@@ -195,12 +195,12 @@ function createArraySyncValue(previousItems: any[], nextItems: any[]): any[] {
 }
 
 function combineArraySyncValues(previousPatch: any[], nextPatch: any[]): any[] {
-  const nextItems = nextPatch.filter((item) => !getDeleteRecordKey(item))
+  const nextItems = nextPatch.filter((item) => !getStorageDeleteRecordKey(item))
   const nextKeys = new Set(nextItems.map(storageRecordKey).filter(Boolean))
   const markerKeys = new Set<string>()
 
   for (const item of [...previousPatch, ...nextPatch]) {
-    const deletedKey = getDeleteRecordKey(item)
+    const deletedKey = getStorageDeleteRecordKey(item)
     if (deletedKey && !nextKeys.has(deletedKey)) markerKeys.add(deletedKey)
   }
 
@@ -215,7 +215,7 @@ function createDeleteRecordMarker(recordKey: string): DeleteRecordMarker {
   return { [DELETE_RECORD_KEY]: recordKey }
 }
 
-function getDeleteRecordKey(item: any): string {
+export function getStorageDeleteRecordKey(item: any): string {
   if (!isPlainObject(item)) return ''
   return clean(item[DELETE_RECORD_KEY])
 }

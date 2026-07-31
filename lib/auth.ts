@@ -84,6 +84,22 @@ export function hasPermission(user: User | null, permission: keyof Permissoes): 
   return Boolean(user && user.ativo !== false && getPermissoes(user)[permission])
 }
 
+export function canManageUserAccess(user: User | null): boolean {
+  if (!user || user.ativo === false) return false
+  if (user.platform_admin) return true
+  if (
+    user.role === 'master'
+    || ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'].includes(user.role_key || '')
+  ) {
+    return hasPermission(user, 'gerenciar_usuarios')
+      && hasPermission(user, 'gerenciar_vinculos_acesso')
+  }
+  return Boolean(user.corporate_access?.companies.some((company) => (
+    company.permissions.gerenciar_usuarios
+    && company.permissions.gerenciar_vinculos_acesso
+  )))
+}
+
 export function canEditGlobal(user: User | null): boolean {
   if (!user || user.ativo === false) return false
   return user.role === 'master' && !hasScopedAccess(user)

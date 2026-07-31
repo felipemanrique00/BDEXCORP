@@ -11,6 +11,8 @@ build/
 .env.local
 .env.production
 .env.production.local
+.env.staging
+.env.staging.local
 .bbt-storage/
 .server-backups/
 .server-runtime/

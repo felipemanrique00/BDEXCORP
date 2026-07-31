@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import { mergePermissions, permissionsForCorporateProfile } from '@/lib/corporate-access'
-import { corporateDraftToPayload } from '@/lib/corporate-access-draft'
+import {
+  corporateDraftPermissionState,
+  corporateDraftToPayload,
+  isCorporateAccessDraftReady,
+  setCorporateDraftCustomization,
+  setCorporateDraftPermission,
+  type CorporateAccessDraft,
+} from '@/lib/corporate-access-draft'
 import { corporateAccessConfigurationSchema } from '@/lib/corporate-access-schema'
 import { resolverEscopoGrupoUsuario } from '@/lib/grupos'
 import {
@@ -72,6 +79,13 @@ function companyGrant(
 }
 
 describe('corporate access policy', () => {
+  it('does not allow a draft loaded for one user to be submitted for another', () => {
+    expect(isCorporateAccessDraftReady('user-b', 'user-a', false)).toBe(false)
+    expect(isCorporateAccessDraftReady('user-b', 'user-b', true)).toBe(false)
+    expect(isCorporateAccessDraftReady('user-b', 'user-b', false)).toBe(true)
+    expect(isCorporateAccessDraftReady(null, null, false)).toBe(true)
+  })
+
   it('expande all_companies para todas as empresas atuais e futuras do grupo', () => {
     const result = calculateCorporateAccess(baseInput, companies, groups, [groupGrant()], [], null, true)
 
@@ -300,7 +314,99 @@ describe('corporate permission templates and validation', () => {
       permissionOverrides: { criar_demandas: false },
     })
   })
+
+  it('detecta personalizacao em vinculo que nao seja o primeiro', () => {
+    const draft = mixedCorporateAccessDraft()
+    const state = corporateDraftPermissionState(
+      draft.profile,
+      draft.groupGrants,
+      draft.companyGrants,
+    )
+
+    expect(state.customPermissions).toBe(true)
+    expect(state.permissions.ver_financeiro).toBe(false)
+    expect(state.permissions.criar_demandas).toBe(false)
+  })
+
+  it('preserva perfis e deltas por vinculo ao ativar e editar personalizacao global', () => {
+    const draft = mixedCorporateAccessDraft()
+    const enabled = setCorporateDraftCustomization(
+      { ...draft, customPermissions: false },
+      true,
+    )
+
+    expect(enabled.groupGrants[0]).toMatchObject({
+      profile: 'ceo',
+      permissionOverrides: {},
+    })
+    expect(enabled.companyGrants[0]).toMatchObject({
+      profile: 'requester',
+      permissionOverrides: { criar_demandas: false },
+    })
+
+    const changed = setCorporateDraftPermission(enabled, 'ver_financeiro', true)
+    expect(changed.groupGrants[0]).toMatchObject({
+      profile: 'ceo',
+      permissionOverrides: {},
+    })
+    expect(changed.companyGrants[0]).toMatchObject({
+      profile: 'requester',
+      permissionOverrides: {
+        criar_demandas: false,
+        ver_financeiro: true,
+      },
+    })
+    expect(corporateDraftToPayload(changed).companyGrants[0]).toMatchObject({
+      profile: 'requester',
+      permissionOverrides: {
+        criar_demandas: false,
+        ver_financeiro: true,
+      },
+    })
+  })
+
+  it('restaura as bases de cada perfil sem homogeneizar vinculos', () => {
+    const restored = setCorporateDraftCustomization(mixedCorporateAccessDraft(), false)
+
+    expect(restored.customPermissions).toBe(false)
+    expect(restored.groupGrants[0]).toMatchObject({
+      profile: 'ceo',
+      permissionOverrides: {},
+    })
+    expect(restored.companyGrants[0]).toMatchObject({
+      profile: 'requester',
+      permissionOverrides: {},
+    })
+  })
 })
+
+function mixedCorporateAccessDraft(): CorporateAccessDraft {
+  return {
+    profile: 'ceo',
+    customPermissions: true,
+    permissions: permissionsForCorporateProfile('ceo', {}),
+    groupGrants: [{
+      groupId: 'group-a',
+      profile: 'ceo',
+      permissionOverrides: {},
+      accessMode: 'all_companies',
+      companyIds: [],
+      canViewConsolidated: true,
+      status: 'active',
+      validFrom: '',
+      validUntil: '',
+    }],
+    companyGrants: [{
+      companyId: 'company-c',
+      profile: 'requester',
+      permissionOverrides: { criar_demandas: false },
+      status: 'active',
+      validFrom: '',
+      validUntil: '',
+    }],
+    defaultContextKey: 'group:group-a',
+  }
+}
 
 describe('corporate access delegation', () => {
   const groupAdminPermissions = permissionsForCorporateProfile('group_admin', {})

@@ -7,6 +7,7 @@ export interface IntelligenceFilters {
   endDate: string
   contextType?: 'group' | 'company'
   contextId?: string
+  companyIds?: string[]
 }
 
 export interface IntelligenceScope {

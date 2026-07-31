@@ -29,6 +29,7 @@ export type AuthorizationResource =
   | 'navigation'
   | 'corporate_context'
   | 'companies'
+  | 'cost_centers'
   | 'employees'
   | 'requesters'
   | 'demands'
@@ -104,6 +105,14 @@ const RESOURCE_POLICIES: Record<AuthorizationResource, ResourcePolicy> = {
     update: 'gerenciar_empresas_grupo',
     delete: 'gerenciar_empresas_grupo',
     manage: 'gerenciar_empresas_grupo',
+  },
+  cost_centers: {
+    read: 'ver_centros_custo',
+    list: 'ver_centros_custo',
+    create: 'gerenciar_centros_custo',
+    update: 'gerenciar_centros_custo',
+    delete: 'gerenciar_centros_custo',
+    manage: 'gerenciar_centros_custo',
   },
   employees: {
     read: 'ver_funcionarios',
@@ -292,6 +301,7 @@ const RESOURCE_POLICIES: Record<AuthorizationResource, ResourcePolicy> = {
 }
 
 const COMPANY_SCOPED_RESOURCES = new Set<AuthorizationResource>([
+  'cost_centers',
   'employees',
   'requesters',
   'demands',
@@ -573,6 +583,7 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/users/directory')) return 'approvals'
   if (path.startsWith('/api/users/') && path.includes('/access')) return 'access_grants'
   if (path.startsWith('/api/users')) return 'users'
+  if (path.startsWith('/api/cost-centers') || path.startsWith('/api/cost-center-plans')) return 'cost_centers'
   if (path.startsWith('/api/demands') || path.startsWith('/api/operations/communications')) return 'demands'
   if (path.startsWith('/api/employees')) return 'employees'
   if (path.startsWith('/api/solicitantes')) return 'requesters'
@@ -610,6 +621,9 @@ function inferApiAction(
   payload: Record<string, unknown> | null,
 ): AuthorizationAction {
   const path = pathname.toLowerCase()
+  const normalizedMethod = method.toUpperCase()
+  const routeAction = ROUTE_ACTION_OVERRIDES[`${normalizedMethod} ${path}`]
+  if (routeAction) return routeAction
   if (path.includes('/transition') && /publish/i.test(path)) return 'publish'
   const requestedTransition = firstObjectValue(authorizationSources(payload), [
     'transition',
@@ -628,7 +642,7 @@ function inferApiAction(
   if (path.includes('/settle') || path.includes('/resolve')) return 'settle'
   if (path.includes('/simulate') || path.includes('/test')) return 'execute'
   if (path.includes('/reset')) return 'reset'
-  switch (method.toUpperCase()) {
+  switch (normalizedMethod) {
     case 'GET':
       return 'read'
     case 'POST':
@@ -641,6 +655,12 @@ function inferApiAction(
     default:
       return 'read'
   }
+}
+
+const ROUTE_ACTION_OVERRIDES: Readonly<Record<string, AuthorizationAction>> = {
+  'POST /api/auth/change-password': 'update',
+  'POST /api/auth/logout': 'delete',
+  'POST /api/auth/mfa/recovery-codes': 'update',
 }
 
 function resolveCompanyScope(

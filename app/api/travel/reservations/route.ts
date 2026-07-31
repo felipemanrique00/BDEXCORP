@@ -4,8 +4,10 @@ import { z } from 'zod'
 import { integrationRegistry } from '@/lib/integrations/registry'
 import { publicTechError, TechIntegrationError } from '@/lib/integrations/tech/tech-errors'
 import { travelReservationRequestSchema } from '@/lib/integrations/tech/tech-schemas'
+import { companyIdsQuerySchema } from '@/lib/company-selection-query'
 import { guardApiRequest } from '@/lib/security/api-guard'
 import { readJsonBodyResult } from '@/lib/security/request-body'
+import { CorporateAccessDeniedError } from '@/lib/server/corporate-access-service'
 import {
   executeGovernedTravelReservation,
   listGovernedTravelReservations,
@@ -17,13 +19,22 @@ export const dynamic = 'force-dynamic'
 
 const reservationListQuerySchema = z.object({
   companyId: z.string().trim().min(1).max(160).optional(),
+  companyIds: companyIdsQuerySchema.optional(),
   groupId: z.string().trim().min(1).max(160).optional(),
   demandId: z.string().trim().min(1).max(160).optional(),
   status: z.enum(['draft', 'prepared', 'reserved', 'issued', 'cancelled', 'failed']).optional(),
   search: z.string().trim().min(1).max(200).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
   offset: z.coerce.number().int().min(0).default(0),
-}).strict()
+}).strict().superRefine((value, context) => {
+  if ([value.companyId, value.groupId, value.companyIds?.length ? 'companies' : undefined].filter(Boolean).length > 1) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['companyIds'],
+      message: 'Informe somente um filtro corporativo.',
+    })
+  }
+})
 
 export async function GET(request: Request) {
   const guard = await guardApiRequest(request, {
@@ -57,6 +68,12 @@ export async function GET(request: Request) {
       return NextResponse.json(
         { ok: false, error: error.message, code: error.code, details: error.details },
         { status: error.status, headers: { 'X-Request-Id': guard.requestId } },
+      )
+    }
+    if (error instanceof CorporateAccessDeniedError) {
+      return NextResponse.json(
+        { ok: false, error: error.message, code: error.code },
+        { status: 403, headers: { 'X-Request-Id': guard.requestId } },
       )
     }
     return NextResponse.json(

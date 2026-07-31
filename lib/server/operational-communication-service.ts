@@ -12,6 +12,7 @@ import {
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import {
   requireCompanyAccess,
+  requireCompanySelectionAccess,
   requireGroupAccess,
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
@@ -62,6 +63,7 @@ export async function getOperationalCommunicationOverview(
     startDate: string
     endDate: string
     companyId?: string
+    companyIds?: string[]
     groupId?: string
     serviceType?: string
   },
@@ -69,6 +71,7 @@ export async function getOperationalCommunicationOverview(
   const companyIds = await resolveCompanyScope(
     principal,
     filters.companyId,
+    filters.companyIds,
     filters.groupId,
     'ver_demandas',
   )
@@ -206,12 +209,16 @@ export async function createTravelDeskNote(
 async function resolveCompanyScope(
   principal: RequestPrincipal,
   requestedCompanyId: string | undefined,
+  requestedCompanyIds: string[] | undefined,
   requestedGroupId: string | undefined,
   permission: 'ver_demandas',
 ): Promise<string[]> {
   const allowed = principal.corporateAccess?.companies
     .filter((company) => company.permissions[permission])
     .map((company) => company.companyId) || []
+  if (requestedCompanyIds?.length) {
+    return requireCompanySelectionAccess(principal, requestedCompanyIds, permission)
+  }
   if (requestedCompanyId) {
     await requireCompanyAccess(principal, requestedCompanyId, permission)
     return [requestedCompanyId]

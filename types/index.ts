@@ -41,6 +41,8 @@ export interface Permissoes {
   excluir_demandas: boolean
   aprovar_demandas: boolean
   ver_empresas: boolean
+  ver_centros_custo: boolean
+  gerenciar_centros_custo: boolean
   ver_consolidado_grupo: boolean
   ver_funcionarios: boolean
   gerenciar_funcionarios: boolean
@@ -87,6 +89,8 @@ export interface Permissoes {
 
 const CORPORATE_PERMISSIONS_DENIED = {
   ver_empresas: false,
+  ver_centros_custo: false,
+  gerenciar_centros_custo: false,
   ver_consolidado_grupo: false,
   ver_funcionarios: false,
   gerenciar_funcionarios: false,
@@ -139,7 +143,7 @@ export const PERMISSOES_PADRAO_POR_PERFIL: Record<PerfilBBT, Permissoes> = {
     editar_politicas: true, gerar_relatorios: true, importar_planilhas: true,
     ver_produtividade_todos: true, gerenciar_usuarios: true, excluir_demandas: true,
     aprovar_demandas: true,
-    ver_empresas: true, ver_consolidado_grupo: true,
+    ver_empresas: true, ver_centros_custo: true, gerenciar_centros_custo: true, ver_consolidado_grupo: true,
     ver_funcionarios: true, gerenciar_funcionarios: true,
     ver_solicitantes: true, gerenciar_solicitantes: true,
     criar_demandas: true, ver_demandas: true, ver_reservas: true,
@@ -165,7 +169,7 @@ export const PERMISSOES_PADRAO_POR_PERFIL: Record<PerfilBBT, Permissoes> = {
     editar_politicas: false, gerar_relatorios: true, importar_planilhas: true,
     ver_produtividade_todos: true, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: true,
-    ver_empresas: true, ver_consolidado_grupo: true,
+    ver_empresas: true, ver_centros_custo: true, ver_consolidado_grupo: true,
     ver_funcionarios: true, ver_demandas: true, ver_reservas: true,
     ver_emissoes: true, ver_vouchers: true, ver_relatorios: true,
     exportar_relatorios: true,
@@ -182,7 +186,7 @@ export const PERMISSOES_PADRAO_POR_PERFIL: Record<PerfilBBT, Permissoes> = {
     editar_politicas: true, gerar_relatorios: true, importar_planilhas: true,
     ver_produtividade_todos: true, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: true,
-    ver_empresas: true, ver_consolidado_grupo: true,
+    ver_empresas: true, ver_centros_custo: true, gerenciar_centros_custo: true, ver_consolidado_grupo: true,
     ver_funcionarios: true, gerenciar_funcionarios: true,
     ver_solicitantes: true, gerenciar_solicitantes: true,
     criar_demandas: true, ver_demandas: true, ver_reservas: true,
@@ -206,7 +210,7 @@ export const PERMISSOES_PADRAO_POR_PERFIL: Record<PerfilBBT, Permissoes> = {
     editar_politicas: false, gerar_relatorios: false, importar_planilhas: false,
     ver_produtividade_todos: false, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: false,
-    ver_empresas: true, ver_funcionarios: true, gerenciar_funcionarios: true,
+    ver_empresas: true, ver_centros_custo: true, ver_funcionarios: true, gerenciar_funcionarios: true,
     ver_solicitantes: true, criar_demandas: true, ver_demandas: true,
     ver_reservas: true, ver_emissoes: true, ver_vouchers: true,
     operar_cotacoes: true, operar_reservas: true, operar_emissoes: true,
@@ -223,7 +227,7 @@ export const PERMISSOES_PADRAO_POR_PERFIL: Record<PerfilBBT, Permissoes> = {
     editar_politicas: false, gerar_relatorios: false, importar_planilhas: false,
     ver_produtividade_todos: false, gerenciar_usuarios: false, excluir_demandas: false,
     aprovar_demandas: false,
-    ver_empresas: true, ver_funcionarios: true, ver_solicitantes: true,
+    ver_empresas: true, ver_centros_custo: true, ver_funcionarios: true, ver_solicitantes: true,
     criar_demandas: true, ver_demandas: true, ver_reservas: true,
     ver_emissoes: true, ver_vouchers: true,
     operar_cotacoes: true, operar_reservas: true, operar_emissoes: true,
@@ -242,6 +246,8 @@ const NO_PERMISSIONS: Permissoes = {
   ver_emissoes: false,
   ver_vouchers: false,
   ver_empresas: false,
+  ver_centros_custo: false,
+  gerenciar_centros_custo: false,
   ver_funcionarios: false,
   ver_solicitantes: false,
   operar_cotacoes: false,
@@ -289,7 +295,7 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     gerenciar_integracoes: false,
   },
   ceo: permissions(
-    'ver_financeiro', 'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios',
+    'ver_financeiro', 'ver_empresas', 'ver_centros_custo', 'ver_consolidado_grupo', 'ver_funcionarios',
     'ver_solicitantes', 'ver_demandas', 'aprovar_demandas', 'ver_reservas',
     'ver_emissoes', 'ver_vouchers', 'gerar_relatorios', 'ver_relatorios',
     'exportar_relatorios', 'ver_produtividade_todos',
@@ -298,7 +304,7 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     'ver_auditoria', 'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos',
   ),
   group_admin: permissions(
-    'ver_empresas', 'ver_consolidado_grupo', 'cadastrar_empresas', 'gerenciar_empresas_grupo',
+    'ver_empresas', 'ver_centros_custo', 'gerenciar_centros_custo', 'ver_consolidado_grupo', 'cadastrar_empresas', 'gerenciar_empresas_grupo',
     'ver_funcionarios', 'cadastrar_funcionarios', 'gerenciar_funcionarios',
     'ver_solicitantes', 'gerenciar_solicitantes', 'criar_demandas', 'ver_demandas',
     'aprovar_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
@@ -312,7 +318,7 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
   ),
   executive_assistant: permissions(
-    'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
+    'ver_empresas', 'ver_centros_custo', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
     'criar_demandas', 'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
     'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios',
     'ver_politicas', 'ver_aprovacoes',
@@ -320,7 +326,7 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     'gerenciar_arquivos', 'usar_busca_global', 'acessar_portal_viajante',
   ),
   group_finance: permissions(
-    'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
+    'ver_empresas', 'ver_centros_custo', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
     'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers', 'ver_financeiro',
     'editar_financeiro', 'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios',
     'ver_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
@@ -329,7 +335,7 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     'ver_orcamentos', 'gerenciar_orcamentos',
   ),
   manager: permissions(
-    'ver_empresas', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
+    'ver_empresas', 'ver_centros_custo', 'ver_consolidado_grupo', 'ver_funcionarios', 'ver_solicitantes',
     'criar_demandas', 'ver_demandas', 'aprovar_demandas', 'ver_reservas',
     'ver_emissoes', 'ver_vouchers', 'gerar_relatorios', 'ver_relatorios',
     'exportar_relatorios',
@@ -338,14 +344,14 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos',
   ),
   viewer: permissions(
-    'ver_empresas', 'ver_funcionarios', 'ver_solicitantes', 'ver_demandas',
+    'ver_empresas', 'ver_centros_custo', 'ver_funcionarios', 'ver_solicitantes', 'ver_demandas',
     'ver_reservas', 'ver_emissoes', 'ver_vouchers', 'ver_relatorios',
     'ver_politicas',
     'ver_workflows', 'usar_ia', 'ver_arquivos', 'ver_inteligencia',
     'usar_busca_global', 'ver_orcamentos',
   ),
   company_admin: permissions(
-    'ver_empresas', 'ver_funcionarios', 'cadastrar_funcionarios', 'gerenciar_funcionarios',
+    'ver_empresas', 'ver_centros_custo', 'gerenciar_centros_custo', 'ver_funcionarios', 'cadastrar_funcionarios', 'gerenciar_funcionarios',
     'ver_solicitantes', 'gerenciar_solicitantes', 'criar_demandas', 'ver_demandas',
     'aprovar_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
     'gerar_relatorios', 'ver_relatorios', 'exportar_relatorios', 'editar_politicas',
@@ -359,7 +365,7 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     'executar_automacoes', 'gerenciar_automacoes', 'acessar_portal_viajante',
   ),
   requester: permissions(
-    'ver_empresas', 'ver_funcionarios', 'ver_solicitantes', 'criar_demandas',
+    'ver_empresas', 'ver_centros_custo', 'ver_funcionarios', 'ver_solicitantes', 'criar_demandas',
     'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
     'ver_politicas', 'ver_aprovacoes',
     'ver_workflows', 'usar_ia', 'ver_arquivos', 'usar_busca_global',
@@ -447,6 +453,7 @@ export interface User {
   grupo_ids?: string[]
   perfil_bbt?: PerfilBBT
   permissoes?: Permissoes
+  permission_overrides?: Partial<Permissoes>
   corporate_profile?: CorporateProfile
   corporate_access?: CorporateAccessSummary
   avatar?: string
@@ -490,6 +497,7 @@ export interface Empresa {
   email_responsavel: string
   telefone: string
   centro_custo_padrao: string
+  centro_custo_padrao_id?: string | null
   ativa: boolean
   is_master_holding?: boolean
   tech_travel_client_names?: string[]
@@ -542,6 +550,7 @@ export interface Funcionario {
   cargo: Cargo
   cargo_original?: string
   centro_custo: string
+  cost_center_id?: string | null
   matricula?: string
   lotacao?: string
   aliases_nome?: string[]
@@ -743,6 +752,7 @@ export interface Atendimento {
 
   // --- V8: Campos adicionais para gestão completa ---
   forma_pagamento?: FormaPagamento     // como o cliente vai pagar (IV/PX/CP/CC)
+  cost_center_id?: string | null        // FK relacional; centro_custo permanece como snapshot
   centro_custo?: string                // centro de custo da empresa
   projeto_obra?: string                // projeto/obra que justifica a viagem
   numero_solicitacao?: string          // número de solicitação interno do cliente
@@ -966,6 +976,7 @@ export interface SolicitanteEmpresa {
   cargo?: string
   departamento?: string
   centro_custo?: string
+  cost_center_id?: string | null
   status: StatusSolicitanteEmpresa
   pode_criar_demanda: boolean
   pode_ver_vouchers: boolean

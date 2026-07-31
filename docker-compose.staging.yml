@@ -1,0 +1,158 @@
+name: bbt-corporativo-staging
+
+x-staging-app-environment: &staging-app-environment
+  NODE_ENV: production
+  APP_ENVIRONMENT: staging
+  APP_URL: ${APP_URL:?Defina APP_URL}
+  NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?Defina NEXT_PUBLIC_APP_URL}
+  APP_VERSION: ${APP_VERSION:?Defina APP_VERSION}
+  ALLOW_INSECURE_LOCALHOST: "false"
+  DATABASE_URL: ${DATABASE_URL:?Defina DATABASE_URL}
+  DATABASE_SSL: ${DATABASE_SSL:-false}
+  POSTGRES_POOL_MAX: ${POSTGRES_POOL_MAX:-10}
+  POSTGRES_CONNECT_TIMEOUT_MS: ${POSTGRES_CONNECT_TIMEOUT_MS:-5000}
+  POSTGRES_STATEMENT_TIMEOUT_MS: ${POSTGRES_STATEMENT_TIMEOUT_MS:-30000}
+  AUTOMATION_WORKER_ENABLED: ${AUTOMATION_WORKER_ENABLED:-true}
+  AUTOMATION_WORKER_INTERVAL_MS: ${AUTOMATION_WORKER_INTERVAL_MS:-5000}
+  AUTOMATION_WORKER_BATCH_SIZE: ${AUTOMATION_WORKER_BATCH_SIZE:-25}
+  AUTH_SECRET: ${AUTH_SECRET:?Defina AUTH_SECRET}
+  AUTH_SESSION_HOURS: ${AUTH_SESSION_HOURS:-12}
+  AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-bbt_session_staging}
+  MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?Defina MFA_ENCRYPTION_KEY}
+  MFA_ADMIN_REQUIRED: "true"
+  MFA_ISSUER: ${MFA_ISSUER:-BBT Corporativo Staging}
+  MFA_CHALLENGE_MINUTES: ${MFA_CHALLENGE_MINUTES:-10}
+  MFA_MAX_ATTEMPTS: ${MFA_MAX_ATTEMPTS:-6}
+  STORAGE_ROOT: /var/lib/bbt/files
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-15728640}
+  SMTP_ENABLED: ${SMTP_ENABLED:-false}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_SECURE: ${SMTP_SECURE:-false}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_FROM_NAME: ${SMTP_FROM_NAME:-BBT Corporativo}
+  WHATSAPP_ENABLED: "false"
+  WHATSAPP_API_BASE_URL: ""
+  WHATSAPP_API_KEY: ""
+  WHATSAPP_INSTANCE_ID: ""
+  TECH_API_ENABLED: "false"
+  TECH_API_MODE: sandbox
+  TECH_API_BASE_URL: ""
+  TECH_API_LOGIN: ""
+  TECH_API_PASSWORD: ""
+  TECH_API_KEY: ""
+  TECH_REPORTS_ENABLED: "false"
+  TECH_REPORTS_BASE_URL: ""
+  TECH_REPORTS_KEY: ""
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GEMINI_API_KEY: ""
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  staging_postgres:
+    image: postgres:16.8-alpine3.21
+    container_name: bbt-db-staging
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Defina POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Defina POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data_staging:/var/lib/postgresql/data
+    networks:
+      - private_staging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+
+  staging_migrate:
+    image: ${BBT_IMAGE:-bbt-corporativo-staging}:${APP_VERSION:?Defina APP_VERSION}
+    build:
+      context: .
+      target: runtime
+    environment:
+      <<: *staging-app-environment
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Defina MIGRATION_DATABASE_URL}
+      DATABASE_APP_ROLE: ${DATABASE_APP_ROLE:?Defina DATABASE_APP_ROLE}
+      DATABASE_APP_PASSWORD: ${DATABASE_APP_PASSWORD:?Defina DATABASE_APP_PASSWORD}
+    command: ["node", "scripts/migrate.mjs", "up"]
+    depends_on:
+      staging_postgres:
+        condition: service_healthy
+    networks:
+      - private_staging
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  staging_app:
+    image: ${BBT_IMAGE:-bbt-corporativo-staging}:${APP_VERSION:?Defina APP_VERSION}
+    container_name: bbt-app-staging
+    restart: unless-stopped
+    environment:
+      <<: *staging-app-environment
+    volumes:
+      - app_files_staging:/var/lib/bbt/files
+    depends_on:
+      staging_postgres:
+        condition: service_healthy
+      staging_migrate:
+        condition: service_completed_successfully
+    networks:
+      - private_staging
+      - edge
+    ports:
+      - "127.0.0.1:3001:3000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+  staging_bootstrap:
+    image: ${BBT_IMAGE:-bbt-corporativo-staging}:${APP_VERSION:?Defina APP_VERSION}
+    profiles: ["bootstrap"]
+    environment:
+      <<: *staging-app-environment
+      BOOTSTRAP_TENANT_NAME: ${BOOTSTRAP_TENANT_NAME:?Defina BOOTSTRAP_TENANT_NAME}
+      BOOTSTRAP_TENANT_SLUG: ${BOOTSTRAP_TENANT_SLUG:?Defina BOOTSTRAP_TENANT_SLUG}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:?Defina BOOTSTRAP_ADMIN_NAME}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?Defina BOOTSTRAP_ADMIN_EMAIL}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Defina BOOTSTRAP_ADMIN_PASSWORD}
+      BOOTSTRAP_PLATFORM_ADMIN: ${BOOTSTRAP_PLATFORM_ADMIN:-true}
+      BOOTSTRAP_PLAN_KEY: ${BOOTSTRAP_PLAN_KEY:-staging}
+      BOOTSTRAP_PLAN_NAME: ${BOOTSTRAP_PLAN_NAME:-Staging}
+      BOOTSTRAP_MAX_USERS: ${BOOTSTRAP_MAX_USERS:-50}
+      BOOTSTRAP_MAX_STORAGE_BYTES: ${BOOTSTRAP_MAX_STORAGE_BYTES:-1073741824}
+      BOOTSTRAP_MAX_MONTHLY_OPERATIONS: ${BOOTSTRAP_MAX_MONTHLY_OPERATIONS:-10000}
+      BOOTSTRAP_ENTITLEMENTS: ${BOOTSTRAP_ENTITLEMENTS:-{}}
+    command: ["node", "scripts/bootstrap.mjs"]
+    depends_on:
+      staging_migrate:
+        condition: service_completed_successfully
+    networks:
+      - private_staging
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  private_staging:
+    name: bdex_private_staging
+    internal: true
+  edge:
+    name: bbt-corporativo_edge
+    external: true
+
+volumes:
+  postgres_data_staging:
+    name: postgres_data_staging_v2
+  app_files_staging:
+    name: app_files_staging_v2

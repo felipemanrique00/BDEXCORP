@@ -18,7 +18,7 @@ export async function authenticateAdministrativeTestUser(
 ): Promise<void> {
   const lock = await acquireAuthenticationLock(credentials)
   try {
-    await authenticateWithLock(request, credentials, lock.statePath)
+    await authenticateWithLock(request, credentials, lock.statePath, lock.secretPath)
   } finally {
     await lock.release()
   }
@@ -28,6 +28,7 @@ async function authenticateWithLock(
   request: APIRequestContext,
   credentials: { email: string; password: string; baseUrl: string },
   statePath: string,
+  secretPath: string,
 ): Promise<void> {
   const headers = {
     origin: new URL(credentials.baseUrl).origin,
@@ -53,7 +54,10 @@ async function authenticateWithLock(
 
   const challengeToken = text(loginBody.challengeToken)
   const configuredSecret = String(process.env.E2E_ADMIN_TOTP_SECRET || '').trim()
-  let secret = configuredSecret
+  const persistedSecret = configuredSecret
+    ? ''
+    : String(await readFile(secretPath, 'utf8').catch(() => '')).trim()
+  let secret = configuredSecret || persistedSecret
   if (text(loginBody.code) === 'MFA_ENROLLMENT_REQUIRED') {
     if (configuredSecret) {
       throw new Error(
@@ -69,6 +73,7 @@ async function authenticateWithLock(
       throw new Error(`Inscricao MFA E2E falhou com HTTP ${enrollment.status()}.`)
     }
     secret = text(enrollmentBody.secret)
+    await writeFile(secretPath, secret, { encoding: 'utf8', mode: 0o600 })
   }
   if (!secret) {
     throw new Error(
@@ -143,16 +148,17 @@ async function waitUntilCurrentStep(targetStep: number): Promise<void> {
 
 async function acquireAuthenticationLock(
   credentials: { email: string; baseUrl: string },
-): Promise<{ statePath: string; release(): Promise<void> }> {
+): Promise<{ statePath: string; secretPath: string; release(): Promise<void> }> {
   const executionId = String(process.env.E2E_RUN_ID || '').trim() || `local-parent-${process.ppid}`
   const executionNamespace = createHash('sha256').update(executionId).digest('hex').slice(0, 24)
   const directory = path.join(tmpdir(), 'bbt-e2e-auth', executionNamespace)
-  await mkdir(directory, { recursive: true })
+  await mkdir(directory, { recursive: true, mode: 0o700 })
   const key = createHash('sha256')
     .update(`${credentials.baseUrl.replace(/\/$/, '')}\0${credentials.email.trim().toLowerCase()}`)
     .digest('hex')
   const lockPath = path.join(directory, `${key}.lock`)
   const statePath = path.join(directory, `${key}.step`)
+  const secretPath = path.join(directory, `${key}.totp`)
   const startedAt = Date.now()
 
   while (true) {
@@ -160,6 +166,7 @@ async function acquireAuthenticationLock(
       const handle = await open(lockPath, 'wx')
       return {
         statePath,
+        secretPath,
         async release() {
           await handle.close()
           await rm(lockPath, { force: true })

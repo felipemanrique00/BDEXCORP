@@ -6,6 +6,7 @@ import { DollarSign, Percent, AlertCircle, Save } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import type { Empresa, ConfigCobrancaEmpresa } from '@/types'
 import { CONFIG_COBRANCA_PADRAO } from '@/types'
+import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
 
 interface Props {
   open: boolean
@@ -16,6 +17,7 @@ interface Props {
 export function ConfigCobrancaModal({ open, onClose, empresa }: Props) {
   const { updateConfigCobranca } = useStore()
   const [config, setConfig] = useState<ConfigCobrancaEmpresa>(CONFIG_COBRANCA_PADRAO)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open || !empresa) return
@@ -24,11 +26,24 @@ export function ConfigCobrancaModal({ open, onClose, empresa }: Props) {
 
   if (!empresa) return null
 
-  function salvar(e: React.FormEvent) {
+  async function salvar(e: React.FormEvent) {
     e.preventDefault()
     if (!empresa) return
+    setSaving(true)
     updateConfigCobranca(empresa.id, config)
+    const result = await flushPendingRemoteStorageWithResult()
+    if (!result.confirmed) {
+      toast.error('Configuração alterada localmente, mas ainda não confirmada pelo servidor.')
+      setSaving(false)
+      return
+    }
+    if (!result.fullyAccepted) {
+      toast.error('A configuração não foi aplicada porque seu acesso foi alterado ou não permite esta operação.')
+      window.setTimeout(() => window.location.reload(), 900)
+      return
+    }
     toast.success('Configuração de cobrança salva!')
+    setSaving(false)
     onClose()
   }
 
@@ -172,8 +187,8 @@ export function ConfigCobrancaModal({ open, onClose, empresa }: Props) {
 
         <div className="flex justify-end gap-2 pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
           <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
-          <button type="submit" className="bbt-button-primary flex items-center gap-2">
-            <Save className="w-4 h-4" /> Salvar Configuração
+          <button type="submit" disabled={saving} className="bbt-button-primary flex items-center gap-2">
+            <Save className="w-4 h-4" /> {saving ? 'Salvando...' : 'Salvar Configuração'}
           </button>
         </div>
       </form>

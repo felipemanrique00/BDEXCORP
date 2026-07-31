@@ -7,10 +7,15 @@ import {
   CORPORATE_PROFILES,
   permissionsForCorporateProfile,
 } from '@/lib/corporate-access'
+import { permissionOverridesFromEffective } from '@/lib/permission-overrides'
 import type {
   CompanyAccessDraft,
   CorporateAccessDraft,
   GroupAccessDraft,
+} from '@/lib/corporate-access-draft'
+import {
+  setCorporateDraftCustomization,
+  setCorporateDraftPermission,
 } from '@/lib/corporate-access-draft'
 import {
   CORPORATE_PROFILE_PERMISSIONS,
@@ -22,6 +27,14 @@ import {
 
 export { corporateDraftToPayload, createCorporateAccessDraft } from '@/lib/corporate-access-draft'
 export type { CorporateAccessDraft } from '@/lib/corporate-access-draft'
+
+function currentPermissionOverrides(value: CorporateAccessDraft): Partial<Permissoes> {
+  if (!value.customPermissions) return {}
+  return permissionOverridesFromEffective(
+    CORPORATE_PROFILE_PERMISSIONS[value.profile],
+    value.permissions,
+  )
+}
 
 export function CorporateAccessEditor({
   value,
@@ -47,13 +60,13 @@ export function CorporateAccessEditor({
   const contextOptions = buildContextOptions(value, companies, groups)
 
   function setProfile(profile: CorporateProfile) {
-    const permissions = value.customPermissions
-      ? value.permissions
-      : { ...CORPORATE_PROFILE_PERMISSIONS[profile] }
-    const permissionOverrides = value.customPermissions ? permissions : {}
+    if (profile === value.profile) return
+    const permissions = { ...CORPORATE_PROFILE_PERMISSIONS[profile] }
+    const permissionOverrides = {}
     const next = {
       ...value,
       profile,
+      customPermissions: false,
       permissions,
       groupGrants: value.groupGrants.map((grant) => ({
         ...grant,
@@ -82,7 +95,7 @@ export function CorporateAccessEditor({
       : [...value.groupGrants, {
           groupId,
           profile: value.profile,
-          permissionOverrides: value.customPermissions ? value.permissions : {},
+          permissionOverrides: currentPermissionOverrides(value),
           accessMode: canGrantAllCompanies ? 'all_companies' as const : 'selected_companies' as const,
           companyIds: canGrantAllCompanies ? [] : groupCompanyIds,
           canViewConsolidated: value.permissions.ver_consolidado_grupo
@@ -120,7 +133,7 @@ export function CorporateAccessEditor({
       : [...value.companyGrants, {
           companyId,
           profile: value.profile,
-          permissionOverrides: value.customPermissions ? value.permissions : {},
+          permissionOverrides: currentPermissionOverrides(value),
           status: 'active' as const,
           validFrom: '',
           validUntil: '',
@@ -384,29 +397,11 @@ export function CorporateAccessEditor({
             disabled={disabled}
             checked={value.customPermissions}
             onChange={(event) => {
-              const customPermissions = event.target.checked
-              const permissions = customPermissions
-                ? { ...value.permissions }
-                : { ...CORPORATE_PROFILE_PERMISSIONS[value.profile] }
-              const permissionOverrides = customPermissions ? permissions : {}
-              onChange({
-                ...clearInvalidDefault({
-                ...value,
-                  customPermissions,
-                  permissions,
-                  groupGrants: value.groupGrants.map((grant) => ({
-                    ...grant,
-                    profile: value.profile,
-                    permissionOverrides,
-                    canViewConsolidated: permissions.ver_consolidado_grupo && grant.canViewConsolidated,
-                  })),
-                  companyGrants: value.companyGrants.map((grant) => ({
-                    ...grant,
-                    profile: value.profile,
-                    permissionOverrides,
-                  })),
-                }, companies, groups),
-              })
+              onChange(clearInvalidDefault(
+                setCorporateDraftCustomization(value, event.target.checked),
+                companies,
+                groups,
+              ))
             }}
           />
           Personalizar permissoes do perfil
@@ -420,24 +415,11 @@ export function CorporateAccessEditor({
                   disabled={disabled}
                   checked={value.permissions[permission]}
                   onChange={(event) => {
-                    const permissions = { ...value.permissions, [permission]: event.target.checked }
-                    const next = {
-                      ...value,
-                      permissions,
-                      groupGrants: value.groupGrants.map((grant) => ({
-                        ...grant,
-                        profile: value.profile,
-                        permissionOverrides: permissions,
-                        canViewConsolidated: permission === 'ver_consolidado_grupo' && !event.target.checked
-                          ? false
-                          : grant.canViewConsolidated,
-                      })),
-                      companyGrants: value.companyGrants.map((grant) => ({
-                        ...grant,
-                        profile: value.profile,
-                        permissionOverrides: permissions,
-                      })),
-                    }
+                    const next = setCorporateDraftPermission(
+                      value,
+                      permission,
+                      event.target.checked,
+                    )
                     onChange(clearInvalidDefault(next, companies, groups))
                   }}
                 />

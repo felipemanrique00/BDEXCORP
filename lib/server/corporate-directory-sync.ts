@@ -35,6 +35,7 @@ interface DirectoryCompany {
   contactName: string | null
   contactEmail: string | null
   contactPhone: string | null
+  defaultCostCenterId: string | null
   defaultCostCenter: string | null
   active: boolean
   billingSettings: JsonRecord
@@ -52,6 +53,7 @@ interface DirectoryEmployee {
   phone: string | null
   jobTitle: string | null
   department: string | null
+  costCenterId: string | null
   costCenter: string | null
   registrationCode: string | null
   active: boolean
@@ -68,7 +70,10 @@ export async function syncCorporateDirectoryFromStorage(
   actorUserId: string | null = null,
 ): Promise<void> {
   const state = persistedState(storageValue)
-  const groups = arrayOf(state.gruposEmpresariais).flatMap(parseGroup)
+  const groupValues = Array.isArray(state.gruposEmpresariais) ? state.gruposEmpresariais : null
+  const companyValues = Array.isArray(state.empresas) ? state.empresas : null
+  const employeeValues = Array.isArray(state.funcionarios) ? state.funcionarios : null
+  const groups = (groupValues || []).flatMap(parseGroup)
   const groupByCompany = new Map<string, string>()
   groups.forEach((group) => group.companyIds.forEach((companyId) => {
     if (!groupByCompany.has(companyId)) groupByCompany.set(companyId, group.id)
@@ -88,7 +93,8 @@ export async function syncCorporateDirectoryFromStorage(
          contact_name = excluded.contact_name,
          contact_email = excluded.contact_email,
          status = excluded.status,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+         deleted_at = null
        where business_groups.tenant_id = excluded.tenant_id`,
       [
         group.id, tenantId, group.name, group.code, group.documentNumber,
@@ -103,7 +109,7 @@ export async function syncCorporateDirectoryFromStorage(
     'select id from business_groups where tenant_id = $1 and deleted_at is null',
     [tenantId],
   )).rows.map((row) => row.id))
-  const companies = arrayOf(state.empresas).flatMap((value) => parseCompany(value, groupByCompany))
+  const companies = (companyValues || []).flatMap((value) => parseCompany(value, groupByCompany))
 
   for (const company of companies) {
     const groupId = company.groupId && knownGroups.has(company.groupId) ? company.groupId : null
@@ -126,7 +132,8 @@ export async function syncCorporateDirectoryFromStorage(
          default_cost_center = excluded.default_cost_center,
          status = excluded.status,
          billing_settings = excluded.billing_settings,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+         deleted_at = null
        where companies.tenant_id = excluded.tenant_id`,
       [
         company.id, tenantId, groupId, company.name, documentNumber,
@@ -137,19 +144,44 @@ export async function syncCorporateDirectoryFromStorage(
       ],
     )
     if (!result.rowCount) throw new Error('Identificador de empresa ja utilizado por outro tenant.')
+    await client.query(
+      'select ensure_company_cost_center_plan($1, $2, $3)',
+      [tenantId, company.id, actorUserId],
+    )
+
+    const defaultCostCenter = await resolveCostCenterProjection(
+      client,
+      tenantId,
+      company.id,
+      company.defaultCostCenterId,
+      company.defaultCostCenter,
+    )
+    await client.query(
+      `update companies
+       set default_cost_center_id = $3,
+           default_cost_center = $4
+       where tenant_id = $1 and id = $2`,
+      [tenantId, company.id, defaultCostCenter.id, defaultCostCenter.code],
+    )
   }
 
   const knownCompanies = new Set((await client.query<{ id: string }>(
     'select id from companies where tenant_id = $1 and deleted_at is null',
     [tenantId],
   )).rows.map((row) => row.id))
-  const employees = arrayOf(state.funcionarios).flatMap(parseEmployee)
+  const employees = (employeeValues || []).flatMap(parseEmployee)
   for (const employee of employees) {
     if (!knownCompanies.has(employee.companyId)) {
       throw new Error(`Empresa ${employee.companyId} do funcionario ${employee.id} nao existe no tenant.`)
     }
     await syncEmployee(client, tenantId, employee, actorUserId)
   }
+
+  await reconcileRemovedDirectoryRecords(client, tenantId, actorUserId, {
+    groupIds: groupValues ? groups.map((group) => group.id) : null,
+    companyIds: companyValues ? companies.map((company) => company.id) : null,
+    employeeIds: employeeValues ? employees.map((employee) => employee.id) : null,
+  })
 }
 
 async function syncEmployee(
@@ -187,14 +219,22 @@ async function syncEmployee(
     }
   }
 
+  const costCenter = await resolveCostCenterProjection(
+    client,
+    tenantId,
+    employee.companyId,
+    employee.costCenterId,
+    employee.costCenter,
+  )
+
   const result = await client.query(
     `insert into employees (
        id, tenant_id, company_id, identification_code, full_name,
-       document_number, email, phone, job_title, department, cost_center,
+       document_number, email, phone, job_title, department, cost_center_id, cost_center,
        registration_code, status, metadata, created_by, updated_by,
        created_at, updated_at
-     ) values ($1, $2, $3, $4, $5, $6, $7::citext, $8, $9, $10, $11,
-               $12, $13, $14::jsonb, $15, $15, $16, $17)
+     ) values ($1, $2, $3, $4, $5, $6, $7::citext, $8, $9, $10, $11, $12,
+               $13, $14, $15::jsonb, $16, $16, $17, $18)
      on conflict (id) do update set
        company_id = excluded.company_id,
        full_name = excluded.full_name,
@@ -203,19 +243,21 @@ async function syncEmployee(
        phone = excluded.phone,
        job_title = excluded.job_title,
        department = excluded.department,
+       cost_center_id = excluded.cost_center_id,
        cost_center = excluded.cost_center,
        registration_code = excluded.registration_code,
        status = excluded.status,
        metadata = employees.metadata || excluded.metadata,
        updated_by = excluded.updated_by,
-       updated_at = greatest(employees.updated_at, excluded.updated_at)
+       updated_at = greatest(employees.updated_at, excluded.updated_at),
+       deleted_at = null
      where employees.tenant_id = excluded.tenant_id`,
     [
       employee.id, tenantId, employee.companyId, identificationCode, employee.fullName,
       employee.documentNumber, employee.email, employee.phone, employee.jobTitle,
-      employee.department, employee.costCenter, employee.registrationCode,
-      employee.active ? 'active' : 'inactive', JSON.stringify(employee.metadata),
-      actorUserId, employee.createdAt, employee.updatedAt,
+      employee.department, costCenter.id, costCenter.code, employee.registrationCode,
+      employee.active ? 'active' : 'inactive', JSON.stringify(employee.metadata), actorUserId,
+      employee.createdAt, employee.updatedAt,
     ],
   )
   if (!result.rowCount) throw new Error('Identificador de funcionario ja utilizado por outro tenant.')
@@ -245,6 +287,98 @@ async function syncEmployee(
         alias === employee.fullName ? 'canonical_name' : 'legacy_import',
         actorUserId,
       ],
+    )
+  }
+}
+
+async function resolveCostCenterProjection(
+  client: PoolClient,
+  tenantId: string,
+  companyId: string,
+  costCenterId: string | null,
+  legacyCode: string | null,
+): Promise<{ id: string | null; code: string | null }> {
+  if (costCenterId) {
+    const result = await client.query<{ id: string; code: string }>(
+      `select id, code
+       from cost_centers
+       where tenant_id = $1
+         and company_id = $2
+         and id = $3
+         and status = 'active'
+         and deleted_at is null
+       limit 1`,
+      [tenantId, companyId, costCenterId],
+    )
+    if (!result.rowCount) {
+      throw new Error('Centro de custo inativo ou fora do escopo da empresa.')
+    }
+    return result.rows[0]
+  }
+
+  if (!legacyCode) return { id: null, code: null }
+  const result = await client.query<{ id: string; code: string }>(
+    `select id, code
+     from cost_centers
+     where tenant_id = $1
+       and company_id = $2
+       and lower(code) = lower($3)
+       and status = 'active'
+       and deleted_at is null
+     limit 1`,
+    [tenantId, companyId, legacyCode],
+  )
+  return result.rows[0] || { id: null, code: legacyCode }
+}
+
+async function reconcileRemovedDirectoryRecords(
+  client: PoolClient,
+  tenantId: string,
+  actorUserId: string | null,
+  directory: {
+    groupIds: string[] | null
+    companyIds: string[] | null
+    employeeIds: string[] | null
+  },
+): Promise<void> {
+  if (directory.employeeIds) {
+    await client.query(
+      `update employees
+       set status = 'inactive',
+           deleted_at = coalesce(deleted_at, now()),
+           updated_at = now(),
+           updated_by = $3
+       where tenant_id = $1
+         and deleted_at is null
+         and not (id = any($2::text[]))`,
+      [tenantId, directory.employeeIds, actorUserId],
+    )
+  }
+
+  if (directory.companyIds) {
+    await client.query(
+      `update companies
+       set status = 'inactive',
+           deleted_at = coalesce(deleted_at, now()),
+           updated_at = now(),
+           updated_by = $3
+       where tenant_id = $1
+         and deleted_at is null
+         and not (id = any($2::text[]))`,
+      [tenantId, directory.companyIds, actorUserId],
+    )
+  }
+
+  if (directory.groupIds) {
+    await client.query(
+      `update business_groups
+       set status = 'inactive',
+           deleted_at = coalesce(deleted_at, now()),
+           updated_at = now()
+       where tenant_id = $1
+         and deleted_at is null
+         and not (id = any($2::text[]))`,
+      [tenantId, directory.groupIds],
     )
   }
 }
@@ -323,6 +457,7 @@ function parseCompany(value: unknown, groupByCompany: Map<string, string>): Dire
     contactName: nullableText(value.responsavel, 240),
     contactEmail: nullableText(value.email_responsavel, 254),
     contactPhone: nullableText(value.telefone, 80),
+    defaultCostCenterId: nullableUuid(value.centro_custo_padrao_id),
     defaultCostCenter: nullableText(value.centro_custo_padrao, 240),
     active: value.ativa !== false,
     billingSettings: settings,
@@ -350,6 +485,7 @@ function parseEmployee(value: unknown): DirectoryEmployee[] {
     phone: nullableText(value.telefone, 80),
     jobTitle: nullableText(value.cargo_original, 240) || nullableText(value.cargo, 240),
     department: nullableText(value.lotacao, 240),
+    costCenterId: nullableUuid(value.cost_center_id),
     costCenter: nullableText(value.centro_custo, 240),
     registrationCode: nullableText(value.matricula, 160),
     active: value.ativo !== false,
@@ -385,6 +521,13 @@ function text(value: unknown, max: number): string {
 
 function nullableText(value: unknown, max: number): string | null {
   return text(value, max) || null
+}
+
+function nullableUuid(value: unknown): string | null {
+  const normalized = text(value, 80).toLowerCase()
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)
+    ? normalized
+    : null
 }
 
 function arrayOf(value: unknown): unknown[] {

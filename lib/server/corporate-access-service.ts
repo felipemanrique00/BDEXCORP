@@ -231,6 +231,33 @@ export async function requireGroupAccess(
   return access
 }
 
+export async function requireCompanySelectionAccess(
+  principal: RequestPrincipal,
+  requestedCompanyIds: readonly string[],
+  permission?: keyof Permissoes,
+): Promise<string[]> {
+  const companyIds = [...new Set(requestedCompanyIds.map((companyId) => companyId.trim()).filter(Boolean))]
+  if (companyIds.length === 0) return []
+
+  const companies = await Promise.all(companyIds.map((companyId) => (
+    requireCompanyAccess(principal, companyId, permission)
+  )))
+  if (companyIds.length > 1 && !principal.corporateAccess?.tenantWide) {
+    const consolidated = principal.corporateAccess?.contexts.some((context) => (
+      context.type === 'group'
+      && context.canViewConsolidated
+      && companyIds.every((companyId) => context.companyIds.includes(companyId))
+    ))
+    if (!consolidated) {
+      throw new CorporateAccessDeniedError(
+        'COMPANY_SELECTION_CONSOLIDATED_DENIED',
+        'A visao consolidada desta combinacao de empresas nao esta autorizada.',
+      )
+    }
+  }
+  return companies.map((company) => company.companyId)
+}
+
 export async function resolveCorporateContext(
   principal: RequestPrincipal,
   requested?: { type: 'company' | 'group'; id: string } | null,

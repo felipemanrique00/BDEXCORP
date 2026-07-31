@@ -464,6 +464,9 @@ function montarAtendimento({
     ].join('\n\n'),
     data_atendimento: todayISODate(),
     origem_emissao: 'caixa_entrada',
+    cost_center_id: parsed.centro_custo
+      ? null
+      : funcionario?.cost_center_id || empresa.centro_custo_padrao_id || null,
     centro_custo: parsed.centro_custo || funcionario?.centro_custo || empresa.centro_custo_padrao,
     contato_passageiro: parsed.telefone || undefined,
     detalhes_hotel:

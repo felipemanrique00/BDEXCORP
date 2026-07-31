@@ -87,7 +87,7 @@ const STATUS_LABELS: Record<IntelligenceInsightStatus, string> = {
 const DEFAULT_DATES = defaultPeriod()
 
 export function IntelligenceCenter() {
-  const { context } = useCorporateContext()
+  const { access, context, selectedCompanyIds, selectionLabel, isAllCompaniesSelected } = useCorporateContext()
   const [user, setUser] = useState<User | null>(null)
   const [dateDraft, setDateDraft] = useState<DateDraft>(DEFAULT_DATES)
   const [dates, setDates] = useState<DateDraft>(DEFAULT_DATES)
@@ -107,14 +107,24 @@ export function IntelligenceCenter() {
   useEffect(() => setUser(getCurrentUser()), [])
   const canView = hasPermission(user, 'ver_inteligencia')
   const canManage = hasPermission(user, 'gerenciar_ia')
+  const intelligenceCompanyIds = useMemo(() => selectedCompanyIds.filter((companyId) => (
+    access?.companies.find((company) => company.companyId === companyId)?.permissions.ver_inteligencia
+  )), [access?.companies, selectedCompanyIds])
+  const hasSelectedIntelligenceScope = isAllCompaniesSelected || intelligenceCompanyIds.length > 0
 
   const filters = useMemo<IntelligenceFilters>(() => ({
     ...dates,
-    ...(context ? { contextType: context.type, contextId: context.id } : {}),
-  }), [context, dates])
+    ...(!isAllCompaniesSelected && intelligenceCompanyIds.length ? { companyIds: intelligenceCompanyIds } : {}),
+  }), [dates, intelligenceCompanyIds, isAllCompaniesSelected])
 
   const loadOverview = useCallback(async () => {
     if (!canView) return
+    if (!hasSelectedIntelligenceScope) {
+      setOverview(null)
+      setError('Nenhuma das empresas selecionadas possui acesso ao Centro de Inteligência.')
+      setLoading(false)
+      return
+    }
     setLoading(true)
     setError(null)
     try {
@@ -132,7 +142,7 @@ export function IntelligenceCenter() {
     } finally {
       setLoading(false)
     }
-  }, [canView, filters])
+  }, [canView, filters, hasSelectedIntelligenceScope])
 
   useEffect(() => {
     if (canView) void loadOverview()
@@ -258,7 +268,7 @@ export function IntelligenceCenter() {
               <Building2 className="h-4 w-4 shrink-0 text-cyan-600" />
             )}
             <span className="truncate text-sm font-semibold text-bbt-primary dark:text-white">
-              {context?.label || 'Empresas autorizadas'}
+              {selectionLabel || context?.label || 'Empresas autorizadas'}
             </span>
           </div>
         </div>

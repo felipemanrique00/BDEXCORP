@@ -127,6 +127,7 @@ services:
         condition: service_completed_successfully
     networks:
       - private
+      - egress
     expose:
       - "3000"
     security_opt:
@@ -251,6 +252,7 @@ services:
 
 networks:
   edge:
+  egress:
   private:
     internal: true
 

@@ -152,6 +152,61 @@ describeWithDatabase('PostgreSQL intelligence center', () => {
     expect(overview.kpis.totalSpend).toBe(0)
     expect(overview.insights).toEqual([])
   })
+
+  it('derives company, exact group and custom tenant scopes from company ids', async () => {
+    const companyScope = await getIntelligenceOverview(principal, {
+      startDate: '2025-01-01',
+      endDate: '2025-01-31',
+      companyIds: [companyA],
+    })
+    expect(companyScope.scope).toMatchObject({
+      type: 'company',
+      id: companyA,
+      companyIds: [companyA],
+    })
+
+    const groupedPrincipal = principalFor(tenantId, userId, [companyA, companyB])
+    groupedPrincipal.corporateAccess!.groups = [{
+      groupId: 'group-intelligence',
+      groupName: 'Intelligence Group',
+      companyIds: [companyA, companyB],
+      canViewConsolidated: true,
+      accessModes: ['selected_companies'],
+      profiles: ['manager'],
+    }]
+    const groupScope = await getIntelligenceOverview(groupedPrincipal, {
+      startDate: '2025-01-01',
+      endDate: '2025-01-31',
+      companyIds: [companyB, companyA],
+    })
+    expect(groupScope.scope).toMatchObject({
+      type: 'group',
+      id: 'group-intelligence',
+      companyIds: [companyB, companyA],
+    })
+
+    const tenantWidePrincipal = principalFor(tenantId, userId, [companyA, companyB])
+    tenantWidePrincipal.corporateAccess!.tenantWide = true
+    const customScope = await getIntelligenceOverview(tenantWidePrincipal, {
+      startDate: '2025-01-01',
+      endDate: '2025-01-31',
+      companyIds: [companyA, companyB],
+    })
+    expect(customScope.scope).toMatchObject({
+      type: 'tenant',
+      id: null,
+      companyIds: [companyA, companyB],
+    })
+    expect(customScope.scope.label).toContain('Selecao personalizada')
+  })
+
+  it('rejects company selections outside the effective intelligence scope', async () => {
+    await expect(getIntelligenceOverview(principal, {
+      startDate: '2025-01-01',
+      endDate: '2025-01-31',
+      companyIds: [companyA, 'company-not-authorized'],
+    })).rejects.toMatchObject({ code: 'COMPANY_ACCESS_DENIED' })
+  })
 })
 
 function principalFor(

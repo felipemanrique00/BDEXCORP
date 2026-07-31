@@ -25,15 +25,24 @@ import {
   aplicarSolicitantesEmpresaDoServidor,
   getSolicitantesPorEmpresa,
 } from '@/lib/solicitantes-storage'
+import { defaultRequesterLoginSelection } from '@/lib/requester-login-access'
 import type { Empresa, Funcionario, SolicitanteEmpresa } from '@/types'
 
 interface Props {
   empresa: Empresa
   funcionarios: Funcionario[]
   canEdit: boolean
+  canManageLogins: boolean
 }
 
-export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props) {
+interface CostCenterOption {
+  id: string
+  code: string
+  name: string
+  hierarchyLevel: number
+}
+
+export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit, canManageLogins }: Props) {
   const [reload, setReload] = useState(0)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<SolicitanteEmpresa | null>(null)
@@ -260,6 +269,7 @@ export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props
         editing={editing}
         empresa={empresa}
         funcionarios={funcionarios}
+        canManageLogins={canManageLogins}
       />
 
       <ConfirmDialog
@@ -279,58 +289,152 @@ export function SolicitantesEmpresaTab({ empresa, funcionarios, canEdit }: Props
 // FORM
 // ============================================================
 
+function requesterCostCenterSelection(
+  editing: SolicitanteEmpresa | null,
+  empresa: Empresa,
+): { id: string; code: string } {
+  if (editing && (editing.cost_center_id || editing.centro_custo)) {
+    return {
+      id: editing.cost_center_id || '',
+      code: editing.centro_custo || '',
+    }
+  }
+  return {
+    id: empresa.centro_custo_padrao_id || '',
+    code: empresa.centro_custo_padrao || '',
+  }
+}
+
 function SolicitanteForm({
-  open, onClose, editing, empresa, funcionarios,
+  open, onClose, editing, empresa, funcionarios, canManageLogins,
 }: {
   open: boolean
   onClose: () => void
   editing: SolicitanteEmpresa | null
   empresa: Empresa
   funcionarios: Funcionario[]
+  canManageLogins: boolean
 }) {
+  const initialCostCenter = requesterCostCenterSelection(editing, empresa)
   const [funcionarioId, setFuncionarioId] = useState(editing?.funcionario_id || '')
   const [nome, setNome] = useState(editing?.nome || '')
   const [email, setEmail] = useState(editing?.email || '')
   const [telefone, setTelefone] = useState(editing?.telefone || '')
   const [cargo, setCargo] = useState(editing?.cargo || '')
   const [departamento, setDepartamento] = useState(editing?.departamento || '')
-  const [centroCusto, setCentroCusto] = useState(editing?.centro_custo || empresa.centro_custo_padrao || '')
+  const [costCenterId, setCostCenterId] = useState(initialCostCenter.id)
+  const [centroCusto, setCentroCusto] = useState(initialCostCenter.code)
+  const [costCenters, setCostCenters] = useState<CostCenterOption[]>([])
+  const [costCentersLoading, setCostCentersLoading] = useState(false)
+  const [costCentersUnavailable, setCostCentersUnavailable] = useState(false)
+  const [costCentersLoaded, setCostCentersLoaded] = useState(false)
   const [status, setStatus] = useState<SolicitanteEmpresa['status']>(editing?.status || 'ativo')
   const [podeCriar, setPodeCriar] = useState(editing?.pode_criar_demanda ?? true)
   const [podeVouchers, setPodeVouchers] = useState(editing?.pode_ver_vouchers ?? true)
   const [podeFinanceiro, setPodeFinanceiro] = useState(editing?.pode_ver_financeiro ?? false)
   const [limite, setLimite] = useState(editing?.limite_por_solicitacao || 0)
-  const [criarAcesso, setCriarAcesso] = useState(Boolean(editing?.user_id) || !editing)
+  const [criarAcesso, setCriarAcesso] = useState(
+    defaultRequesterLoginSelection(canManageLogins, editing?.user_id, Boolean(editing)),
+  )
   const [salvando, setSalvando] = useState(false)
 
   useEffect(() => {
     if (!open) return
+    const nextCostCenter = requesterCostCenterSelection(editing, empresa)
     setFuncionarioId(editing?.funcionario_id || '')
     setNome(editing?.nome || '')
     setEmail(editing?.email || '')
     setTelefone(editing?.telefone || '')
     setCargo(editing?.cargo || '')
     setDepartamento(editing?.departamento || '')
-    setCentroCusto(editing?.centro_custo || empresa.centro_custo_padrao || '')
+    setCostCenterId(nextCostCenter.id)
+    setCentroCusto(nextCostCenter.code)
     setStatus(editing?.status || 'ativo')
     setPodeCriar(editing?.pode_criar_demanda ?? true)
     setPodeVouchers(editing?.pode_ver_vouchers ?? true)
     setPodeFinanceiro(editing?.pode_ver_financeiro ?? false)
     setLimite(editing?.limite_por_solicitacao || 0)
-    setCriarAcesso(Boolean(editing?.user_id) || !editing)
+    setCriarAcesso(defaultRequesterLoginSelection(canManageLogins, editing?.user_id, Boolean(editing)))
     setSalvando(false)
-  }, [open, editing, empresa])
+  }, [open, editing, empresa, canManageLogins])
+
+  useEffect(() => {
+    if (!open) {
+      setCostCenters([])
+      setCostCentersLoading(false)
+      setCostCentersUnavailable(false)
+      setCostCentersLoaded(false)
+      return
+    }
+    const controller = new AbortController()
+    setCostCenters([])
+    setCostCentersLoading(true)
+    setCostCentersUnavailable(false)
+    setCostCentersLoaded(false)
+    void fetch(`/api/cost-centers?companyId=${encodeURIComponent(empresa.id)}`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok || !result?.ok) throw new Error(result?.error || 'Falha ao carregar centros de custo.')
+        const rows = Array.isArray(result.items) ? result.items : []
+        const options = rows.flatMap((item: any): CostCenterOption[] => {
+          const id = String(item?.projectionId || item?.projection_id || item?.companyCostCenterId || '')
+          const code = String(item?.code || '').trim()
+          if (!id || !code || item?.isActive === false) return []
+          return [{
+            id,
+            code,
+            name: String(item?.name || code),
+            hierarchyLevel: Number(item?.hierarchyLevel || item?.hierarchy_level || 1),
+          }]
+        })
+        setCostCenters(options)
+        setCostCentersLoaded(true)
+      })
+      .catch((error) => {
+        if (error?.name !== 'AbortError') {
+          setCostCentersUnavailable(true)
+          setCostCentersLoaded(false)
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCostCentersLoading(false)
+      })
+    return () => controller.abort()
+  }, [open, empresa.id])
+
+  const selectedCostCenterUnavailable = Boolean(
+    costCentersLoaded
+    && costCenterId
+    && !costCenters.some((item) => item.id === costCenterId),
+  )
 
   const funcionariosEmpresa = funcionarios.filter((f) => f.company_id === empresa.id)
 
   function preencherFuncionario(id: string) {
     setFuncionarioId(id)
-    if (!id) return
+    if (!id) {
+      setCostCenterId(empresa.centro_custo_padrao_id || '')
+      setCentroCusto(empresa.centro_custo_padrao || '')
+      return
+    }
     const f = funcionarios.find((item) => item.id === id)
-    if (!f) return
+    if (!f) {
+      setCostCenterId(empresa.centro_custo_padrao_id || '')
+      setCentroCusto(empresa.centro_custo_padrao || '')
+      return
+    }
     setNome(f.nome)
     if (f.email) setEmail(f.email)
-    if (f.centro_custo) setCentroCusto(f.centro_custo)
+    if (f.cost_center_id || f.centro_custo) {
+      setCostCenterId(f.cost_center_id || '')
+      setCentroCusto(f.centro_custo || '')
+    } else {
+      setCostCenterId(empresa.centro_custo_padrao_id || '')
+      setCentroCusto(empresa.centro_custo_padrao || '')
+    }
     if (f.cargo) setCargo(f.cargo)
   }
 
@@ -343,6 +447,12 @@ function SolicitanteForm({
     if (!nomeT) return toast.error('Informe o nome.')
     if (!emailT) return toast.error('Informe o e-mail.')
     if (!/.+@.+\..+/.test(emailT)) return toast.error('E-mail inválido.')
+    if (costCentersLoading) {
+      return toast.error('Aguarde o carregamento dos centros de custo.')
+    }
+    if (selectedCostCenterUnavailable) {
+      return toast.error('O centro de custo do solicitante está inativo ou indisponível. Selecione outro centro ou remova o vínculo.')
+    }
 
     setSalvando(true)
 
@@ -350,6 +460,7 @@ function SolicitanteForm({
       company_id: empresa.id,
       user_id: editing?.user_id || null,
       funcionario_id: funcionarioId || null,
+      cost_center_id: costCenterId || null,
       nome: nomeT,
       email: emailT,
       telefone: telefone.trim(),
@@ -382,11 +493,19 @@ function SolicitanteForm({
         aplicarSolicitantesEmpresaDoServidor(empresa.id, result.solicitantes)
       }
 
-      toast.success(
-        criarAcesso && !editing?.user_id
-          ? `Solicitante salvo. Um convite seguro foi enviado para ${emailT}.`
-          : editing ? 'Solicitante atualizado.' : 'Solicitante cadastrado.',
-      )
+      if (result.warning?.message) {
+        toast.warning(result.warning.message)
+      } else if (result.access?.state === 'inactive') {
+        toast.warning('Solicitante salvo, mas a conta de login permanece inativa. Revise o estado do usuário.')
+      } else {
+        toast.success(
+          result.access?.invitationSent
+            ? `Solicitante salvo. Um convite seguro foi enviado para ${emailT}.`
+            : result.access?.state === 'active'
+              ? 'Solicitante salvo e acesso de login sincronizado.'
+            : editing ? 'Solicitante atualizado.' : 'Solicitante cadastrado.',
+        )
+      }
       onClose()
     } catch (error: any) {
       toast.error(error?.message || 'Falha ao salvar solicitante.')
@@ -449,7 +568,46 @@ function SolicitanteForm({
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Field label="Centro de custo">
-            <input value={centroCusto} onChange={(e) => setCentroCusto(e.target.value)} className="bbt-input" />
+            {costCentersUnavailable ? (
+              <input
+                value={centroCusto}
+                onChange={(e) => {
+                  setCostCenterId('')
+                  setCentroCusto(e.target.value)
+                }}
+                className="bbt-input"
+                placeholder="Código legado do centro de custo"
+              />
+            ) : (
+              <select
+                value={costCenterId}
+                onChange={(e) => {
+                  const selected = costCenters.find((item) => item.id === e.target.value)
+                  setCostCenterId(e.target.value)
+                  setCentroCusto(selected?.code || '')
+                }}
+                className="bbt-input"
+                disabled={costCentersLoading}
+              >
+                {selectedCostCenterUnavailable && (
+                  <option value={costCenterId} disabled>
+                    {`Indisponível: ${centroCusto || costCenterId}`}
+                  </option>
+                )}
+                <option value="">
+                  {costCentersLoading
+                    ? 'Carregando...'
+                    : centroCusto && !costCenterId
+                      ? `Legado: ${centroCusto}`
+                      : 'Sem centro de custo'}
+                </option>
+                {costCenters.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {`${'— '.repeat(Math.max(0, item.hierarchyLevel - 1))}${item.code} · ${item.name}`}
+                  </option>
+                ))}
+              </select>
+            )}
           </Field>
           <Field label="Limite por solicitação (R$, 0 = sem limite)">
             <input
@@ -481,7 +639,13 @@ function SolicitanteForm({
               : 'Enviar convite seguro para criar o login'}
             checked={criarAcesso}
             onChange={setCriarAcesso}
+            disabled={!canManageLogins}
           />
+          {!canManageLogins && (
+            <p className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+              Seu perfil pode cadastrar o contato, mas não pode criar nem sincronizar contas de login.
+            </p>
+          )}
           {criarAcesso && (
             <p className="rounded border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900 dark:border-cyan-800 dark:bg-cyan-950/30 dark:text-cyan-100">
               {editing?.user_id
@@ -521,13 +685,24 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+function Toggle({
+  label,
+  checked,
+  onChange,
+  disabled = false,
+}: {
+  label: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  disabled?: boolean
+}) {
   return (
-    <label className="flex items-center justify-between cursor-pointer text-sm">
+    <label className={`flex items-center justify-between text-sm ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
       <span className="text-slate-700 dark:text-slate-200">{label}</span>
       <input
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         className="w-4 h-4 accent-bbt-accent"
       />

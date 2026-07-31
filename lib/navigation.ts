@@ -1,4 +1,4 @@
-import {
+﻿import {
   BarChart3,
   Bot,
   Briefcase,
@@ -32,7 +32,7 @@ import {
 } from 'lucide-react'
 
 import { AI_SHORT_NAME } from '@/lib/branding'
-import { hasPermission } from '@/lib/auth'
+import { canManageUserAccess, hasPermission } from '@/lib/auth'
 import type { User } from '@/types'
 
 export interface SidebarMenuItem {
@@ -62,11 +62,15 @@ export function buildSidebarMenu({
   novasDemandas: number
   alertasHoje: number
 }): SidebarMenuGroup[] {
-  const podeFinanceiro = hasPermission(user, 'ver_financeiro') || hasPermission(user, 'gerenciar_usuarios')
+  const podeFinanceiro = hasPermission(user, 'ver_financeiro')
   const podeRelatorios = hasPermission(user, 'gerar_relatorios')
   const podeCadastrarEmpresas = hasPermission(user, 'cadastrar_empresas')
-  const podeImportar = hasPermission(user, 'importar_planilhas') || hasPermission(user, 'gerenciar_usuarios')
-  const podeUsuarios = hasPermission(user, 'gerenciar_usuarios')
+  const podeImportar = hasPermission(user, 'importar_planilhas')
+  const podeAdministrarAcessos = canManageUserAccess(user)
+  const podeVerAuditoria = user.platform_admin === true || (
+    ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'].includes(user.role_key || '')
+    && hasPermission(user, 'ver_auditoria')
+  )
   const podeProdutividade = hasPermission(user, 'ver_produtividade_todos')
   const podeAprovar = hasPermission(user, 'ver_aprovacoes') || hasPermission(user, 'aprovar_demandas')
   const podeVerEmpresas = hasPermission(user, 'ver_empresas')
@@ -146,7 +150,7 @@ export function buildSidebarMenu({
       id: 'cadastros',
       label: 'Cadastros',
       itens: [
-        { href: '/dashboard/empresas', label: 'Empresas', description: 'Clientes, políticas, acessos e contratos', icon: Building2, hidden: !podeCadastrarEmpresas },
+        { href: '/dashboard/empresas', label: 'Empresas', description: 'Clientes, políticas, acessos e contratos', icon: Building2, hidden: !podeVerEmpresas && !podeCadastrarEmpresas },
         { href: '/dashboard/grupos', label: 'Grupos / holdings', description: 'Holdings, grupos econômicos e vínculos', icon: Network, hidden: !hasPermission(user, 'gerenciar_empresas_grupo') },
         { href: '/dashboard/funcionarios', label: 'Viajantes', description: 'Funcionários, documentos e perfis', icon: Users, hidden: !podeVerFuncionarios },
         { href: '/dashboard/hoteis', label: 'Hotéis', description: 'Fornecedores e tarifas negociadas', icon: Hotel, hidden: !hasPermission(user, 'cadastrar_hoteis') && !podeVerReservas },
@@ -164,7 +168,7 @@ export function buildSidebarMenu({
         { href: '/dashboard/ia/conhecimento', label: 'Base de conhecimento', description: 'Conteúdo corporativo autorizado para a BIA', icon: LibraryBig, hidden: !podeGerenciarIa },
         { href: '/dashboard/automacoes', label: 'Central de automações', description: 'Eventos, regras, workflows e execuções', icon: Zap, hidden: !hasPermission(user, 'executar_automacoes') && !hasPermission(user, 'gerenciar_automacoes') },
         { href: '/dashboard/sustentabilidade', label: 'Sustentabilidade', description: 'ESG e pegada de carbono', icon: Leaf, hidden: !hasPermission(user, 'ver_relatorios') },
-        { href: '/dashboard/auditoria', label: 'Auditoria', description: 'Trilha de ações e alterações', icon: History, hidden: !podeUsuarios },
+        { href: '/dashboard/auditoria', label: 'Auditoria', description: 'Trilha de ações e alterações', icon: History, hidden: !podeVerAuditoria },
       ],
     },
     {
@@ -172,7 +176,7 @@ export function buildSidebarMenu({
       label: 'Administração',
       itens: [
         { href: '/dashboard/plataforma', label: 'Administração SaaS', description: 'Tenants, planos, limites e consumo', icon: ServerCog, hidden: user.platform_admin !== true },
-        { href: '/dashboard/usuarios', label: 'Usuários e permissões', description: 'Equipe interna, clientes e escopos', icon: Shield, hidden: !podeUsuarios && !hasPermission(user, 'gerenciar_vinculos_acesso') },
+        { href: '/dashboard/usuarios', label: 'Usuários e permissões', description: 'Equipe interna, clientes e escopos', icon: Shield, hidden: !podeAdministrarAcessos },
         { href: '/dashboard/workflows', label: 'Workflows empresariais', description: 'Processos, aprovações, delegações e SLA', icon: ShieldCheck, hidden: !podeGerenciarWorkflows },
         { href: '/dashboard/configuracoes', label: 'Configurações', description: 'Sistema, IA e conexões', icon: Settings, hidden: !podeAlterarConfiguracoes },
       ],

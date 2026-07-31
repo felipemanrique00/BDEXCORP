@@ -54,6 +54,13 @@ interface Props {
   prefilledFuncionarioId?: string
 }
 
+interface CostCenterOption {
+  id: string
+  code: string
+  name: string
+  hierarchyLevel: number
+}
+
 const TIPOS: { value: TipoServico; label: string; icon: any }[] = [
   { value: 'Aéreo', label: 'Aéreo', icon: Plane },
   { value: 'Hotel', label: 'Hotel', icon: HotelIcon },
@@ -85,7 +92,7 @@ function diffDays(d1: string, d2: string): number {
 }
 
 export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmpresaId, prefilledFuncionarioId }: Props) {
-  const { empresas, hoteis, addHotel } = useStore()
+  const { empresas, funcionarios, hoteis, addHotel } = useStore()
   const { context } = useCorporateContext()
   const { includesCompany, isConsolidated } = useCorporateCompanyScope()
   const empresasNoContexto = useMemo(
@@ -109,7 +116,12 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
 
   // V8: novos campos
   const [formaPagamento, setFormaPagamento] = useState<FormaPagamento | ''>('')
+  const [costCenterId, setCostCenterId] = useState<string | null>(null)
   const [centroCusto, setCentroCusto] = useState('')
+  const [costCenters, setCostCenters] = useState<CostCenterOption[]>([])
+  const [costCentersLoading, setCostCentersLoading] = useState(false)
+  const [costCentersUnavailable, setCostCentersUnavailable] = useState(false)
+  const [costCentersLoaded, setCostCentersLoaded] = useState(false)
   const [projetoObra, setProjetoObra] = useState('')
   const [numeroSolicitacao, setNumeroSolicitacao] = useState('')
   const [autorizadorNome, setAutorizadorNome] = useState('')
@@ -167,6 +179,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       setDetCarro(editing.detalhes_carro || {})
       setDetPacote(editing.detalhes_pacote || {})
       setFormaPagamento(editing.forma_pagamento || '')
+      setCostCenterId(editing.cost_center_id || null)
       setCentroCusto(editing.centro_custo || '')
       setProjetoObra(editing.projeto_obra || '')
       setNumeroSolicitacao(editing.numero_solicitacao || '')
@@ -187,7 +200,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       setTaxaAtiva(true); setTaxaPercentual(10); setTaxaValorFixo(0); setUsarTaxaFixa(false)
       setMarkupDesabilitado(false)
       setDetAereo({}); setDetHotel({}); setDetCarro({}); setDetPacote({})
-      setFormaPagamento(''); setCentroCusto(''); setProjetoObra('')
+      setFormaPagamento(''); setCostCenterId(null); setCentroCusto(''); setProjetoObra('')
       setNumeroSolicitacao(''); setAutorizadorNome(''); setContatoPassageiro('')
       setObservacoesInternas('')
     }
@@ -195,7 +208,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
 
   // Quando empresa muda, aplicar config de cobrança
   useEffect(() => {
-    if (!empresaSelecionada || editing) return
+    if (!open || !empresaSelecionada || editing) return
     const cfg = empresaSelecionada.config_cobranca || CONFIG_COBRANCA_PADRAO
     setMarkupDesabilitado(!cfg.aplicar_markup)
     setTaxaAtiva(cfg.aplicar_taxa)
@@ -203,10 +216,63 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
     setTaxaPercentual(cfg.taxa_padrao_pct)
     setTaxaValorFixo(cfg.taxa_valor_fixo)
     // V8: auto-preenche centro de custo padrão da empresa
-    if (empresaSelecionada.centro_custo_padrao) {
+    if (empresaSelecionada.centro_custo_padrao_id || empresaSelecionada.centro_custo_padrao) {
+      setCostCenterId((valorAtual) => valorAtual || empresaSelecionada.centro_custo_padrao_id || null)
       setCentroCusto((valorAtual) => valorAtual || empresaSelecionada.centro_custo_padrao || '')
     }
-  }, [empresaSelecionada, editing])
+  }, [open, empresaSelecionada, editing])
+
+  useEffect(() => {
+    if (!open || !empresaId) {
+      setCostCenters([])
+      setCostCentersLoading(false)
+      setCostCentersUnavailable(false)
+      setCostCentersLoaded(false)
+      return
+    }
+    const controller = new AbortController()
+    setCostCenters([])
+    setCostCentersLoading(true)
+    setCostCentersUnavailable(false)
+    setCostCentersLoaded(false)
+    void fetch(`/api/cost-centers?companyId=${encodeURIComponent(empresaId)}`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok || !result?.ok) throw new Error(result?.error || 'Falha ao carregar centros de custo.')
+        const rows = Array.isArray(result.items) ? result.items : []
+        setCostCenters(rows.flatMap((item: any): CostCenterOption[] => {
+          const id = String(item?.projectionId || item?.projection_id || item?.companyCostCenterId || '')
+          const code = String(item?.code || '').trim()
+          if (!id || !code || item?.isActive === false) return []
+          return [{
+            id,
+            code,
+            name: String(item?.name || code),
+            hierarchyLevel: Number(item?.hierarchyLevel || item?.hierarchy_level || 1),
+          }]
+        }))
+        setCostCentersLoaded(true)
+      })
+      .catch((error) => {
+        if (error?.name !== 'AbortError') {
+          setCostCentersUnavailable(true)
+          setCostCentersLoaded(false)
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCostCentersLoading(false)
+      })
+    return () => controller.abort()
+  }, [open, empresaId])
+
+  const selectedCostCenterUnavailable = Boolean(
+    costCentersLoaded
+    && costCenterId
+    && !costCenters.some((item) => item.id === costCenterId),
+  )
 
   // Quando hotel e tipo_apto mudam, calcular custo auto
   useEffect(() => {
@@ -326,6 +392,14 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
     if (!empresaId || !passageiroNome.trim()) {
       toast.error('Preencha empresa e ' + ocupanteLabel.toLowerCase() + '.'); return
     }
+    if (costCentersLoading) {
+      toast.error('Aguarde o carregamento dos centros de custo.')
+      return
+    }
+    if (selectedCostCenterUnavailable) {
+      toast.error('O centro de custo da demanda está inativo ou indisponível. Selecione outro centro ou remova o vínculo.')
+      return
+    }
 
     const hotelCriado = await garantirHotelCadastrado()
     const detalhesHotelFinal =
@@ -368,6 +442,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       origem_emissao: editing?.origem_emissao || 'manual',
       // V8: campos novos
       forma_pagamento: formaPagamento || undefined,
+      cost_center_id: costCenterId,
       centro_custo: centroCusto.trim() || undefined,
       projeto_obra: projetoObra.trim() || undefined,
       numero_solicitacao: numeroSolicitacao.trim() || undefined,
@@ -575,8 +650,12 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
           <div>
             <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Empresa *</label>
             <select value={empresaId} onChange={(e) => {
-              setEmpresaId(e.target.value)
+              const nextCompanyId = e.target.value
+              const nextCompany = empresasNoContexto.find((empresa) => empresa.id === nextCompanyId)
+              setEmpresaId(nextCompanyId)
               setFuncionarioId(null)
+              setCostCenterId(nextCompany?.centro_custo_padrao_id || null)
+              setCentroCusto(nextCompany?.centro_custo_padrao || '')
             }} className="bbt-input" required>
               <option value="">Selecione...</option>
               {isConsolidated && <option value="">Selecione a empresa</option>}
@@ -612,6 +691,14 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               onSelectFuncionario={(funcId, nome) => {
                 setFuncionarioId(funcId)
                 setPassageiroNome(nome)
+                const funcionario = funcionarios.find((item) => item.id === funcId)
+                if (funcionario?.cost_center_id || funcionario?.centro_custo) {
+                  setCostCenterId(funcionario.cost_center_id || null)
+                  setCentroCusto(funcionario.centro_custo || '')
+                } else {
+                  setCostCenterId(empresaSelecionada?.centro_custo_padrao_id || null)
+                  setCentroCusto(empresaSelecionada?.centro_custo_padrao || '')
+                }
               }}
               empresaId={empresaId}
               funcionarioIdAtual={funcionarioId}
@@ -876,7 +963,46 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               </select>
             </Field>
             <Field label="Centro de Custo">
-              <input value={centroCusto} onChange={(e) => setCentroCusto(e.target.value)} className="bbt-input" placeholder="Ex: Diretoria, Vendas-RJ" />
+              {costCentersUnavailable ? (
+                <input
+                  value={centroCusto}
+                  onChange={(e) => {
+                    setCostCenterId(null)
+                    setCentroCusto(e.target.value)
+                  }}
+                  className="bbt-input"
+                  placeholder="Código legado do centro de custo"
+                />
+              ) : (
+                <select
+                  value={costCenterId || ''}
+                  onChange={(e) => {
+                    const selected = costCenters.find((item) => item.id === e.target.value)
+                    setCostCenterId(e.target.value || null)
+                    setCentroCusto(selected?.code || '')
+                  }}
+                  className="bbt-input"
+                  disabled={!empresaId || costCentersLoading}
+                >
+                  {selectedCostCenterUnavailable && (
+                    <option value={costCenterId || ''} disabled>
+                      {`Indisponível: ${centroCusto || costCenterId}`}
+                    </option>
+                  )}
+                  <option value="">
+                    {costCentersLoading
+                      ? 'Carregando...'
+                      : centroCusto && !costCenterId
+                        ? `Legado: ${centroCusto}`
+                        : 'Sem centro de custo'}
+                  </option>
+                  {costCenters.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {`${'— '.repeat(Math.max(0, item.hierarchyLevel - 1))}${item.code} · ${item.name}`}
+                    </option>
+                  ))}
+                </select>
+              )}
             </Field>
             <Field label="Projeto / Obra">
               <input value={projetoObra} onChange={(e) => setProjetoObra(e.target.value)} className="bbt-input" placeholder="Ex: Obra Trindade-2026" />

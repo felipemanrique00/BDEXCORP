@@ -166,7 +166,57 @@ export async function confirmPasswordReset(
        where user_id = $1 and status = 'active'`,
       [reset.user_id],
     )
-    return { ...reset, tenant_id: tenant.rows[0]?.tenant_id || null }
+
+    const memberships = await client.query<{ tenant_id: string }>(
+      `select distinct tenant_id
+         from tenant_memberships
+        where user_id = $1`,
+      [reset.user_id],
+    )
+    const mfaReset = {
+      mfaMethodsDisabled: 0,
+      mfaRecoveryCodesRevoked: 0,
+      mfaChallengesExpired: 0,
+    }
+    for (const membership of memberships.rows) {
+      await applyDatabaseSecurityContext(client, {
+        identityUserId: reset.user_id,
+        tenantId: membership.tenant_id,
+      })
+      const methods = await client.query(
+        `update user_mfa_methods
+            set status = 'disabled',
+                disabled_at = now(),
+                last_used_step = null
+          where tenant_id = $1
+            and user_id = $2
+            and status <> 'disabled'`,
+        [membership.tenant_id, reset.user_id],
+      )
+      const recoveryCodes = await client.query(
+        `delete from user_mfa_recovery_codes
+          where tenant_id = $1
+            and user_id = $2`,
+        [membership.tenant_id, reset.user_id],
+      )
+      const challenges = await client.query(
+        `update auth_mfa_challenges
+            set status = 'expired'
+          where tenant_id = $1
+            and user_id = $2
+            and status = 'pending'`,
+        [membership.tenant_id, reset.user_id],
+      )
+      mfaReset.mfaMethodsDisabled += methods.rowCount ?? 0
+      mfaReset.mfaRecoveryCodesRevoked += recoveryCodes.rowCount ?? 0
+      mfaReset.mfaChallengesExpired += challenges.rowCount ?? 0
+    }
+
+    return {
+      ...reset,
+      tenant_id: tenant.rows[0]?.tenant_id || null,
+      ...mfaReset,
+    }
   })
 
   await writeAuditEvent({
@@ -179,6 +229,11 @@ export async function confirmPasswordReset(
     userAgent: metadata.userAgent,
     entityType: 'password_reset',
     entityId: outcome.id,
+    metadata: {
+      mfaMethodsDisabled: outcome.mfaMethodsDisabled,
+      mfaRecoveryCodesRevoked: outcome.mfaRecoveryCodesRevoked,
+      mfaChallengesExpired: outcome.mfaChallengesExpired,
+    },
   })
 }
 

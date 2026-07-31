@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import type { TravelLifecycleStatus } from '@/lib/travel-lifecycle/types'
+import type { Prioridade } from '@/types'
 
 const legacyDemandSchema = z.object({
   id: z.string().trim().min(1).max(200),
@@ -14,6 +15,7 @@ const legacyDemandSchema = z.object({
   agente_user_id: z.string().trim().max(200).optional(),
   solicitante_id: z.string().trim().max(200).optional(),
   solicitante_nome: z.string().trim().max(300).optional(),
+  cost_center_id: z.string().uuid().nullable().optional(),
   centro_custo: z.string().trim().max(300).optional(),
   projeto_obra: z.string().trim().max(300).optional(),
   motivo: z.string().trim().max(2_000).optional(),
@@ -48,6 +50,7 @@ export interface RelationalDemandSnapshot {
   travelStartDate: string | null
   travelEndDate: string | null
   destination: string | null
+  costCenterId: string | null
   costCenter: string | null
   estimatedAmount: number
   finalAmount: number
@@ -134,6 +137,7 @@ function toRelationalDemand(input: z.infer<typeof legacyDemandSchema>): Relation
       input.detalhes_carro?.cidade_retirada,
       input.detalhes_pacote?.destino,
     ),
+    costCenterId: input.cost_center_id || null,
     costCenter: input.centro_custo || null,
     estimatedAmount: nonNegative(input.valor_cotacao ?? input.valor_custo ?? 0),
     finalAmount: nonNegative(input.valor_final ?? input.valor_venda ?? input.valor_cotacao ?? 0),
@@ -179,6 +183,14 @@ export function lifecycleFromLegacyStatus(value: string): TravelLifecycleStatus 
   if (['em_andamento', 'cotando', 'quoting'].includes(normalized)) return 'quoting'
   if (['pendente', 'submitted'].includes(normalized)) return 'submitted'
   return 'draft'
+}
+
+export function relationalPriorityToLegacy(value: string): Prioridade {
+  const normalized = normalize(value)
+  if (normalized === 'urgent' || normalized === 'urgente') return 'urgente'
+  if (normalized === 'high' || normalized === 'alta') return 'alta'
+  if (normalized === 'low' || normalized === 'baixa') return 'baixa'
+  return 'media'
 }
 
 function normalizeServiceType(value: string): string {

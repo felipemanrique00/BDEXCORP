@@ -174,8 +174,8 @@ const SERVICE_TYPES: TipoServico[] = ['Aéreo', 'Hotel', 'Carro', 'Pacote']
 
 export default function DashboardPage() {
   const { empresas, funcionarios, hoteis } = useStore()
-  const { context } = useCorporateContext()
-  const { companyIds, includesCompany, isConsolidated } = useCorporateCompanyScope()
+  const { context, isAllCompaniesSelected } = useCorporateContext()
+  const { companyIds, companyIdsList, includesCompany, isConsolidated } = useCorporateCompanyScope()
   const [reload, setReload] = useState(0)
   const [periodo, setPeriodo] = useState<Periodo>('30d')
   const [filtroEmpresa, setFiltroEmpresa] = useState('')
@@ -214,6 +214,10 @@ export default function DashboardPage() {
   const empresasDemandas = useMemo(
     () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_demandas')),
     [empresas, includesCompany],
+  )
+  const selectedDemandCompanyIds = useMemo(
+    () => companyIdsList.filter((companyId) => includesCompany(companyId, 'ver_demandas')),
+    [companyIdsList, includesCompany],
   )
   const empresasFinanceiras = useMemo(
     () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_financeiro')),
@@ -271,12 +275,17 @@ export default function DashboardPage() {
   )
 
   useEffect(() => {
+    if (!isAllCompaniesSelected && selectedDemandCompanyIds.length === 0) {
+      setServerCrmResumo(null)
+      setDeskNotes([])
+      return
+    }
     let active = true
     loadOperationalCommunicationOverview({
       startDate: dataInicio,
       endDate: dataFim,
-      companyId: filtroEmpresa || (context?.type === 'company' ? context.id : undefined),
-      groupId: !filtroEmpresa && context?.type === 'group' ? context.id : undefined,
+      companyId: filtroEmpresa || undefined,
+      companyIds: filtroEmpresa || isAllCompaniesSelected ? undefined : selectedDemandCompanyIds,
       serviceType: filtroTipo === 'todos' ? undefined : filtroTipo,
     })
       .then((overview) => {
@@ -293,7 +302,7 @@ export default function DashboardPage() {
     return () => {
       active = false
     }
-  }, [context?.id, context?.type, dataFim, dataInicio, filtroEmpresa, filtroTipo])
+  }, [dataFim, dataInicio, filtroEmpresa, filtroTipo, isAllCompaniesSelected, selectedDemandCompanyIds])
 
   const agentesBBT = useMemo(() => getAgentesBBT(), [])
   const atendimentos = useMemo(() => {

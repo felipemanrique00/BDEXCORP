@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Bell, Check, X, ArrowRightLeft, Clock } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -7,13 +7,12 @@ import {
   listDemandTransfers,
 } from '@/lib/demand-transfer-client'
 import type { DemandTransferRequest } from '@/lib/demand-transfer'
-import { getCurrentUser } from '@/lib/auth'
 
-export function TransferenciasPendentesPainel() {
-  const user = useMemo(
-    () => (typeof window !== 'undefined' ? getCurrentUser() : null),
-    [],
-  )
+interface TransferenciasPendentesPainelProps {
+  userId: string
+}
+
+export function TransferenciasPendentesPainel({ userId }: TransferenciasPendentesPainelProps) {
   const [pendentes, setPendentes] = useState<DemandTransferRequest[]>([])
   const [aberto, setAberto] = useState(false)
   const [recusarId, setRecusarId] = useState<string | null>(null)
@@ -22,14 +21,14 @@ export function TransferenciasPendentesPainel() {
   const listRequestRef = useRef<AbortController | null>(null)
 
   const carregar = useCallback(async () => {
-    if (!user) return
+    if (!userId) return
     listRequestRef.current?.abort()
     const controller = new AbortController()
     listRequestRef.current = controller
     try {
       const transfers = await listDemandTransfers(controller.signal)
       setPendentes(transfers.filter(
-        (transfer) => transfer.status === 'pending' && transfer.destinationUserId === user.id,
+        (transfer) => transfer.status === 'pending' && transfer.destinationUserId === userId,
       ))
     } catch (error) {
       if (!isAbortError(error) && process.env.NODE_ENV === 'development') {
@@ -38,10 +37,10 @@ export function TransferenciasPendentesPainel() {
     } finally {
       if (listRequestRef.current === controller) listRequestRef.current = null
     }
-  }, [user])
+  }, [userId])
 
   useEffect(() => {
-    if (!user) return
+    if (!userId) return
     void carregar()
     const t = setInterval(() => void carregar(), 30_000)
     return () => {
@@ -49,9 +48,7 @@ export function TransferenciasPendentesPainel() {
       listRequestRef.current?.abort()
       listRequestRef.current = null
     }
-  }, [carregar, user])
-
-  if (!user) return null
+  }, [carregar, userId])
 
   async function handleAceitar(sol: DemandTransferRequest) {
     setRespondendoId(sol.id)
@@ -93,7 +90,8 @@ export function TransferenciasPendentesPainel() {
     <>
       <button onClick={() => setAberto(true)}
         className="relative p-2 rounded-lg hover:bg-bbt-gray-50 dark:hover:bg-slate-800 transition"
-        title="Transferências pendentes">
+        title="Transferências pendentes"
+        aria-label="Transferências pendentes">
         <Bell className="w-5 h-5" />
         {pendentes.length > 0 && (
           <span className="absolute -top-1 -right-1 w-5 h-5 bg-bbt-accent text-white text-[10px] font-bold rounded-full flex items-center justify-center">
