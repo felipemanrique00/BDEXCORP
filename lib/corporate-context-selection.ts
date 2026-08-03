@@ -11,12 +11,7 @@ export function defaultCorporateViewSelection(
   access: CorporateAccessSummary | null | undefined,
 ): CorporateViewSelection {
   if (!access || access.companyIds.length === 0) return customSelection([])
-  if (canSelectAllCompanies(access)) return allCompaniesSelection()
-
-  const preferred = contextByReference(access, access.defaultContext)
-    || access.contexts[0]
-    || null
-  return customSelection(preferred?.companyIds || [access.companyIds[0]])
+  return allCompaniesSelection()
 }
 
 export function selectedCompanyIdsForSelection(
@@ -34,8 +29,8 @@ export function createCorporateViewSelection(
 ): CorporateViewSelection | null {
   if (!access) return null
   const companyIds = normalizeCompanyIds(access.companyIds, requestedCompanyIds)
-  if (companyIds.length === 0 || !isCorporateCompanySelectionAllowed(access, companyIds)) return null
-  if (canSelectAllCompanies(access) && sameCompanySet(companyIds, access.companyIds)) {
+  if (companyIds.length === 0 || !isCorporateCompanySelectionAllowed(access, requestedCompanyIds)) return null
+  if (sameCompanySet(companyIds, access.companyIds)) {
     return allCompaniesSelection()
   }
   return customSelection(companyIds)
@@ -47,9 +42,7 @@ export function reconcileCorporateViewSelection(
 ): CorporateViewSelection {
   if (!access || access.companyIds.length === 0) return customSelection([])
   if (selection.mode === 'all') {
-    return canSelectAllCompanies(access)
-      ? allCompaniesSelection()
-      : defaultCorporateViewSelection(access)
+    return allCompaniesSelection()
   }
   const reconciled = createCorporateViewSelection(access, selection.companyIds)
   return reconciled || defaultCorporateViewSelection(access)
@@ -58,13 +51,7 @@ export function reconcileCorporateViewSelection(
 export function canSelectAllCompanies(
   access: CorporateAccessSummary | null | undefined,
 ): boolean {
-  if (!access || access.companyIds.length === 0) return false
-  if (access.tenantWide) return true
-  return access.contexts.some((context) => (
-    context.type === 'group'
-    && context.canViewConsolidated
-    && sameCompanySet(context.companyIds, access.companyIds)
-  ))
+  return Boolean(access?.companyIds.length)
 }
 
 export function isCorporateCompanySelectionAllowed(
@@ -72,13 +59,7 @@ export function isCorporateCompanySelectionAllowed(
   requestedCompanyIds: readonly string[],
 ): boolean {
   const companyIds = normalizeCompanyIds(access.companyIds, requestedCompanyIds)
-  if (companyIds.length !== new Set(requestedCompanyIds).size) return false
-  if (companyIds.length <= 1 || access.tenantWide) return companyIds.length > 0
-  return access.contexts.some((context) => (
-    context.type === 'group'
-    && context.canViewConsolidated
-    && companyIds.every((companyId) => context.companyIds.includes(companyId))
-  ))
+  return companyIds.length > 0 && companyIds.length === new Set(requestedCompanyIds).size
 }
 
 export function contextForCompanySelection(
@@ -92,7 +73,9 @@ export function contextForCompanySelection(
     )) || null
   }
   return access.contexts.find((context) => (
-    context.type === 'group' && sameCompanySet(context.companyIds, selectedCompanyIds)
+    context.type === 'group'
+    && context.canViewConsolidated
+    && sameCompanySet(context.companyIds, selectedCompanyIds)
   )) || null
 }
 
@@ -136,16 +119,6 @@ function normalizeSearch(value: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .toLocaleLowerCase('pt-BR')
     .trim()
-}
-
-function contextByReference(
-  access: CorporateAccessSummary,
-  reference: CorporateAccessSummary['defaultContext'],
-): CorporateContextOption | null {
-  if (!reference) return null
-  return access.contexts.find((context) => (
-    context.type === reference.type && context.id === reference.id
-  )) || null
 }
 
 function allCompaniesSelection(): CorporateViewSelection {

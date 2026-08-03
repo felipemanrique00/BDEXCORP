@@ -39,6 +39,10 @@ import {
   isUnsafeSelfAdministrationChange,
   resolveUserAvatarUpdate,
 } from '@/lib/user-mutation'
+import {
+  canDelegateTenantOwner,
+  changesTenantOwnerMembership,
+} from '@/lib/tenant-owner-access'
 import { createOpaqueToken, hashSecureToken } from '@/lib/server/secure-token'
 import {
   PERMISSOES_PADRAO_POR_PERFIL,
@@ -184,6 +188,11 @@ export async function createTenantUser(
   if (input.corporateAccess) {
     assertCorporateAccessDelegation(principal, input.corporateAccess, { requireAtLeastOneGrant: true })
   }
+  const corporateProfile = primaryCorporateProfile(input.corporateAccess)
+  const roleKey = corporateProfile
+    ? corporateProfileToMembershipRoleKey(corporateProfile)
+    : roleKeyFrom(input.role, input.profile)
+  assertTenantOwnerMembershipChangeAllowed(principal, null, roleKey)
 
   const existingIdentity = await withTenantTransaction(
     principal.tenantId,
@@ -213,10 +222,6 @@ export async function createTenantUser(
   }
   await enforceUserLimit(principal)
 
-  const corporateProfile = primaryCorporateProfile(input.corporateAccess)
-  const roleKey = corporateProfile
-    ? corporateProfileToMembershipRoleKey(corporateProfile)
-    : roleKeyFrom(input.role, input.profile)
   const passwordHash = await hashPassword(input.password || createOpaqueToken(48))
   const userId = randomUUID()
   const membershipId = randomUUID()
@@ -430,6 +435,7 @@ export async function updateTenantUser(
   const roleKey = corporateProfile
     ? corporateProfileToMembershipRoleKey(corporateProfile)
     : roleKeyFrom(input.role, input.profile)
+  assertTenantOwnerMembershipChangeAllowed(principal, current.role_key, roleKey)
   if (isUnsafeSelfAdministrationChange({
     actorUserId: principal.user.id,
     targetUserId: userId,
@@ -589,6 +595,7 @@ export async function setTenantUserActive(
   const existing = await getTenantUser(principal, userId)
   if (!existing) throw new UserNotFoundError()
   if (existing.platform_admin) throw new UserConflictError('Administrador da plataforma nao pode ser desativado por esta operacao.')
+  assertTenantOwnerMembershipChangeAllowed(principal, existing.role_key, existing.role_key)
   if (!isTenantAccessAdministrator(principal)) {
     await requireCompleteCorporateAccessManagement(principal, userId)
   }
@@ -871,6 +878,23 @@ function assertMembershipPermissionOverridesAllowed(
   throw new CorporateAccessDeniedError(
     'MEMBERSHIP_PERMISSION_DELEGATION_DENIED',
     'Administradores corporativos devem personalizar somente as permissoes dos vinculos delegados.',
+  )
+}
+
+function assertTenantOwnerMembershipChangeAllowed(
+  principal: RequestPrincipal,
+  currentRoleKey: string | null | undefined,
+  nextRoleKey: string | null | undefined,
+): void {
+  if (!changesTenantOwnerMembership(currentRoleKey, nextRoleKey)) return
+  if (canDelegateTenantOwner({
+    platformAdmin: principal.platformAdmin,
+    roleKey: principal.roleKey,
+    permissions: principal.user.permissoes,
+  })) return
+  throw new CorporateAccessDeniedError(
+    'TENANT_OWNER_DELEGATION_DENIED',
+    'Somente um Dono do ambiente pode criar, promover ou alterar outro Dono.',
   )
 }
 

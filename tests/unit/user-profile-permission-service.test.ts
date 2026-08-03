@@ -15,7 +15,9 @@ vi.mock('@/lib/server/database', () => ({
 }))
 
 import {
+  createTenantUser,
   listTenantInternalPermissionBases,
+  setTenantUserActive,
   updateTenantUser,
 } from '@/lib/server/user-service'
 
@@ -52,6 +54,42 @@ describe('tenant internal profile permission bases', () => {
         ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'],
       ],
     )
+  })
+
+  it('bloqueia supervisor tenant-wide que copia as permissoes do Dono e tenta criar outro Dono', async () => {
+    await expect(createTenantUser(customizedSupervisor(), {
+      name: 'Novo Dono',
+      email: 'novo-dono@example.invalid',
+      password: 'SenhaTemporaria#2026',
+      role: 'master',
+      profile: 'lider',
+      permissions: {},
+      companyIds: [],
+      groupIds: [],
+      active: true,
+    })).rejects.toMatchObject({
+      code: 'TENANT_OWNER_DELEGATION_DENIED',
+    })
+    expect(mocks.withTenantTransaction).not.toHaveBeenCalled()
+  })
+
+  it('bloqueia usuario comum com permissoes copiadas de desativar um Dono existente', async () => {
+    mocks.query.mockResolvedValue({
+      rowCount: 1,
+      rows: [membershipRow({
+        roleKey: 'tenant_admin',
+        profile: 'lider',
+        permissions: PERMISSOES_PADRAO_POR_PERFIL.lider,
+        permissionOverrides: {},
+      })],
+    })
+
+    await expect(
+      setTenantUserActive(customizedSupervisor(), 'danilo', false),
+    ).rejects.toMatchObject({
+      code: 'TENANT_OWNER_DELEGATION_DENIED',
+    })
+    expect(mocks.withTenantTransaction).toHaveBeenCalledTimes(1)
   })
 
   it.each([
@@ -141,7 +179,7 @@ describe('tenant internal profile permission bases', () => {
 
 function membershipRow(input: {
   roleKey: string
-  profile: 'operacional' | 'supervisor'
+  profile: 'operacional' | 'supervisor' | 'lider'
   permissions: Permissoes
   permissionOverrides: Partial<Permissoes>
 }) {
@@ -164,6 +202,31 @@ function membershipRow(input: {
     corporate_profile: null,
     permissions: input.permissions,
     permission_overrides: input.permissionOverrides,
+  }
+}
+
+function customizedSupervisor(): RequestPrincipal {
+  const base = principal()
+  return {
+    ...base,
+    roleKey: 'supervisor',
+    platformAdmin: false,
+    corporateAccess: {
+      tenantWide: true,
+      companyIds: [],
+      groupIds: [],
+      companies: [],
+      groups: [],
+      contexts: [],
+      defaultContext: null,
+      refreshedAt: '2026-08-03T00:00:00.000Z',
+    },
+    user: {
+      ...base.user,
+      role_key: 'supervisor',
+      perfil_bbt: 'supervisor',
+      permissoes: PERMISSOES_PADRAO_POR_PERFIL.lider,
+    },
   }
 }
 

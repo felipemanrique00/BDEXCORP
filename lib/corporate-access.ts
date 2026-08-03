@@ -5,7 +5,7 @@ import {
 } from '@/types'
 
 export const CORPORATE_PROFILE_LABELS: Record<CorporateProfile, string> = {
-  owner: 'Proprietario do grupo',
+  owner: 'Proprietário do grupo (escopo corporativo)',
   ceo: 'CEO / Diretoria',
   group_admin: 'Administrador do grupo',
   executive_assistant: 'Secretaria executiva',

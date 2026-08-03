@@ -42,7 +42,7 @@ import {
 import { userAccessKind } from '@/lib/user-access-kind'
 
 const PERFIS: { value: PerfilBBT; label: string; desc: string }[] = [
-  { value: 'lider', label: 'Líder / Dono', desc: 'Acesso total ao sistema' },
+  { value: 'lider', label: 'Líder / Dono', desc: 'Master do ambiente: todas as empresas e gestão de outros Donos' },
   { value: 'gestor_financeiro', label: 'Gestor Financeiro', desc: 'Financeiro + relatórios + produtividade geral' },
   { value: 'supervisor', label: 'Supervisor', desc: 'Gestão operacional (sem editar valores)' },
   { value: 'agente', label: 'Agente', desc: 'Cria demandas, só vê suas próprias' },

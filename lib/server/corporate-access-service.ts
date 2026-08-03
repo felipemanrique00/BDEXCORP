@@ -242,19 +242,6 @@ export async function requireCompanySelectionAccess(
   const companies = await Promise.all(companyIds.map((companyId) => (
     requireCompanyAccess(principal, companyId, permission)
   )))
-  if (companyIds.length > 1 && !principal.corporateAccess?.tenantWide) {
-    const consolidated = principal.corporateAccess?.contexts.some((context) => (
-      context.type === 'group'
-      && context.canViewConsolidated
-      && companyIds.every((companyId) => context.companyIds.includes(companyId))
-    ))
-    if (!consolidated) {
-      throw new CorporateAccessDeniedError(
-        'COMPANY_SELECTION_CONSOLIDATED_DENIED',
-        'A visao consolidada desta combinacao de empresas nao esta autorizada.',
-      )
-    }
-  }
   return companies.map((company) => company.companyId)
 }
 

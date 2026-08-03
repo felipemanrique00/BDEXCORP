@@ -96,11 +96,14 @@ describe('corporate context company selection', () => {
     )).toEqual({ mode: 'custom', companyIds: ['company-b'] })
   })
 
-  it('defaults scoped access to its valid consolidated context instead of all companies', () => {
+  it('opens scoped access with every authorized company selected', () => {
     const scoped = access({ tenantWide: false })
 
     expect(defaultCorporateViewSelection(scoped))
-      .toEqual({ mode: 'custom', companyIds: ['company-a', 'company-b'] })
+      .toEqual({ mode: 'all', companyIds: [] })
+    expect(selectedCompanyIdsForSelection(scoped, defaultCorporateViewSelection(scoped)))
+      .toEqual(scoped.companyIds)
+    expect(canSelectAllCompanies(scoped)).toBe(true)
   })
 
   it('normalizes an explicit full selection back to all mode', () => {
@@ -109,12 +112,22 @@ describe('corporate context company selection', () => {
       .toEqual({ mode: 'all', companyIds: [] })
   })
 
-  it('allows arbitrary multi-company filters only for tenant-wide access', () => {
+  it('allows any non-empty subset inside the effective access scope', () => {
     const scoped = access({ tenantWide: false })
-    expect(canSelectAllCompanies(scoped)).toBe(false)
+    expect(canSelectAllCompanies(scoped)).toBe(true)
     expect(createCorporateViewSelection(scoped, ['company-a', 'company-b']))
       .toEqual({ mode: 'custom', companyIds: ['company-a', 'company-b'] })
-    expect(createCorporateViewSelection(scoped, ['company-a', 'company-c'])).toBeNull()
+    expect(createCorporateViewSelection(scoped, ['company-a', 'company-c']))
+      .toEqual({ mode: 'custom', companyIds: ['company-a', 'company-c'] })
+    expect(createCorporateViewSelection(scoped, scoped.companyIds))
+      .toEqual({ mode: 'all', companyIds: [] })
+  })
+
+  it('rejects companies outside the effective access scope', () => {
+    const scoped = access({ tenantWide: false })
+
+    expect(createCorporateViewSelection(scoped, ['company-a', 'company-unknown'])).toBeNull()
+    expect(createCorporateViewSelection(scoped, ['company-unknown'])).toBeNull()
   })
 
   it('derives a legacy context only for exact company or consolidated group selections', () => {
@@ -122,6 +135,20 @@ describe('corporate context company selection', () => {
     expect(contextForCompanySelection(summary, ['company-b'])?.id).toBe('company-b')
     expect(contextForCompanySelection(summary, ['company-a', 'company-b'])?.id).toBe('group-a')
     expect(contextForCompanySelection(summary, ['company-a', 'company-c'])).toBeNull()
+  })
+
+  it('keeps a multi-company filter valid without inferring a non-consolidated group context', () => {
+    const scoped = access({
+      tenantWide: false,
+      groups: access().groups.map((group) => ({ ...group, canViewConsolidated: false })),
+      contexts: access().contexts.map((context) => (
+        context.type === 'group' ? { ...context, canViewConsolidated: false } : context
+      )),
+    })
+
+    expect(createCorporateViewSelection(scoped, ['company-a', 'company-b']))
+      .toEqual({ mode: 'custom', companyIds: ['company-a', 'company-b'] })
+    expect(contextForCompanySelection(scoped, ['company-a', 'company-b'])).toBeNull()
   })
 
   it('matches names without depending on accents or casing', () => {

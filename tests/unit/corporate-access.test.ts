@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { mergePermissions, permissionsForCorporateProfile } from '@/lib/corporate-access'
+import {
+  CORPORATE_PROFILE_LABELS,
+  mergePermissions,
+  permissionsForCorporateProfile,
+} from '@/lib/corporate-access'
 import {
   corporateDraftPermissionState,
   corporateDraftToPayload,
@@ -28,6 +32,7 @@ import {
   type CorporateAccessGroupRow,
   type ResolveCorporateAccessInput,
 } from '@/lib/server/corporate-access-service'
+import { PERMISSOES_PADRAO_POR_PERFIL } from '@/types'
 
 const companies: CorporateAccessCompanyRow[] = [
   { id: 'company-a', name: 'Empresa A', group_id: 'group-a', group_name: 'Grupo A' },
@@ -79,6 +84,36 @@ function companyGrant(
 }
 
 describe('corporate access policy', () => {
+  it('distingue o proprietário corporativo do Dono master do ambiente', () => {
+    expect(CORPORATE_PROFILE_LABELS.owner)
+      .toBe('Proprietário do grupo (escopo corporativo)')
+  })
+
+  it('da a qualquer tenant_admin o mesmo escopo tenant-wide do Dono atual', () => {
+    const result = calculateCorporateAccess(
+      {
+        ...baseInput,
+        roleKey: 'tenant_admin',
+        membershipPermissions: PERMISSOES_PADRAO_POR_PERFIL.lider,
+        legacyCompanyId: 'company-a',
+        legacyCompanyIds: ['company-a'],
+      },
+      companies,
+      groups,
+      [],
+      [],
+      null,
+      false,
+    )
+
+    expect(result.summary.tenantWide).toBe(true)
+    expect(result.summary.companyIds).toEqual(['company-a', 'company-b', 'company-c'])
+    expect(result.summary.groupIds).toEqual(['group-a', 'group-b'])
+    expect(result.summary.groups.every((group) => group.canViewConsolidated)).toBe(true)
+    expect(result.primaryProfile).toBe('owner')
+    expect(result.effectivePermissions).toEqual(PERMISSOES_PADRAO_POR_PERFIL.lider)
+  })
+
   it('does not allow a draft loaded for one user to be submitted for another', () => {
     expect(isCorporateAccessDraftReady('user-b', 'user-a', false)).toBe(false)
     expect(isCorporateAccessDraftReady('user-b', 'user-b', true)).toBe(false)

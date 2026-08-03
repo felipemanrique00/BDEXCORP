@@ -43,28 +43,28 @@ describe('requireCompanySelectionAccess', () => {
     )).resolves.toEqual(['company-a', 'company-b'])
   })
 
-  it('denies a non-tenant-wide selection spanning different groups', async () => {
+  it('allows an authorized non-tenant-wide selection spanning different groups', async () => {
     await expect(requireCompanySelectionAccess(
       principal(),
       ['company-a', 'company-c'],
       'ver_reservas',
-    )).rejects.toMatchObject({ code: 'COMPANY_SELECTION_CONSOLIDATED_DENIED' })
+    )).resolves.toEqual(['company-a', 'company-c'])
   })
 
-  it('denies multiple companies when their group cannot be viewed as consolidated', async () => {
+  it('allows authorized companies without requiring a consolidated group context', async () => {
     await expect(requireCompanySelectionAccess(
       principal({ groupACanViewConsolidated: false }),
       ['company-a', 'company-b'],
       'ver_reservas',
-    )).rejects.toMatchObject({ code: 'COMPANY_SELECTION_CONSOLIDATED_DENIED' })
+    )).resolves.toEqual(['company-a', 'company-b'])
   })
 
-  it('uses the effective consolidated context instead of the broader group grant', async () => {
+  it('uses the effective company access instead of requiring a matching context', async () => {
     await expect(requireCompanySelectionAccess(
       principal({ groupAContextCompanyIds: ['company-a'] }),
       ['company-a', 'company-b'],
       'ver_reservas',
-    )).rejects.toMatchObject({ code: 'COMPANY_SELECTION_CONSOLIDATED_DENIED' })
+    )).resolves.toEqual(['company-a', 'company-b'])
   })
 
   it('allows a tenant-wide selection spanning different groups', async () => {

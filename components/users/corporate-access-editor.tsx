@@ -1,6 +1,6 @@
 'use client'
 
-import { Building2, CalendarClock, Check, Network, ShieldCheck } from 'lucide-react'
+import { Building2, Check, Network, ShieldCheck } from 'lucide-react'
 
 import {
   CORPORATE_PROFILE_LABELS,
@@ -232,27 +232,25 @@ export function CorporateAccessEditor({
                       </label>
                       <label className="text-xs text-slate-600 dark:text-slate-300">
                         Valido a partir de
-                        <span className="relative mt-1 block">
-                          <CalendarClock className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                        <span className="mt-1 block">
                           <input
                             type="date"
                             value={grant.validFrom}
                             disabled={disabled}
                             onChange={(event) => patchGroup(group.id, { validFrom: event.target.value })}
-                            className="bbt-input h-9 pl-8 text-xs"
+                            className="bbt-input h-9 text-xs"
                           />
                         </span>
                       </label>
                       <label className="text-xs text-slate-600 dark:text-slate-300">
                         Expira em
-                        <span className="relative mt-1 block">
-                          <CalendarClock className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                        <span className="mt-1 block">
                           <input
                             type="date"
                             value={grant.validUntil}
                             disabled={disabled}
                             onChange={(event) => patchGroup(group.id, { validUntil: event.target.value })}
-                            className="bbt-input h-9 pl-8 text-xs"
+                            className="bbt-input h-9 text-xs"
                           />
                         </span>
                       </label>
@@ -343,27 +341,25 @@ export function CorporateAccessEditor({
                     </label>
                     <label className="text-[10px] uppercase text-slate-500">
                       Valido a partir de
-                      <span className="relative mt-1 block">
-                        <CalendarClock className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                      <span className="mt-1 block">
                         <input
                           type="date"
                           value={grant.validFrom}
                           disabled={disabled}
                           onChange={(event) => patchDirectCompany(grant.companyId, { validFrom: event.target.value })}
-                          className="bbt-input h-9 pl-8 text-xs normal-case"
+                          className="bbt-input h-9 text-xs normal-case"
                         />
                       </span>
                     </label>
                     <label className="text-[10px] uppercase text-slate-500">
                       Expira em
-                      <span className="relative mt-1 block">
-                        <CalendarClock className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                      <span className="mt-1 block">
                         <input
                           type="date"
                           value={grant.validUntil}
                           disabled={disabled}
                           onChange={(event) => patchDirectCompany(grant.companyId, { validUntil: event.target.value })}
-                          className="bbt-input h-9 pl-8 text-xs normal-case"
+                          className="bbt-input h-9 text-xs normal-case"
                         />
                       </span>
                     </label>
