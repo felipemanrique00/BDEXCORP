@@ -9,6 +9,7 @@ const MIGRATION_FILE_PATTERN = /^\d{4}_[a-z0-9_-]+\.sql$/i
 export interface MigrationInventoryEntry {
   name: string
   checksum: string
+  compatibleChecksums?: readonly string[]
 }
 
 export interface MigrationReadinessState {
@@ -29,9 +30,12 @@ export async function readMigrationInventory(
 
   return Promise.all(names.map(async (name) => {
     const sql = await readFile(path.join(directory, name), 'utf8')
+    const checksum = migrationChecksum(sql)
+    const checksums = compatibleMigrationChecksums(sql)
     return {
       name,
-      checksum: createHash('sha256').update(sql).digest('hex'),
+      checksum,
+      compatibleChecksums: [...checksums].filter((candidate) => candidate !== checksum),
     }
   }))
 }
@@ -40,7 +44,10 @@ export function evaluateMigrationReadiness(
   required: MigrationInventoryEntry[],
   applied: MigrationInventoryEntry[],
 ): MigrationReadinessState {
-  const requiredByName = new Map(required.map((migration) => [migration.name, migration.checksum]))
+  const requiredByName = new Map(required.map((migration) => [
+    migration.name,
+    new Set([migration.checksum, ...(migration.compatibleChecksums ?? [])]),
+  ]))
   const appliedByName = new Map(applied.map((migration) => [migration.name, migration.checksum]))
 
   const missing = [...requiredByName.keys()]
@@ -50,7 +57,9 @@ export function evaluateMigrationReadiness(
     .filter((name) => !requiredByName.has(name))
     .sort((left, right) => left.localeCompare(right))
   const checksumMismatches = [...requiredByName.entries()]
-    .filter(([name, checksum]) => appliedByName.has(name) && appliedByName.get(name) !== checksum)
+    .filter(([name, checksums]) => (
+      appliedByName.has(name) && !checksums.has(appliedByName.get(name) as string)
+    ))
     .map(([name]) => name)
     .sort((left, right) => left.localeCompare(right))
 
@@ -60,4 +69,23 @@ export function evaluateMigrationReadiness(
     extra,
     checksumMismatches,
   }
+}
+
+function migrationChecksum(sql: string) {
+  return createHash('sha256').update(sql).digest('hex')
+}
+
+/**
+ * Historical Windows releases recorded CRLF hashes while immutable Git
+ * artifacts contain LF blobs. Both byte sequences represent the same SQL;
+ * no other content difference is accepted by readiness.
+ */
+function compatibleMigrationChecksums(sql: string) {
+  const lf = sql.replace(/\r\n/g, '\n')
+  const crlf = lf.replace(/\n/g, '\r\n')
+  return new Set([
+    migrationChecksum(sql),
+    migrationChecksum(lf),
+    migrationChecksum(crlf),
+  ])
 }

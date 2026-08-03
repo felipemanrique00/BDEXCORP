@@ -10,7 +10,7 @@ export function migrationChecksum(sql) {
  * represent the same SQL. No other content difference is accepted.
  */
 export function compatibleMigrationChecksums(sql) {
-  const lf = sql.replace(/\r\n?/g, '\n')
+  const lf = sql.replace(/\r\n/g, '\n')
   const crlf = lf.replace(/\n/g, '\r\n')
   return new Set([
     migrationChecksum(sql),

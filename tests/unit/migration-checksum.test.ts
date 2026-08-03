@@ -15,9 +15,11 @@ describe('migration checksum compatibility', () => {
   })
 
   it('accepts only the equivalent LF and CRLF byte sequences', () => {
+    const crSql = lfSql.replace(/\n/g, '\r')
     expect(migrationChecksum(lfSql)).not.toBe(migrationChecksum(crlfSql))
     expect(isMigrationChecksumCompatible(lfSql, migrationChecksum(crlfSql))).toBe(true)
     expect(isMigrationChecksumCompatible(crlfSql, migrationChecksum(lfSql))).toBe(true)
+    expect(isMigrationChecksumCompatible(lfSql, migrationChecksum(crSql))).toBe(false)
     expect(compatibleMigrationChecksums(lfSql)).toHaveLength(2)
   })
 

@@ -22,25 +22,69 @@ describe('migration readiness', () => {
       const directory = path.join(root, 'deploy', 'postgres', 'migrations')
       await mkdir(directory, { recursive: true })
       const sql = 'select 1;\n'
+      const crlfSql = sql.replace(/\n/g, '\r\n')
       await writeFile(path.join(directory, '0001_platform.sql'), sql, 'utf8')
       await writeFile(path.join(directory, 'README.txt'), 'ignored', 'utf8')
 
       await expect(readMigrationInventory(root)).resolves.toEqual([{
         name: '0001_platform.sql',
         checksum: createHash('sha256').update(sql).digest('hex'),
+        compatibleChecksums: [createHash('sha256').update(crlfSql).digest('hex')],
       }])
     } finally {
       await rm(root, { recursive: true, force: true })
     }
   })
 
-  it('accepts only an exact migration inventory with matching checksums', () => {
+  it('accepts an exact migration inventory with matching checksums', () => {
     expect(evaluateMigrationReadiness(inventory, [...inventory])).toEqual({
       ok: true,
       missing: [],
       extra: [],
       checksumMismatches: [],
     })
+  })
+
+  it('accepts only an equivalent LF or CRLF checksum', () => {
+    const lfSql = 'begin;\nselect 1;\ncommit;\n'
+    const crlfSql = lfSql.replace(/\n/g, '\r\n')
+    const crSql = lfSql.replace(/\n/g, '\r')
+    const changedSql = lfSql.replace('select 1', 'select 2')
+    const lfChecksum = createHash('sha256').update(lfSql).digest('hex')
+    const crlfChecksum = createHash('sha256').update(crlfSql).digest('hex')
+    const crChecksum = createHash('sha256').update(crSql).digest('hex')
+    const changedChecksum = createHash('sha256').update(changedSql).digest('hex')
+
+    expect(lfChecksum).not.toBe(crlfChecksum)
+    expect(evaluateMigrationReadiness([{
+      name: '0001_platform.sql',
+      checksum: lfChecksum,
+      compatibleChecksums: [crlfChecksum],
+    }], [{
+      name: '0001_platform.sql',
+      checksum: crlfChecksum,
+    }])).toEqual({
+      ok: true,
+      missing: [],
+      extra: [],
+      checksumMismatches: [],
+    })
+    expect(evaluateMigrationReadiness([{
+      name: '0001_platform.sql',
+      checksum: lfChecksum,
+      compatibleChecksums: [crlfChecksum],
+    }], [{
+      name: '0001_platform.sql',
+      checksum: changedChecksum,
+    }]).checksumMismatches).toEqual(['0001_platform.sql'])
+    expect(evaluateMigrationReadiness([{
+      name: '0001_platform.sql',
+      checksum: lfChecksum,
+      compatibleChecksums: [crlfChecksum],
+    }], [{
+      name: '0001_platform.sql',
+      checksum: crChecksum,
+    }]).checksumMismatches).toEqual(['0001_platform.sql'])
   })
 
   it('rejects missing and extra migrations', () => {
