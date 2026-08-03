@@ -1,9 +1,13 @@
-import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import pg from 'pg'
+
+import {
+  isMigrationChecksumCompatible,
+  migrationChecksum,
+} from './migration-checksum.mjs'
 
 const { Pool } = pg
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -81,7 +85,7 @@ async function loadMigrations() {
     return {
       name,
       sql,
-      checksum: createHash('sha256').update(sql).digest('hex'),
+      checksum: migrationChecksum(sql),
     }
   }))
 }
@@ -156,7 +160,7 @@ async function readAppliedMigrations(client) {
 function verifyChecksums(migrations, applied) {
   for (const migration of migrations) {
     const stored = applied.get(migration.name)
-    if (stored && stored !== migration.checksum) {
+    if (stored && !isMigrationChecksumCompatible(migration.sql, stored)) {
       throw new Error(`Checksum alterado para migration ja aplicada: ${migration.name}`)
     }
   }
