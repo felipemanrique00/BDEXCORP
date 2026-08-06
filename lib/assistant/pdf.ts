@@ -190,6 +190,33 @@ function renderServiceSection(voucher: VoucherEmitido): string {
   if (voucher.tipo === 'Hotel') return ''
 
   if (voucher.tipo === 'Aéreo') {
+    if (voucher.trechos_aereos?.length) {
+      const segmentRows = voucher.trechos_aereos.map((segment) => `<tr>
+        <td><strong>Sai:</strong> ${escapeHtml(formatDateTimeBR(segment.saida_em) || '')}<br /><strong>Chega:</strong> ${escapeHtml(formatDateTimeBR(segment.chegada_em) || '')}</td>
+        <td>${escapeHtml(joinValues([segment.origem_codigo, segment.origem_nome || '']) || '')}<br />→ ${escapeHtml(joinValues([segment.destino_codigo, segment.destino_nome || '']) || '')}</td>
+        <td>${escapeHtml(segment.companhia_nome)}<br />${escapeHtml(`${segment.companhia_codigo} ${segment.numero_voo}`)}</td>
+        <td>${escapeHtml(joinValues([segment.cabine, segment.classe_reserva]) || '')}</td>
+        <td>${escapeHtml(`${segment.bagagens} volume(s)`)}</td>
+      </tr>`).join('')
+      const ticketRows = voucher.bilhetes_aereos?.map((ticket) => `<tr>
+        <td>${escapeHtml(ticket.passageiro_nome)}</td>
+        <td>${escapeHtml(ticket.numero_bilhete)}</td>
+        <td>${escapeHtml(`${ticket.companhia_nome} (${ticket.companhia_codigo})`)}</td>
+      </tr>`).join('') || ''
+      const reservationFields = [
+        field('Sistema de reserva', voucher.sistema_reserva),
+        field('Localizador', voucher.localizador),
+        field('Prazo de emissão', formatDateTimeBR(voucher.prazo_emissao)),
+      ].join('')
+      return section('Itinerário aéreo', `
+        <table>
+          <thead><tr><th>Data e hora</th><th>Trecho</th><th>Companhia / voo</th><th>Classe</th><th>Bagagem</th></tr></thead>
+          <tbody>${segmentRows}</tbody>
+        </table>
+        ${reservationFields ? `<div class="grid" style="margin-top: 10px">${reservationFields}</div>` : ''}
+        ${ticketRows ? `<h3 class="section-title" style="margin-top: 12px">Bilhetes emitidos</h3><table><thead><tr><th>Passageiro</th><th>Número</th><th>Companhia emissora</th></tr></thead><tbody>${ticketRows}</tbody></table>` : ''}
+      `)
+    }
     const fields = [
       field('Companhia aérea', voucher.cia_aerea),
       field('Voo', voucher.numero_voo),
@@ -286,6 +313,9 @@ function renderFinancialSection(
     moneyRow('Taxas por diária', voucher.taxas_diaria, currency),
     moneyRow('Tarifa total', voucher.tarifa_total, currency),
     moneyRow('Taxas', voucher.taxas, currency),
+    moneyRow('RAV', voucher.rav, currency),
+    moneyRow('RAC', voucher.rac, currency),
+    moneyRow('Tarifa de referência', voucher.tarifa_referencia, currency),
     moneyRow('Taxa de serviço / RAC', voucher.taxa_servico, currency),
     moneyRow('Total', voucher.total, currency, 'total-row'),
   ].join('') : ''

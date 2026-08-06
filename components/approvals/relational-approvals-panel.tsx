@@ -28,6 +28,7 @@ import {
 } from '@/lib/approvals/client'
 import {
   extractApprovalBusinessSummary,
+  extractAirQuoteApprovalSummary,
   extractHotelQuoteApprovalSummary,
 } from '@/lib/approvals/subject-presentation'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
@@ -124,6 +125,10 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
   )
   const selectedHotelQuote = useMemo(
     () => selected ? extractHotelQuoteApprovalSummary(selected.subject) : null,
+    [selected],
+  )
+  const selectedAirQuote = useMemo(
+    () => selected ? extractAirQuoteApprovalSummary(selected.subject) : null,
     [selected],
   )
   const selectedBusiness = useMemo(
@@ -291,11 +296,11 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
                 <dl className="grid gap-3 border-y border-bbt-gray-100 py-4 text-sm dark:border-slate-800 sm:grid-cols-2">
                   <Detail label="Iniciada em" value={formatDateTime(selected.startedAt)} />
                   <Detail label="Tipo" value={instanceTypeLabel(selected.type)} />
-                  <Detail label="Pedido / OS" value={selectedHotelQuote?.demandNumber || selected.demandNumber || 'Não informado'} />
+                  <Detail label="Pedido / OS" value={selectedHotelQuote?.demandNumber || selectedAirQuote?.demandNumber || selected.demandNumber || 'Não informado'} />
                   <Detail label="Solicitante" value={selected.requesterName || 'Não informado'} />
-                  <Detail label="Viajante" value={selectedHotelQuote?.passengerName || selected.travelerName || 'Não informado'} />
-                  <Detail label="Serviço" value={selectedBusiness?.service || 'Não informado'} />
-                  <Detail label="Destino" value={selectedBusiness?.destination || 'Não informado'} />
+                  <Detail label="Viajante" value={selectedHotelQuote?.passengerName || selectedAirQuote?.passengerName || selected.travelerName || 'Não informado'} />
+                  <Detail label="Serviço" value={selectedAirQuote ? 'Aéreo' : selectedHotelQuote ? 'Hotel' : selectedBusiness?.service || 'Não informado'} />
+                  <Detail label="Destino" value={selectedAirQuote?.destination || selectedBusiness?.destination || 'Não informado'} />
                 </dl>
 
                 {selected.demandId && (

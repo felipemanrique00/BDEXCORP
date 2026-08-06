@@ -31,6 +31,50 @@ export interface HotelQuoteApprovalSummary {
   policyLabels: string[]
 }
 
+export interface AirQuoteApprovalSegment {
+  sequence: number
+  airlineCode: string
+  airlineName: string
+  flightNumber: string
+  bookingClass: string
+  cabinClass: string
+  baggagePieces: number
+  originCode: string
+  originName: string | null
+  destinationCode: string
+  destinationName: string | null
+  departureAt: string
+  arrivalAt: string
+}
+
+export interface AirQuoteApprovalSummary {
+  demandNumber: string
+  passengerName: string
+  destination: string
+  optionCount: number
+  expiresAt: string | null
+  supplierName: string
+  airlineName: string
+  reservationSystem: string | null
+  locator: string | null
+  fareFamily: string | null
+  ticketingDeadline: string | null
+  segments: AirQuoteApprovalSegment[]
+  fare: number
+  taxes: number
+  rav: number
+  rac: number
+  total: number
+  currency: string
+  refundable: boolean | null
+  fareRules: string | null
+  cancellationPolicy: string | null
+  changePolicy: string | null
+  notes: string | null
+  reason: string | null
+  policyLabels: string[]
+}
+
 export interface ApprovalPresentationContext {
   instanceType?: string | null
   demandNumber?: string | null
@@ -67,6 +111,10 @@ export type ApprovalSubjectPresentation =
   | {
       kind: 'hotel_quote'
       hotelQuote: HotelQuoteApprovalSummary
+    }
+  | {
+      kind: 'air_quote'
+      airQuote: AirQuoteApprovalSummary
     }
   | {
       kind: 'business'
@@ -126,6 +174,80 @@ export function extractHotelQuoteApprovalSummary(
   }
 }
 
+export function extractAirQuoteApprovalSummary(
+  subject: Record<string, unknown>,
+): AirQuoteApprovalSummary | null {
+  const snapshot = parseSnapshot(subject.quoteSnapshot)
+  if (!snapshot || text(snapshot.serviceKey) !== 'aereo') return null
+
+  const quote = asRecord(snapshot.quote)
+  const demand = asRecord(snapshot.demand)
+  const option = asRecord(snapshot.option)
+  const air = asRecord(option?.air)
+  const pricing = asRecord(air?.pricing) || asRecord(option?.breakdown)
+  if (!quote || !demand || !option || !air || !pricing) return null
+
+  const demandNumber = text(demand.number)
+  const segments = Array.isArray(air.segments)
+    ? air.segments.flatMap((raw, index) => {
+        const segment = asRecord(raw)
+        if (!segment) return []
+        const departureAt = text(segment.departsAt) || text(segment.departureAt)
+        const arrivalAt = text(segment.arrivesAt) || text(segment.arrivalAt)
+        const originCode = text(segment.originCode)
+        const destinationCode = text(segment.destinationCode)
+        if (!departureAt || !arrivalAt || !originCode || !destinationCode) return []
+        return [{
+          sequence: number(segment.sequence) ?? index + 1,
+          airlineCode: text(segment.airlineCode) || '',
+          airlineName: text(segment.airlineName) || text(air.airlineName) || 'Companhia não informada',
+          flightNumber: text(segment.flightNumber) || '',
+          bookingClass: text(segment.bookingClass) || '',
+          cabinClass: text(segment.cabinClass) || '',
+          baggagePieces: number(segment.baggagePieces) ?? 0,
+          originCode,
+          originName: text(segment.originName),
+          destinationCode,
+          destinationName: text(segment.destinationName),
+          departureAt,
+          arrivalAt,
+        }]
+      })
+    : []
+  const total = number(pricing.total) ?? number(option.amount) ?? number(subject.amount)
+  if (!demandNumber || !segments.length || total === null) return null
+
+  const firstSegment = segments[0]
+  const lastSegment = segments[segments.length - 1]
+  return {
+    demandNumber,
+    passengerName: text(demand.passengerName) || 'Não informado',
+    destination: text(demand.destination) || lastSegment.destinationName || lastSegment.destinationCode,
+    optionCount: number(quote.optionCount) ?? 1,
+    expiresAt: text(quote.expiresAt),
+    supplierName: text(option.supplierName) || text(air.airlineName) || 'Não informado',
+    airlineName: text(air.airlineName) || firstSegment.airlineName,
+    reservationSystem: text(air.reservationSystem),
+    locator: text(air.locator),
+    fareFamily: text(air.fareFamily) || text(option.subtitle),
+    ticketingDeadline: text(air.ticketingDeadline),
+    segments,
+    fare: number(pricing.fare) ?? 0,
+    taxes: number(pricing.taxes) ?? 0,
+    rav: number(pricing.rav) ?? 0,
+    rac: number(pricing.rac) ?? 0,
+    total,
+    currency: text(pricing.currency) || text(option.currency) || text(subject.currency) || 'BRL',
+    refundable: boolean(air.refundable) ?? boolean(option.refundable),
+    fareRules: text(air.fareRules),
+    cancellationPolicy: text(air.cancellationPolicy),
+    changePolicy: text(air.changePolicy),
+    notes: text(air.notes),
+    reason: approvalReason(subject),
+    policyLabels: approvalPolicyLabels(subject.policyViolationCodes),
+  }
+}
+
 /**
  * Produces the allow-listed presentation DTO that may cross the requester
  * boundary. It deliberately contains no identifiers, hashes or raw snapshot.
@@ -135,8 +257,10 @@ export function buildApprovalSubjectPresentation(
   context: ApprovalPresentationContext = {},
 ): ApprovalSubjectPresentation {
   const hotelQuote = extractHotelQuoteApprovalSummary(subject)
-  return hotelQuote
-    ? { kind: 'hotel_quote', hotelQuote }
+  if (hotelQuote) return { kind: 'hotel_quote', hotelQuote }
+  const airQuote = extractAirQuoteApprovalSummary(subject)
+  return airQuote
+    ? { kind: 'air_quote', airQuote }
     : { kind: 'business', business: extractApprovalBusinessSummary(subject, context) }
 }
 

@@ -79,6 +79,7 @@ export const detalhesHotelSchema = z.object({
 }, { message: 'Data de checkout deve ser depois do checkin', path: ['data_checkout'] })
 
 export const detalhesAereoSchema = z.object({
+  trip_type: z.enum(['one_way', 'round_trip', 'multi_city']).optional(),
   cia_aerea: z.string().optional(),
   origem: z.string().optional(),
   destino: z.string().optional(),
@@ -86,6 +87,38 @@ export const detalhesAereoSchema = z.object({
   data_volta: z.string().optional().transform((v) => v ? normalizarData(v) : ''),
   localizador: z.string().optional(),
   numero_voo: z.string().optional(),
+  classe: z.enum(['Econômica', 'Econômica Premium', 'Executiva', 'Primeira']).optional(),
+  internacional: z.boolean().optional(),
+  preferred_airlines: z.array(z.string().trim().min(1).max(120)).max(12).optional(),
+  baggage_pieces: z.number().int().min(0).max(10).optional(),
+  flexible_dates: z.boolean().optional(),
+  flexible_times: z.boolean().optional(),
+  trechos: z.array(z.object({
+    sequence: z.number().int().positive(),
+    direction: z.enum(['outbound', 'return', 'multi_city']).optional(),
+    origin: z.string().trim().min(3).max(160).regex(
+      /^[A-Za-z]{3}(?:\s*[-\u2013\u2014]\s*.+)?$/,
+      'Informe a origem como IATA ou IATA - nome (ex.: REC - Recife).',
+    ),
+    destination: z.string().trim().min(3).max(160).regex(
+      /^[A-Za-z]{3}(?:\s*[-\u2013\u2014]\s*.+)?$/,
+      'Informe o destino como IATA ou IATA - nome (ex.: GYN - Goiânia).',
+    ),
+    departure_date: z.string().transform((value) => normalizarData(value)),
+    earliest_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional().or(z.literal('')),
+    latest_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional().or(z.literal('')),
+  }).strict()).min(1).max(12).optional(),
+}).superRefine((details, context) => {
+  const legs = details.trechos || []
+  legs.forEach((leg, index) => {
+    if (leg.earliest_time && leg.latest_time && leg.latest_time < leg.earliest_time) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['trechos', index, 'latest_time'],
+        message: 'O fim da faixa de horario deve ser posterior ao inicio.',
+      })
+    }
+  })
 })
 
 export const atendimentoSchema = z.object({

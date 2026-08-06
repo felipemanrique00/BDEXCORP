@@ -3,7 +3,10 @@ import {
   Building2,
   CalendarDays,
   CircleDollarSign,
+  Clock3,
+  Luggage,
   MapPin,
+  Plane,
   ReceiptText,
   ShieldCheck,
   UserRound,
@@ -11,7 +14,9 @@ import {
 
 import {
   extractApprovalBusinessSummary,
+  extractAirQuoteApprovalSummary,
   extractHotelQuoteApprovalSummary,
+  type AirQuoteApprovalSummary,
   type ApprovalSubjectPresentation,
   type ApprovalPresentationContext,
   type ApprovalBusinessSummary,
@@ -31,10 +36,126 @@ export function ApprovalSubjectSummary({
     ? presentation.hotelQuote
     : extractHotelQuoteApprovalSummary(subject)
   if (hotelQuote) return <HotelQuoteSummary summary={hotelQuote} context={context} />
+  const airQuote = presentation?.kind === 'air_quote'
+    ? presentation.airQuote
+    : extractAirQuoteApprovalSummary(subject)
+  if (airQuote) return <AirQuoteSummary summary={airQuote} context={context} />
   const business = presentation?.kind === 'business'
     ? presentation.business
     : extractApprovalBusinessSummary(subject, context)
   return <GenericSubjectSummary summary={business} />
+}
+
+function AirQuoteSummary({
+  summary,
+  context,
+}: {
+  summary: AirQuoteApprovalSummary
+  context: ApprovalPresentationContext
+}) {
+  return (
+    <div className="mt-3 space-y-4">
+      <section className="overflow-hidden rounded-lg border border-bbt-accent/30 bg-bbt-accent/5" aria-label="Resumo da opção aérea escolhida">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-bbt-accent/20 p-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-bbt-accent">
+              <ShieldCheck className="h-4 w-4" />
+              Resumo para decisão
+            </div>
+            <h4 className="mt-1 text-lg font-bold text-bbt-primary dark:text-white">
+              {summary.demandNumber} · {summary.airlineName}
+            </h4>
+          </div>
+          <div className="rounded-md bg-white px-3 py-2 text-right shadow-sm dark:bg-slate-900">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total escolhido</div>
+            <div className="mt-0.5 text-xl font-bold text-bbt-primary dark:text-white">
+              {formatMoney(summary.total, summary.currency)}
+            </div>
+          </div>
+        </div>
+        <dl className="grid gap-3 p-4 sm:grid-cols-2">
+          {context.companyName && <BusinessDetail icon={Building2} label="Empresa" value={context.companyName} />}
+          {context.requesterName && <BusinessDetail icon={UserRound} label="Solicitante" value={context.requesterName} />}
+          <BusinessDetail icon={UserRound} label="Viajante" value={summary.passengerName} />
+          <BusinessDetail icon={MapPin} label="Destino" value={summary.destination} />
+          <BusinessDetail
+            icon={ReceiptText}
+            label="Rodada de cotação"
+            value={pluralize(summary.optionCount, 'opção apresentada', 'opções apresentadas')}
+            helper={summary.expiresAt ? `Válida até ${formatDateTime(summary.expiresAt)}` : 'Validade não informada'}
+          />
+          <BusinessDetail
+            icon={Clock3}
+            label="Prazo de emissão"
+            value={summary.ticketingDeadline ? formatDateTime(summary.ticketingDeadline) : 'Não informado'}
+          />
+        </dl>
+      </section>
+
+      <section className="overflow-hidden rounded-lg border border-bbt-gray-100 dark:border-slate-800" aria-labelledby="chosen-air-itinerary-title">
+        <div className="p-4">
+          <h4 id="chosen-air-itinerary-title" className="flex items-center gap-2 font-semibold text-bbt-primary dark:text-white">
+            <Plane className="h-4 w-4 text-bbt-accent" />
+            Itinerário escolhido
+          </h4>
+          <div className="mt-3 overflow-x-auto rounded-md border border-bbt-gray-100 dark:border-slate-800">
+            <table className="min-w-full text-left text-xs">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800/70">
+                <tr><th className="px-3 py-2">Data e hora</th><th className="px-3 py-2">Trecho</th><th className="px-3 py-2">Companhia / voo</th><th className="px-3 py-2">Classe</th><th className="px-3 py-2">Bagagem</th></tr>
+              </thead>
+              <tbody className="divide-y divide-bbt-gray-100 dark:divide-slate-800">
+                {summary.segments.map((segment) => (
+                  <tr key={`${segment.sequence}-${segment.flightNumber}`}>
+                    <td className="whitespace-nowrap px-3 py-2"><strong>Sai:</strong> {formatDateTime(segment.departureAt)}<br /><strong>Chega:</strong> {formatDateTime(segment.arrivalAt)}</td>
+                    <td className="px-3 py-2">{airLocation(segment.originCode, segment.originName)}<br />→ {airLocation(segment.destinationCode, segment.destinationName)}</td>
+                    <td className="px-3 py-2">{segment.airlineName}<br /><span className="text-slate-500">{segment.airlineCode} {segment.flightNumber}</span></td>
+                    <td className="px-3 py-2">{airCabinLabel(segment.cabinClass)} · {segment.bookingClass || 'Não informada'}</td>
+                    <td className="px-3 py-2"><span className="inline-flex items-center gap-1"><Luggage className="h-3.5 w-3.5" />{segment.baggagePieces} volume(s)</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <dl className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <TextDetail label="Fornecedor" value={summary.supplierName} />
+            <TextDetail label="Sistema de reserva" value={summary.reservationSystem || 'Não informado'} />
+            <TextDetail label="Localizador" value={summary.locator || 'Será confirmado na reserva'} />
+            <TextDetail label="Família tarifária" value={summary.fareFamily || 'Não informada'} />
+          </dl>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-bbt-gray-100 p-4 dark:border-slate-800" aria-labelledby="air-quote-value-title">
+        <h4 id="air-quote-value-title" className="flex items-center gap-2 font-semibold text-bbt-primary dark:text-white">
+          <CircleDollarSign className="h-4 w-4 text-bbt-accent" />
+          Composição do valor
+        </h4>
+        <div className="mt-3 overflow-hidden rounded-md border border-bbt-gray-100 dark:border-slate-800">
+          <MoneyRow label="Tarifa" value={summary.fare} currency={summary.currency} />
+          <MoneyRow label="Taxas" value={summary.taxes} currency={summary.currency} />
+          <MoneyRow label="RAV" value={summary.rav} currency={summary.currency} />
+          <MoneyRow label="RAC" value={summary.rac} currency={summary.currency} />
+          <MoneyRow label="Total selecionado" value={summary.total} currency={summary.currency} total />
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-bbt-gray-100 p-4 dark:border-slate-800" aria-labelledby="air-approval-conditions-title">
+        <h4 id="air-approval-conditions-title" className="flex items-center gap-2 font-semibold text-bbt-primary dark:text-white">
+          <Plane className="h-4 w-4 text-bbt-accent" />
+          Condições para decisão
+        </h4>
+        <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+          <TextDetail label="Tipo de tarifa" value={summary.refundable === null ? 'Não informado' : summary.refundable ? 'Reembolsável' : 'Não reembolsável'} />
+          <TextDetail label="Regras tarifárias" value={summary.fareRules || 'Não informadas'} warning={!summary.fareRules} />
+          <TextDetail label="Cancelamento" value={summary.cancellationPolicy || 'Não informado'} warning={!summary.cancellationPolicy} />
+          <TextDetail label="Alteração" value={summary.changePolicy || 'Não informada'} warning={!summary.changePolicy} />
+          {summary.notes && <div className="sm:col-span-2"><TextDetail label="Observações" value={summary.notes} /></div>}
+          {summary.reason && <div className="sm:col-span-2"><TextDetail label="Motivo da aprovação" value={summary.reason} /></div>}
+          {summary.policyLabels.length > 0 && <div className="sm:col-span-2"><TextDetail label="Política aplicável" value={summary.policyLabels.join(' · ')} /></div>}
+        </dl>
+      </section>
+    </div>
+  )
 }
 
 function HotelQuoteSummary({
@@ -345,4 +466,17 @@ function formatPeriod(start: string | null, end: string | null): string | null {
   if (start) return `A partir de ${formatDate(start)}`
   if (end) return `Até ${formatDate(end)}`
   return null
+}
+
+function airLocation(code: string, name: string | null): string {
+  return [code, name].filter(Boolean).join(' - ')
+}
+
+function airCabinLabel(value: string): string {
+  return ({
+    economy: 'Econômica',
+    premium_economy: 'Econômica premium',
+    business: 'Executiva',
+    first: 'Primeira classe',
+  } as Record<string, string>)[value] || value || 'Não informada'
 }

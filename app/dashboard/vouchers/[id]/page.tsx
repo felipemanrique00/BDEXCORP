@@ -434,7 +434,63 @@ export default function VoucherViewPage() {
           </div>
         )}
 
-        {voucher.tipo === 'Aéreo' && (
+        {voucher.tipo === 'Aéreo' && voucher.trechos_aereos?.length ? (
+          <div className="mb-4">
+            <h3 className="font-bold text-sm mb-2 italic">Itinerário aéreo:</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Data e hora</th>
+                  <th>Trecho</th>
+                  <th>Companhia / voo</th>
+                  <th>Classe</th>
+                  <th>Bagagem</th>
+                </tr>
+              </thead>
+              <tbody>
+                {voucher.trechos_aereos.map((trecho) => (
+                  <tr key={`${trecho.sequencia}-${trecho.numero_voo}`}>
+                    <td>
+                      <strong>Sai:</strong> {formatDateTimeBR(trecho.saida_em)}<br />
+                      <strong>Chega:</strong> {formatDateTimeBR(trecho.chegada_em)}
+                    </td>
+                    <td>
+                      {displayValue([trecho.origem_codigo, trecho.origem_nome].filter(Boolean).join(' - '))}<br />
+                      → {displayValue([trecho.destino_codigo, trecho.destino_nome].filter(Boolean).join(' - '))}
+                    </td>
+                    <td>{displayValue(`${trecho.companhia_nome} · ${trecho.companhia_codigo} ${trecho.numero_voo}`)}</td>
+                    <td>{displayValue(`${trecho.cabine} · ${trecho.classe_reserva}`)}</td>
+                    <td className="text-center">{trecho.bagagens} volume(s)</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="mt-3 grid grid-cols-3 gap-3 rounded-md border border-slate-300 bg-slate-50 p-3">
+              <VoucherInfo label="Sistema de reserva" value={voucher.sistema_reserva} />
+              <VoucherInfo label="Localizador" value={voucher.localizador || voucher.numero_confirmacao} />
+              <VoucherInfo label="Prazo de emissão" value={formatDateTimeBR(voucher.prazo_emissao)} />
+            </div>
+
+            {voucher.bilhetes_aereos?.length ? (
+              <div className="mt-3">
+                <h4 className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-700">Bilhetes emitidos</h4>
+                <table>
+                  <thead><tr><th>Passageiro</th><th>Número do bilhete</th><th>Companhia emissora</th></tr></thead>
+                  <tbody>
+                    {voucher.bilhetes_aereos.map((bilhete) => (
+                      <tr key={`${bilhete.passageiro_nome}-${bilhete.numero_bilhete}`}>
+                        <td>{bilhete.passageiro_nome}</td>
+                        <td>{bilhete.numero_bilhete}</td>
+                        <td>{bilhete.companhia_nome} ({bilhete.companhia_codigo})</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+        ) : voucher.tipo === 'Aéreo' && (
           <div className="mb-4">
             <h3 className="font-bold text-sm mb-2 italic">Dados do Voo:</h3>
             <table>
@@ -543,9 +599,18 @@ export default function VoucherViewPage() {
               {voucher.taxas_diaria !== undefined && (
                 <tr><td className="font-semibold">Taxas por diária</td><td className="text-right">{formatVoucherMoney(voucher.taxas_diaria, moeda)}</td></tr>
               )}
-              <tr><td className="font-semibold">Subtotal das diárias</td><td className="text-right">{formatVoucherMoney(voucher.tarifa_total || 0, moeda)}</td></tr>
+              <tr><td className="font-semibold">{voucher.tipo === 'Hotel' ? 'Subtotal das diárias' : 'Tarifa total'}</td><td className="text-right">{formatVoucherMoney(voucher.tarifa_total || 0, moeda)}</td></tr>
               {(voucher.taxas || 0) > 0 && (
                 <tr><td className="font-semibold">Taxas totais</td><td className="text-right">{formatVoucherMoney(voucher.taxas || 0, moeda)}</td></tr>
+              )}
+              {(voucher.rav || 0) > 0 && (
+                <tr><td className="font-semibold">RAV</td><td className="text-right">{formatVoucherMoney(voucher.rav || 0, moeda)}</td></tr>
+              )}
+              {(voucher.rac || 0) > 0 && (
+                <tr><td className="font-semibold">RAC</td><td className="text-right">{formatVoucherMoney(voucher.rac || 0, moeda)}</td></tr>
+              )}
+              {(voucher.tarifa_referencia || 0) > 0 && (
+                <tr><td className="font-semibold">Tarifa de referência</td><td className="text-right">{formatVoucherMoney(voucher.tarifa_referencia || 0, moeda)}</td></tr>
               )}
               {(voucher.taxa_servico || 0) > 0 && (
                 <tr><td className="font-semibold">Taxa de serviço</td><td className="text-right">{formatVoucherMoney(voucher.taxa_servico || 0, moeda)}</td></tr>

@@ -6,6 +6,11 @@ import { z } from 'zod'
 
 import type { PolicyEvaluationResult, PolicyScopeContext } from '@/lib/policy'
 import { sha256 } from '@/lib/policy'
+import {
+  airDemandDetailsIssues,
+  parseAirDemandDetails,
+  type AirDemandDetailsInput,
+} from '@/lib/air-demand/model'
 import { applyLegacyDemandAssignment } from '@/lib/demands/operational-mutations'
 import {
   assessDemandUpdate,
@@ -27,6 +32,11 @@ import {
   type RelationalDemandSnapshot,
 } from '@/lib/travel/legacy-demand'
 import { createApprovalInstance, ApprovalServiceError } from '@/lib/server/approval-service'
+import {
+  AirDemandServiceError,
+  hasPersistedAirDemandDetailsInTransaction,
+  persistAirDemandDetailsInTransaction,
+} from '@/lib/server/air-demand-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import {
   normalizeMembershipPermissions,
@@ -481,9 +491,12 @@ export async function updateDemandDetails(
     )
   }
   const hotelDetails = normalizedHotelDetails(parsedSnapshot)
+  const airDetails = normalizedAirDetails(parsedSnapshot)
   const snapshot = hotelDetails
     ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
-    : parsedSnapshot
+    : airDetails
+      ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
+      : parsedSnapshot
   if (snapshot.id !== demandId) {
     throw new DemandServiceError(
       'DEMAND_ID_MISMATCH',
@@ -511,6 +524,17 @@ export async function updateDemandDetails(
       throw new DemandServiceError(
         'HOTEL_DEMAND_DETAILS_REQUIRED',
         'Uma demanda hoteleira normalizada nao pode voltar ao formato legado nem trocar de servico por esta edicao.',
+        422,
+      )
+    }
+    if (
+      (current.service_type === 'air' || snapshot.serviceType === 'air')
+      && !airDetails
+      && await hasPersistedAirDemandDetailsInTransaction(client, principal.tenantId, demandId)
+    ) {
+      throw new DemandServiceError(
+        'AIR_DEMAND_DETAILS_REQUIRED',
+        'Uma demanda aerea normalizada nao pode voltar ao formato legado nem trocar de servico por esta edicao.',
         422,
       )
     }
@@ -543,6 +567,17 @@ export async function updateDemandDetails(
       throw new DemandServiceError(
         'HOTEL_DEMAND_NORMAL_EDIT_LOCKED',
         'A hospedagem ja entrou em cotacao e nao pode ser alterada por este formulario. Use o fluxo auditado de correcao da reserva.',
+        409,
+        { lifecycleStatus: current.lifecycle_status },
+      )
+    }
+    if (
+      (current.service_type === 'air' || snapshot.serviceType === 'air')
+      && !lifecycleAllowsNormalHotelDemandEdit(current.lifecycle_status)
+    ) {
+      throw new DemandServiceError(
+        'AIR_DEMAND_NORMAL_EDIT_LOCKED',
+        'O itinerario aereo ja entrou em cotacao e nao pode ser alterado por este formulario. Use o fluxo auditado de correcao da reserva.',
         409,
         { lifecycleStatus: current.lifecycle_status },
       )
@@ -826,6 +861,15 @@ export async function updateDemandDetails(
         hotelDetails,
       )
     }
+    if (airDetails) {
+      await persistNormalizedAirDemand(
+        client,
+        principal,
+        demandId,
+        snapshot.companyId,
+        airDetails,
+      )
+    }
     await persistIdentityDecision(
       client,
       principal,
@@ -1102,9 +1146,12 @@ export async function createRelationalDemand(
     )
   }
   const hotelDetails = normalizedHotelDetails(parsedSnapshot)
+  const airDetails = normalizedAirDetails(parsedSnapshot)
   const snapshot = hotelDetails
     ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
-    : parsedSnapshot
+    : airDetails
+      ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
+      : parsedSnapshot
   const idempotencyKey = normalizeIdempotencyKey(rawIdempotencyKey)
   const inputHash = sha256({ tenantId: principal.tenantId, demand: input.demand, submit: input.submit })
   await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
@@ -1121,6 +1168,7 @@ export async function createRelationalDemand(
       idempotencyKey,
       inputHash,
       hotelDetails,
+      airDetails,
     )
   })
   const replayConcurrentCreation = () => withTenantTransaction(principal.tenantId, async (client) => {
@@ -1191,6 +1239,7 @@ async function createDemandInTransaction(
   idempotencyKey: string,
   inputHash: string,
   hotelDetails: HotelDemandDetailsInput | null,
+  airDetails: AirDemandDetailsInput | null,
 ): Promise<DemandCreationPreparation> {
   await requireRelationalDemandWrite(client, principal.tenantId, snapshot.companyId)
   const company = await loadCompany(client, principal.tenantId, snapshot.companyId)
@@ -1303,6 +1352,15 @@ async function createDemandInTransaction(
       demandId,
       snapshot.companyId,
       hotelDetails,
+    )
+  }
+  if (airDetails) {
+    await persistNormalizedAirDemand(
+      client,
+      principal,
+      demandId,
+      snapshot.companyId,
+      airDetails,
     )
   }
 
@@ -1758,6 +1816,20 @@ function normalizedHotelDetails(snapshot: RelationalDemandSnapshot): HotelDemand
   return hotelDemandDetailsSchema.parse(rawHotelDetails)
 }
 
+function normalizedAirDetails(snapshot: RelationalDemandSnapshot): AirDemandDetailsInput | null {
+  if (snapshot.serviceType !== 'air') return null
+  const serviceDetails = recordValue(snapshot.metadata.serviceDetails)
+  const rawAirDetails = serviceDetails.air
+  const details = parseAirDemandDetails(rawAirDetails)
+  if (details) return details
+  throw new DemandServiceError(
+    'AIR_DEMAND_DETAILS_INVALID',
+    'Informe os trechos aereos com sequencia continua, data e origem/destino em codigo IATA de 3 letras (ex.: REC - Recife).',
+    422,
+    { issues: airDemandDetailsIssues(rawAirDetails) },
+  )
+}
+
 function demandSnapshotWithHotelPrimaryTraveler(
   snapshot: RelationalDemandSnapshot,
   details: HotelDemandDetailsInput,
@@ -1785,6 +1857,20 @@ function demandSnapshotWithHotelPrimaryTraveler(
   }
 }
 
+function demandSnapshotWithAirItinerary(
+  snapshot: RelationalDemandSnapshot,
+  details: AirDemandDetailsInput,
+): RelationalDemandSnapshot {
+  const firstLeg = details.legs[0]
+  const lastLeg = details.legs[details.legs.length - 1]
+  return {
+    ...snapshot,
+    travelStartDate: firstLeg.departureDate,
+    travelEndDate: lastLeg.departureDate,
+    destination: firstLeg.destinationName || firstLeg.destinationCode,
+  }
+}
+
 async function persistNormalizedHotelDemand(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -1802,6 +1888,29 @@ async function persistNormalizedHotelDemand(
     })
   } catch (error) {
     if (error instanceof HotelDemandServiceError) {
+      throw new DemandServiceError(error.code, error.message, error.status, error.details)
+    }
+    throw error
+  }
+}
+
+async function persistNormalizedAirDemand(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demandId: string,
+  companyId: string,
+  details: AirDemandDetailsInput,
+): Promise<void> {
+  try {
+    await persistAirDemandDetailsInTransaction(client, {
+      tenantId: principal.tenantId,
+      demandId,
+      companyId,
+      actorUserId: principal.user.id,
+      details,
+    })
+  } catch (error) {
+    if (error instanceof AirDemandServiceError) {
       throw new DemandServiceError(error.code, error.message, error.status, error.details)
     }
     throw error

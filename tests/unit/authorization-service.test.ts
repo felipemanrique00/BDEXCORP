@@ -222,6 +222,22 @@ describe('fine-grained authorization', () => {
   })
 
   it.each([
+    ['GET', 'read'],
+    ['POST', 'create'],
+  ] as const)('classifica %s da cotacao aerea offline como quotes/%s', async (method, action) => {
+    const authorization = await authorizationForApiRequest(new Request(
+      'http://localhost/api/offline-travel/air/quotes?demandId=demand-a',
+      {
+        method,
+        headers: method === 'POST' ? { 'content-type': 'application/json' } : undefined,
+        body: method === 'POST' ? '{}' : undefined,
+      },
+    ))
+
+    expect(authorization).toMatchObject({ resource: 'quotes', action })
+  })
+
+  it.each([
     ['/api/auth/change-password', 'account', 'update'],
     ['/api/auth/mfa/recovery-codes', 'account', 'update'],
     ['/api/auth/logout', 'session', 'delete'],

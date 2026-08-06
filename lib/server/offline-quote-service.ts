@@ -5,6 +5,7 @@ import type { PoolClient, QueryResultRow } from 'pg'
 
 import type { TravelQuote, TravelQuoteOption, TravelQuoteRequest } from '@/lib/integrations/types'
 import { calculateHotelQuote, nightsBetween } from '@/lib/hotel-demand/model'
+import { offlineServiceFromDemand } from '@/lib/offline-travel/catalog'
 import { moneyToMinorUnits, minorUnitsToMoney } from '@/lib/offline-travel/money'
 import {
   offlineHotelQuoteCreateSchema,
@@ -59,6 +60,7 @@ interface QuoteDemandRow extends QueryResultRow {
   destination: string | null
   cost_center: string | null
   estimated_amount: string | number
+  metadata: Record<string, unknown>
   lifecycle_status: string
   lifecycle_version: string | number
   last_policy_evaluation_id: string | null
@@ -66,10 +68,10 @@ interface QuoteDemandRow extends QueryResultRow {
   company_name: string
   employee_name: string | null
   employee_department: string | null
-  city_id: string
-  city_name: string
-  check_in: string | Date
-  check_out: string | Date
+  city_id: string | null
+  city_name: string | null
+  check_in: string | Date | null
+  check_out: string | Date | null
   preferred_hotel_ids: string[] | null
 }
 
@@ -281,7 +283,7 @@ export async function createOfflineHotelQuote(
     policyJustification: input.policyJustification,
     service: 'hotelaria',
     empresaId: prepared.demand.company_id,
-    destino: prepared.demand.city_name,
+    destino: prepared.demand.city_name || undefined,
     dataInicio: dateOnly(prepared.demand.check_in),
     dataFim: dateOnly(prepared.demand.check_out),
     adultos: prepared.rooms.length,
@@ -304,9 +306,9 @@ export async function createOfflineHotelQuote(
     currency: CURRENCY,
     refundable: option.refundable,
     policyStatus: 'respeitada',
-    startsAt: hotelDateTime(prepared.demand.check_in, '14:00:00'),
-    endsAt: hotelDateTime(prepared.demand.check_out, '12:00:00'),
-    city: prepared.demand.city_name,
+    startsAt: hotelDateTime(prepared.demand.check_in!, '14:00:00'),
+    endsAt: hotelDateTime(prepared.demand.check_out!, '12:00:00'),
+    city: prepared.demand.city_name || undefined,
     metadata: { offlineHotel: optionMetadata(option) },
     raw: {
       source: PROVIDER,
@@ -500,6 +502,15 @@ async function prepareHotelQuote(
     if (!normalizeService(demand.service_type).includes('hotel')) {
       throw new TravelGovernanceError('OFFLINE_QUOTE_SERVICE_MISMATCH', 'A demanda selecionada nao e de hotel.', 422)
     }
+    const checkIn = dateOnly(demand.check_in)
+    const checkOut = dateOnly(demand.check_out)
+    if (!demand.city_id || !demand.city_name || !checkIn || !checkOut) {
+      throw new TravelGovernanceError(
+        'OFFLINE_QUOTE_HOTEL_DETAILS_REQUIRED',
+        'A demanda nao possui cidade e periodo de hospedagem completos para cotacao.',
+        422,
+      )
+    }
     const rooms = (await client.query<DemandRoomRow>(
       `select id, room_sequence, occupancy_code
        from hotel_demand_rooms
@@ -510,7 +521,7 @@ async function prepareHotelQuote(
     if (!rooms.length) {
       throw new TravelGovernanceError('OFFLINE_QUOTE_ROOMS_REQUIRED', 'A demanda nao possui quartos ativos para cotacao.', 422)
     }
-    const nights = nightsBetween(dateOnly(demand.check_in), dateOnly(demand.check_out))
+    const nights = nightsBetween(checkIn, checkOut)
     if (nights < 1) throw new TravelGovernanceError('OFFLINE_QUOTE_DATES_INVALID', 'Periodo de hospedagem invalido.', 422)
 
     const hotelIds = Array.from(new Set(input.options.map((option) => option.hotelId)))
@@ -535,7 +546,7 @@ async function prepareHotelQuote(
          and hotel.city_id = $3::uuid and hotel.status = 'active'
          and hotel.deleted_at is null
        order by hotel.id, link.priority, link.id`,
-      [principal.tenantId, hotelIds, demand.city_id, dateOnly(demand.check_in), dateOnly(demand.check_out)],
+      [principal.tenantId, hotelIds, demand.city_id, checkIn, checkOut],
     )).rows
     const hotelRowsById = new Map<string, HotelSupplierRow[]>()
     for (const hotel of hotels) {
@@ -595,8 +606,8 @@ async function prepareHotelQuote(
           [
             principal.tenantId,
             rateReferences,
-            dateOnly(demand.check_in),
-            dateOnly(demand.check_out),
+            checkIn,
+            checkOut,
             demand.company_id,
             demand.group_id,
           ],
@@ -681,7 +692,7 @@ async function prepareHotelQuote(
       })
       const cancellationDeadline = option.cancellationDeadline || null
       if (cancellationDeadline
-        && Date.parse(cancellationDeadline) >= Date.parse(hotelDateTime(demand.check_in, '14:00:00'))) {
+          && Date.parse(cancellationDeadline) >= Date.parse(hotelDateTime(checkIn, '14:00:00'))) {
         throw new TravelGovernanceError(
           'OFFLINE_QUOTE_CANCELLATION_DEADLINE_INVALID',
           'O prazo de cancelamento deve ser anterior ao check-in.',
@@ -730,7 +741,7 @@ async function prepareHotelQuote(
       demand,
       rooms,
       options,
-      expiresAt: normalizeExpiry(input.expiresAt, options, demand.check_in),
+      expiresAt: normalizeExpiry(input.expiresAt, options, checkIn),
     }
   })
 }
@@ -1016,8 +1027,8 @@ async function prepareSelection(
         amount: numberValue(option.amount),
         currency: option.currency,
         urgent: demand.priority === 'urgent',
-        product: 'hotelaria',
-        destination: demand.city_name,
+        product: selectionServiceKey(demand, option),
+        destination: selectionDestination(demand, option),
         policyViolationCodes: policy.result.approvalsRequired.map((item) => item.policyCode),
         quoteSelectionId: selectionId,
         quoteId: option.quote_id,
@@ -1162,8 +1173,10 @@ async function loadQuoteDemand(
             coalesce(company.trade_name, company.legal_name) as company_name,
             employee.full_name as employee_name,
             employee.department as employee_department,
-            detail.city_id, city.name as city_name,
-            detail.check_in, detail.check_out,
+            detail.city_id,
+            coalesce(city.name, demand.destination) as city_name,
+            coalesce(detail.check_in, demand.travel_start_date) as check_in,
+            coalesce(detail.check_out, demand.travel_end_date) as check_out,
             coalesce((
               select array_agg(preference.hotel_id order by preference.preference_order)
               from hotel_demand_preferred_hotels preference
@@ -1176,15 +1189,15 @@ async function loadQuoteDemand(
        on company.tenant_id = demand.tenant_id and company.id = demand.company_id
      left join employees employee
        on employee.tenant_id = demand.tenant_id and employee.id = demand.employee_id
-     join hotel_demand_details detail
+     left join hotel_demand_details detail
        on detail.tenant_id = demand.tenant_id and detail.demand_id = demand.id
-     join geo_cities city on city.id = detail.city_id
+     left join geo_cities city on city.id = detail.city_id
      where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
      ${forUpdate ? 'for update of demand' : ''}`,
     [tenantId, demandId],
   )
   if (!result.rows[0]) {
-    throw new TravelGovernanceError('OFFLINE_QUOTE_DEMAND_NOT_FOUND', 'Demanda hoteleira nao encontrada.', 404)
+    throw new TravelGovernanceError('OFFLINE_QUOTE_DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
   }
   lifecycleStatus(result.rows[0])
   return result.rows[0]
@@ -1272,15 +1285,59 @@ function canonicalSelectionSnapshot(
   demand: QuoteDemandRow,
   option: SelectionContextRow,
 ): Record<string, unknown> {
+  const serviceKey = selectionServiceKey(demand, option)
+  const optionMetadata = objectValue(option.option_metadata)
+  const commonDemand = {
+    id: demand.id,
+    number: demand.demand_number,
+    companyId: demand.company_id,
+    requesterId: demand.requester_id,
+    employeeId: demand.employee_id,
+    passengerName: demand.passenger_name_snapshot,
+    startDate: dateOnly(demand.travel_start_date || demand.check_in),
+    endDate: dateOnly(demand.travel_end_date || demand.check_out),
+    destination: demand.destination || demand.city_name,
+  }
+  const commonOption = {
+    id: option.option_id,
+    providerOptionId: option.provider_option_id,
+    supplierName: option.supplier_name,
+    title: option.option_title,
+    subtitle: option.option_subtitle,
+    amount: numberValue(option.amount),
+    currency: option.currency,
+    refundable: option.refundable,
+    startsAt: dateTimeOrNull(option.starts_at),
+    endsAt: dateTimeOrNull(option.ends_at),
+  }
+
+  if (serviceKey === 'aereo') {
+    return {
+      version: 1,
+      serviceKey,
+      demand: {
+        ...commonDemand,
+        airRequest: airDemandDetails(demand),
+      },
+      quote: {
+        id: option.quote_id,
+        providerQuoteId: option.provider_quote_id,
+        optionCount: Number(option.quote_option_count),
+        expiresAt: dateTimeOrNull(option.quote_expires_at),
+      },
+      option: {
+        ...commonOption,
+        air: objectValue(optionMetadata.offlineAir),
+        breakdown: objectValue(objectValue(optionMetadata.offlineAir).pricing),
+      },
+    }
+  }
+
   return {
     version: 1,
+    serviceKey: 'hotelaria',
     demand: {
-      id: demand.id,
-      number: demand.demand_number,
-      companyId: demand.company_id,
-      requesterId: demand.requester_id,
-      employeeId: demand.employee_id,
-      passengerName: demand.passenger_name_snapshot,
+      ...commonDemand,
       checkIn: dateOnly(demand.check_in),
       checkOut: dateOnly(demand.check_out),
       cityId: demand.city_id,
@@ -1293,16 +1350,7 @@ function canonicalSelectionSnapshot(
       expiresAt: dateTimeOrNull(option.quote_expires_at),
     },
     option: {
-      id: option.option_id,
-      providerOptionId: option.provider_option_id,
-      supplierName: option.supplier_name,
-      title: option.option_title,
-      subtitle: option.option_subtitle,
-      amount: numberValue(option.amount),
-      currency: option.currency,
-      refundable: option.refundable,
-      startsAt: dateTimeOrNull(option.starts_at),
-      endsAt: dateTimeOrNull(option.ends_at),
+      ...commonOption,
       hotel: {
         id: option.hotel_id,
         name: option.hotel_name,
@@ -1324,8 +1372,10 @@ function selectionPolicyFacts(
   option: SelectionContextRow,
   snapshot: Record<string, unknown>,
 ): Record<string, unknown> {
+  const serviceKey = selectionServiceKey(demand, option)
+  const destination = selectionDestination(demand, option)
   const breakdown = objectValue(objectValue(option.option_metadata).offlineHotel)
-  return {
+  const baseFacts: Record<string, unknown> = {
     tenant: { id: demand.tenant_id },
     organization: { groupId: demand.group_id, companyId: demand.company_id },
     company: { id: demand.company_id, name: demand.company_name, groupId: demand.group_id },
@@ -1341,11 +1391,11 @@ function selectionPolicyFacts(
     request: {
       id: demand.id,
       number: demand.demand_number,
-      service: 'hotelaria',
+      service: serviceKey,
       priority: demand.priority,
-      destination: demand.city_name,
-      startDate: dateOnly(demand.check_in),
-      endDate: dateOnly(demand.check_out),
+      destination,
+      startDate: dateOnly(demand.travel_start_date || demand.check_in),
+      endDate: dateOnly(demand.travel_end_date || demand.check_out),
       costCenter: demand.cost_center,
     },
     quote: {
@@ -1357,6 +1407,25 @@ function selectionPolicyFacts(
       supplier: option.supplier_name,
       snapshot,
     },
+    finance: { totalAmount: numberValue(option.amount), currency: option.currency },
+    operation: { checkpoint: 'selection', provider: PROVIDER, channel: 'offline', requestedAt: new Date().toISOString() },
+  }
+  if (serviceKey === 'aereo') {
+    const air = objectValue(objectValue(option.option_metadata).offlineAir)
+    return {
+      ...baseFacts,
+      air: {
+        airline: air.airlineName || option.supplier_name,
+        cabinClass: air.cabinClass || null,
+        segments: Array.isArray(air.segments) ? air.segments : [],
+        ticketingDeadline: air.ticketingDeadline || null,
+        totalAmount: numberValue(option.amount),
+        refundable: option.refundable,
+      },
+    }
+  }
+  return {
+    ...baseFacts,
     hotel: {
       id: option.hotel_id,
       name: option.hotel_name,
@@ -1366,9 +1435,45 @@ function selectionPolicyFacts(
       refundable: option.refundable,
       preferred: (demand.preferred_hotel_ids || []).includes(String(option.hotel_id || '')),
     },
-    finance: { totalAmount: numberValue(option.amount), currency: option.currency },
-    operation: { checkpoint: 'selection', provider: PROVIDER, channel: 'offline', requestedAt: new Date().toISOString() },
   }
+}
+
+function selectionServiceKey(demand: QuoteDemandRow, option: SelectionContextRow): 'hotelaria' | 'aereo' {
+  const quoteService = offlineServiceFromDemand(option.service_type)
+  const demandService = offlineServiceFromDemand(demand.service_type)
+  const service = quoteService || demandService
+  if (service !== 'hotelaria' && service !== 'aereo') {
+    throw new TravelGovernanceError(
+      'OFFLINE_SELECTION_SERVICE_NOT_SUPPORTED',
+      'Este tipo de cotacao ainda nao possui escolha formal offline.',
+      422,
+      { quoteService: option.service_type, demandService: demand.service_type },
+    )
+  }
+  if (demandService && quoteService && demandService !== quoteService) {
+    throw new TravelGovernanceError(
+      'OFFLINE_SELECTION_SERVICE_SCOPE_MISMATCH',
+      'O servico da cotacao nao corresponde ao servico da demanda.',
+      409,
+    )
+  }
+  return service
+}
+
+function selectionDestination(demand: QuoteDemandRow, option: SelectionContextRow): string | null {
+  if (selectionServiceKey(demand, option) === 'hotelaria') return demand.city_name || demand.destination
+  const segments = objectValue(objectValue(option.option_metadata).offlineAir).segments
+  if (Array.isArray(segments)) {
+    const last = segments.length ? objectValue(segments[segments.length - 1]) : {}
+    const destination = String(last.destinationName || last.destinationCode || '').trim()
+    if (destination) return destination
+  }
+  return demand.destination
+}
+
+function airDemandDetails(demand: QuoteDemandRow): Record<string, unknown> {
+  const metadata = objectValue(demand.metadata)
+  return objectValue(objectValue(metadata.serviceDetails).air)
 }
 
 async function resolveApprovalWorkflowCode(

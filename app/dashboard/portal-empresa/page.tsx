@@ -62,6 +62,8 @@ import { listarViajantes } from '@/lib/duty-of-care'
 import { AI_SHORT_NAME } from '@/lib/branding'
 import { AIAssistantFab, AI_CONTEXT_EVENTS } from '@/components/ai/ai-assistant-fab'
 import { HotelDemandConfigurator } from '@/components/travel/hotel-demand-configurator'
+import { AirDemandConfigurator } from '@/components/travel/air-demand-configurator'
+import { OfflineAirQuoteChoiceWorkspace } from '@/components/travel/offline-air-quote-choice-workspace'
 import { OfflineQuoteChoicePanel } from '@/components/travel/offline-quote-choice-panel'
 import { DateInput } from '@/components/ui/date-input'
 import {
@@ -71,9 +73,11 @@ import {
 } from '@/components/travel/hotel-demand-guests-admin'
 import { hotelDemandAdministrativeSchema } from '@/lib/hotel-demand/form'
 import { hotelDemandDetailsSchema } from '@/lib/hotel-demand/model'
+import { detalhesAereoSchema } from '@/lib/validators'
 import type {
   Atendimento,
   CartaoCorporativo,
+  DetalhesAereo,
   DetalhesHotel,
   Empresa,
   FormaPagamento,
@@ -1388,6 +1392,11 @@ function PedidosTab({
   const [destino, setDestino] = useState('')
   const [dataInicio, setDataInicio] = useState('')
   const [dataFim, setDataFim] = useState('')
+  const [detAereo, setDetAereo] = useState<DetalhesAereo>({
+    trip_type: 'round_trip',
+    classe: 'Econômica',
+    baggage_pieces: 0,
+  })
   const [detHotel, setDetHotel] = useState<DetalhesHotel>({})
   const [observacoes, setObservacoes] = useState('')
   const [requesterId, setRequesterId] = useState('')
@@ -1508,6 +1517,12 @@ function PedidosTab({
     if (parsedHotel && !parsedHotel.success) {
       return toast.error(parsedHotel.error.issues[0]?.message || 'Revise destino, datas, quartos e hospedes.')
     }
+    const parsedAir = tipo === 'Aéreo' ? detalhesAereoSchema.safeParse(detAereo) : null
+    if (parsedAir && (!parsedAir.success || !parsedAir.data.trechos?.length)) {
+      return toast.error(parsedAir.success
+        ? 'Informe ao menos um trecho aéreo completo.'
+        : parsedAir.error.issues[0]?.message || 'Revise os trechos, datas e horários do aéreo.')
+    }
     const hotelPrimaryGuest = parsedHotel?.success
       ? parsedHotel.data.rooms.flatMap((room) => room.guests).find((guest) => guest.role === 'responsible')
       : null
@@ -1564,7 +1579,7 @@ function PedidosTab({
         observacoes: observacoes.trim(),
         data_atendimento: todayISODate(),
         ...(tipo === 'Aéreo'
-          ? { detalhes_aereo: { origem: origem.trim(), destino: destino.trim(), data_ida: dataInicio, data_volta: dataFim } }
+          ? { detalhes_aereo: parsedAir?.success ? parsedAir.data : detAereo }
           : tipo === 'Hotel'
           ? { detalhes_hotel: parsedHotel?.success ? parsedHotel.data : detHotel }
           : tipo === 'Carro'
@@ -1587,7 +1602,7 @@ function PedidosTab({
       } else {
         toast.success('Pedido enviado! A BBT já recebeu.')
       }
-      setPassageiro(''); setOrigem(''); setDestino(''); setDataInicio(''); setDataFim(''); setDetHotel({}); setObservacoes(''); setFuncId(''); setFuncCodigo('')
+      setPassageiro(''); setOrigem(''); setDestino(''); setDataInicio(''); setDataFim(''); setDetHotel({}); setDetAereo({ trip_type: 'round_trip', classe: 'Econômica', baggage_pieces: 0 }); setObservacoes(''); setFuncId(''); setFuncCodigo('')
       setCostCenterId(empresa?.centro_custo_padrao_id || null)
       setCostCenterCode(String(empresa?.centro_custo_padrao || ''))
       setPaymentMethod('IV')
@@ -1602,16 +1617,22 @@ function PedidosTab({
   return (
     <div className="space-y-4">
       {isRequesterUser(authenticatedUser) && (
-        <div id={PORTAL_REQUESTS_CHOICE_PANEL_ID} tabIndex={-1} className="scroll-mt-24 outline-none">
+        <div id={PORTAL_REQUESTS_CHOICE_PANEL_ID} tabIndex={-1} className="scroll-mt-24 space-y-4 outline-none">
           <OfflineQuoteChoicePanel
             demands={atendimentos}
+            requesterId={solicitanteAtual?.id || null}
+            onCompleted={onSaved}
+          />
+          <OfflineAirQuoteChoiceWorkspace
+            demands={atendimentos}
+            companies={empresa ? [empresa] : []}
             requesterId={solicitanteAtual?.id || null}
             onCompleted={onSaved}
           />
         </div>
       )}
 
-      <div className={`grid gap-4 ${tipo === 'Hotel' ? 'xl:grid-cols-[minmax(0,760px)_1fr]' : 'lg:grid-cols-[420px_1fr]'}`}>
+      <div className={`grid gap-4 ${tipo === 'Hotel' || tipo === 'Aéreo' ? 'xl:grid-cols-[minmax(0,760px)_1fr]' : 'lg:grid-cols-[420px_1fr]'}`}>
       {podeCriar && (
         <form onSubmit={enviarPedido} className="bbt-card p-5 space-y-3">
           <h3 className="font-bold text-bbt-primary dark:text-white flex items-center gap-2">
@@ -1692,17 +1713,14 @@ function PedidosTab({
             </div>
           )}
           {tipo === 'Aéreo' && (
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Origem"><input value={origem} onChange={(e) => setOrigem(e.target.value)} className="bbt-input" /></Field>
-              <Field label="Destino"><input value={destino} onChange={(e) => setDestino(e.target.value)} className="bbt-input" /></Field>
-            </div>
+            <AirDemandConfigurator value={detAereo} onChange={setDetAereo} disabled={enviando} />
           )}
           {tipo !== 'Aéreo' && tipo !== 'Hotel' && (
             <Field label="Cidade / Destino">
               <input value={destino} onChange={(e) => setDestino(e.target.value)} className="bbt-input" />
             </Field>
           )}
-          {tipo !== 'Hotel' && <div className="grid grid-cols-2 gap-2">
+          {tipo !== 'Hotel' && tipo !== 'Aéreo' && <div className="grid grid-cols-2 gap-2">
             <Field label="Data inicial" htmlFor="nova-demanda-data-inicio">
               <DateInput id="nova-demanda-data-inicio" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} />
             </Field>

@@ -604,6 +604,7 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/solicitantes')) return 'requesters'
   if (path.startsWith('/api/approvals/workflows')) return 'workflows'
   if (path.startsWith('/api/approvals')) return 'approvals'
+  if (path.startsWith('/api/offline-travel/air/quotes')) return 'quotes'
   if (path.startsWith('/api/offline-travel/hotel-rate-suggestions')) return 'quotes'
   if (path.startsWith('/api/offline-travel/quotes')) return 'quotes'
   if (path.startsWith('/api/offline-travel/reservations') && path.includes('/issue')) return 'emissions'

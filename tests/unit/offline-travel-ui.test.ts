@@ -90,11 +90,13 @@ describe('offline travel UI wiring', () => {
     expect(offlineWorkspace).toContain('stageFromContext(context)')
   })
 
-  it('connects hotel quotation and reservation to the same demand context', () => {
+  it('connects hotel, air quotation and reservation to the same demand context', () => {
     expect(offlineWorkspace).toContain('<OfflineHotelQuoteForm')
+    expect(offlineWorkspace).toContain('<OfflineAirQuoteWorkspace')
     expect(offlineWorkspace).toContain('Cotação de hotel')
+    expect(offlineWorkspace).toContain('Cotação aérea')
     expect(offlineWorkspace).toContain('Reserva, emissão e correção')
-    expect(offlineWorkspace.match(/initialDemandId=\{sharedDemandId \|\| undefined\}/g)).toHaveLength(2)
+    expect(offlineWorkspace.match(/initialDemandId=\{sharedDemandId \|\| undefined\}/g)).toHaveLength(3)
     expect(offlineHotelQuoteForm).toContain('onContextChange?.({')
     expect(offlineForm).toContain('appliedInitialDemandRef')
     expect(reservationsPage).toContain('getDemandFromServer(atendimentoId)')
@@ -185,10 +187,12 @@ describe('offline travel UI wiring', () => {
     expect(offlineForm).toContain("if (approvalStatus === 'approved') return 'Escolha aprovada'")
     expect(offlineForm).toContain('option.breakdown.roomSubtotal + option.breakdown.serviceFee')
     expect(offlineForm).toContain('setTaxAmount(moneyInput(option.breakdown.taxesSubtotal))')
-    expect(offlineForm).toContain('requiresSelectedHotelQuote && !selectedHotelQuote')
+    expect(offlineForm).toContain('const requiresSelectedCommercialQuote = Boolean(')
+    expect(offlineForm).toContain("['hotelaria', 'aereo'].includes(serviceKey)")
+    expect(offlineForm).toContain('requiresSelectedCommercialQuote && !selectedHotelQuote && !selectedAirQuote')
     expect(offlineForm).toContain('Carregue a opção escolhida e aprovada antes de registrar a reserva.')
     expect(offlineForm).toContain('isOfflineDemandEligibleForOperation')
-    expect(offlineTravelService).toContain('OFFLINE_HOTEL_APPROVED_SELECTION_REQUIRED')
+    expect(offlineTravelService).toContain('OFFLINE_APPROVED_SELECTION_REQUIRED')
     expect(offlineTravelService).toContain('loadApprovedOfflineQuoteSelection')
   })
 

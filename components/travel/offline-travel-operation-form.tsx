@@ -24,6 +24,7 @@ import { offlineServiceLabel } from '@/lib/offline-travel/catalog'
 import { sumMoneyInputs } from '@/lib/offline-travel/money'
 import { isOfflineDemandEligibleForOperation } from '@/lib/offline-travel/operation-eligibility'
 import { hotelGuestNames } from '@/lib/offline-travel/hotel-guests'
+import { listOfflineAirQuotesFromServer } from '@/lib/offline-travel/services/air/client'
 import { listOfflineHotelQuotesFromServer } from '@/lib/offline-travel/quote-client'
 import type { OfflineHotelQuoteOptionReadModel } from '@/lib/offline-travel/quote-schema'
 import {
@@ -42,6 +43,13 @@ import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { travelLifecycleStatusLabel } from '@/lib/travel-lifecycle/presentation'
 import { userAccessKind } from '@/lib/user-access-kind'
 import type { Atendimento, Empresa } from '@/types'
+import { atendimentoToOfflineAirDemandSummary } from '@/components/travel/offline-air-demand-summary'
+import {
+  OfflineAirOperationFields,
+  toOfflineAirQuoteOptionReadModel,
+  type OfflineAirApprovedSnapshot,
+  type OfflineAirOperationDraft,
+} from '@/components/travel/services/air'
 
 export type OfflineOperation = 'reservation' | 'reservation_and_issue' | 'issue_existing' | 'correct_existing'
 
@@ -83,6 +91,14 @@ interface SelectedHotelQuoteContext {
   option: OfflineHotelQuoteOptionReadModel
 }
 
+interface SelectedAirQuoteContext {
+  quoteId: string
+  lifecycleStatus: string
+  snapshot: OfflineAirApprovedSnapshot
+  approvalInstanceId: string | null
+  approvalStatus: string | null
+}
+
 type DetailKey = keyof DetailState
 type DetailField = {
   key: DetailKey
@@ -105,6 +121,18 @@ const EMPTY_DETAILS: DetailState = {
   returnLocation: '',
   policyNumber: '',
   coverage: '',
+}
+
+const EMPTY_AIR_OPERATION: OfflineAirOperationDraft = {
+  reservationSystem: '',
+  locator: '',
+  operationalSupplierName: '',
+  reservationConfirmedAt: '',
+  issuedAt: '',
+  tickets: [],
+  paymentMethod: 'faturado',
+  paymentReference: '',
+  operationalNotes: '',
 }
 
 const OPERATION_OPTIONS: Array<{
@@ -269,6 +297,10 @@ export function OfflineTravelOperationForm({
   const [selectedHotelQuote, setSelectedHotelQuote] = useState<SelectedHotelQuoteContext | null>(null)
   const [loadingSelectedHotelQuote, setLoadingSelectedHotelQuote] = useState(false)
   const [selectedHotelQuoteError, setSelectedHotelQuoteError] = useState('')
+  const [selectedAirQuote, setSelectedAirQuote] = useState<SelectedAirQuoteContext | null>(null)
+  const [loadingSelectedAirQuote, setLoadingSelectedAirQuote] = useState(false)
+  const [selectedAirQuoteError, setSelectedAirQuoteError] = useState('')
+  const [airOperation, setAirOperation] = useState<OfflineAirOperationDraft>({ ...EMPTY_AIR_OPERATION })
 
   const [issuedAt, setIssuedAt] = useState('')
   const [documentKind, setDocumentKind] = useState<OfflineIssueCreateInput['document']['kind']>('confirmacao')
@@ -281,6 +313,7 @@ export function OfflineTravelOperationForm({
   const [busy, setBusy] = useState(false)
   const appliedInitialDemandRef = useRef('')
   const selectedHotelQuoteRequestRef = useRef(0)
+  const selectedAirQuoteRequestRef = useRef(0)
   const operationRef = useRef<OfflineOperation>('reservation')
   const currentUser = typeof window !== 'undefined' ? getCurrentUser() : null
   const showTechnicalMetadata = Boolean(
@@ -338,11 +371,13 @@ export function OfflineTravelOperationForm({
   const usesExistingReservation = operation === 'issue_existing' || correctsReservation
   const showsReservationData = createsReservation || correctsReservation
   const locksSelectedHotelQuote = createsReservation && Boolean(selectedHotelQuote)
+  const locksSelectedAirQuote = createsReservation && Boolean(selectedAirQuote)
+  const locksSelectedCommercialQuote = locksSelectedHotelQuote || locksSelectedAirQuote
   const locksSelectedHotelGuests = locksSelectedHotelQuote && serviceKey === 'hotelaria'
-  const requiresSelectedHotelQuote = Boolean(
+  const requiresSelectedCommercialQuote = Boolean(
     createsReservation
     && selectedDemand
-    && serviceKey === 'hotelaria'
+    && ['hotelaria', 'aereo'].includes(serviceKey)
     && lifecycleRequiresSelectedHotelQuote(
       String(selectedDemand.relational_lifecycle_status || selectedDemand.status || '').trim().toLowerCase(),
     ),
@@ -466,6 +501,137 @@ export function OfflineTravelOperationForm({
     }
   }
 
+  function applySelectedAirQuote(
+    context: SelectedAirQuoteContext,
+    demand: Atendimento,
+  ) {
+    const option = context.snapshot.option
+    const firstSegment = option.segments[0]
+    const lastSegment = option.segments[option.segments.length - 1]
+    const passengerNames = context.snapshot.demand.passengers.map((passenger) => passenger.name)
+    const taxesAndFees = Number(option.pricing.taxes || 0)
+      + Number(option.pricing.rav || 0)
+      + Number(option.pricing.rac || 0)
+    const operationalSupplierName = option.segments[0]?.airlineName || 'Companhia aérea'
+    const initialOperation: OfflineAirOperationDraft = {
+      reservationSystem: option.reservationSystem,
+      locator: option.locator,
+      operationalSupplierName,
+      reservationConfirmedAt: toLocalDateTimeInput(new Date().toISOString()),
+      issuedAt: operationRef.current === 'reservation_and_issue'
+        ? toLocalDateTimeInput(new Date().toISOString())
+        : '',
+      tickets: passengerNames.map((passengerName) => ({ passengerName, ticketNumber: '' })),
+      paymentMethod: paymentMethod === 'dinheiro' ? 'outro' : paymentMethod,
+      paymentReference: '',
+      operationalNotes: String(demand.observacoes || ''),
+    }
+    setAirOperation(initialOperation)
+    setServiceKey('aereo')
+    setSupplierName(operationalSupplierName)
+    setExternalReference(option.locator || '')
+    setStartsAt(firstSegment?.departureAt || '')
+    setEndsAt(lastSegment?.arrivalAt || '')
+    setGrossAmount(option.pricing.fare)
+    setTaxAmount(moneyInput(taxesAndFees))
+    setCurrency(option.pricing.currency || 'BRL')
+    setDetails({
+      ...detailsFromDemand(demand),
+      itemName: operationalSupplierName,
+      origin: airSegmentLocation(firstSegment?.originCode, firstSegment?.originName),
+      destination: airSegmentLocation(lastSegment?.destinationCode, lastSegment?.destinationName),
+      serviceNumber: option.segments
+        .map((segment) => `${segment.airlineCode} ${segment.flightNumber}`.trim())
+        .filter(Boolean)
+        .join(' / '),
+      className: firstSegment?.cabinClass || '',
+      category: [option.fareFamily, `${firstSegment?.baggagePieces || 0} bagagem(ns)`]
+        .filter(Boolean)
+        .join(' · '),
+    })
+    setReservationEvidence({
+      source: OFFLINE_TRAVEL_PROVIDER,
+      quoteId: context.quoteId,
+      quoteOptionId: option.id,
+      approvalStatus: context.approvalStatus,
+      approvedAirQuote: context.snapshot,
+      reservationSystem: option.reservationSystem,
+    })
+    setPassengersText(passengerNames.join('\n'))
+    setDocumentKind('bilhete')
+    setDocumentReference(option.locator || '')
+  }
+
+  async function loadSelectedAirQuote(demand: Atendimento) {
+    const requestId = selectedAirQuoteRequestRef.current + 1
+    selectedAirQuoteRequestRef.current = requestId
+    setSelectedAirQuote(null)
+    setSelectedAirQuoteError('')
+
+    if (serviceFromDemand(demand) !== 'aereo') {
+      setLoadingSelectedAirQuote(false)
+      return
+    }
+
+    setLoadingSelectedAirQuote(true)
+    try {
+      const result = await listOfflineAirQuotesFromServer(demand.id)
+      if (selectedAirQuoteRequestRef.current !== requestId) return
+      const quote = result.quotes.find((item) => (
+        Boolean(item.selectedOptionId) || item.options.some((option) => option.selected)
+      ))
+      const serverOption = quote?.options.find((item) => (
+        item.id === quote.selectedOptionId || item.selected
+      ))
+      if (!quote || !serverOption) {
+        if (lifecycleRequiresSelectedHotelQuote(result.lifecycleStatus)) {
+          setSelectedAirQuoteError(
+            'A demanda avançou para reserva, mas nenhuma opção aérea formalmente escolhida foi localizada. Atualize a página antes de continuar.',
+          )
+        }
+        return
+      }
+      const companyName = companyById.get(demand.empresa_id)?.nome || 'Empresa não localizada'
+      const context: SelectedAirQuoteContext = {
+        quoteId: quote.id,
+        lifecycleStatus: result.lifecycleStatus || quote.lifecycleStatus,
+        approvalInstanceId: serverOption.approvalInstanceId,
+        approvalStatus: serverOption.approvalStatus,
+        snapshot: {
+          demand: atendimentoToOfflineAirDemandSummary(demand, companyName),
+          quoteId: quote.id,
+          approvedAt: serverOption.approvalStatus === 'approved' ? new Date().toISOString() : null,
+          option: toOfflineAirQuoteOptionReadModel(serverOption),
+        },
+      }
+      setSelectedAirQuote(context)
+      if (operationRef.current !== 'correct_existing') {
+        applySelectedAirQuote(context, demand)
+        if (operationRef.current === 'issue_existing') {
+          const existing = reservations.find((reservation) => (
+            reservation.provider === OFFLINE_TRAVEL_PROVIDER
+            && reservation.status === 'reserved'
+            && (reservation.demandId === demand.id || reservation.demandNumber === demand.serial_os)
+          ))
+          if (existing?.providerReference) {
+            setExternalReference(existing.providerReference)
+            setDocumentReference(existing.providerReference)
+            setAirOperation((current) => ({ ...current, locator: existing.providerReference || current.locator }))
+          }
+        }
+      }
+    } catch (error) {
+      if (selectedAirQuoteRequestRef.current !== requestId) return
+      setSelectedAirQuoteError(
+        error instanceof Error
+          ? error.message
+          : 'Não foi possível carregar a opção aérea escolhida para esta demanda.',
+      )
+    } finally {
+      if (selectedAirQuoteRequestRef.current === requestId) setLoadingSelectedAirQuote(false)
+    }
+  }
+
   function changeOperation(nextOperation: OfflineOperation) {
     operationRef.current = nextOperation
     setOperation(nextOperation)
@@ -476,6 +642,7 @@ export function OfflineTravelOperationForm({
       setReservationVersion(null)
       setRevisionCount(0)
       if (selectedHotelQuote && selectedDemand) applySelectedHotelQuote(selectedHotelQuote, selectedDemand)
+      if (selectedAirQuote && selectedDemand) applySelectedAirQuote(selectedAirQuote, selectedDemand)
       return
     }
     const matches = selectedDemand
@@ -492,6 +659,7 @@ export function OfflineTravelOperationForm({
   function selectDemand(nextDemandId: string) {
     const demand = availableDemands.find((item) => item.id === nextDemandId) || null
     selectedHotelQuoteRequestRef.current += 1
+    selectedAirQuoteRequestRef.current += 1
     setDemandId(nextDemandId)
     setReservationId('')
     setReservationVersion(null)
@@ -500,6 +668,10 @@ export function OfflineTravelOperationForm({
     setSelectedHotelQuote(null)
     setSelectedHotelQuoteError('')
     setLoadingSelectedHotelQuote(false)
+    setSelectedAirQuote(null)
+    setSelectedAirQuoteError('')
+    setLoadingSelectedAirQuote(false)
+    setAirOperation({ ...EMPTY_AIR_OPERATION })
     if (!demand) return
 
     const nextService = serviceFromDemand(demand)
@@ -523,6 +695,7 @@ export function OfflineTravelOperationForm({
     setNotes(String(demand.observacoes || ''))
 
     void loadSelectedHotelQuote(demand)
+    void loadSelectedAirQuote(demand)
 
     if (usesExistingReservation) {
       const matches = reservations.filter((reservation) => (
@@ -601,6 +774,24 @@ export function OfflineTravelOperationForm({
     setDetails((current) => ({ ...current, [key]: value }))
   }
 
+  function changeAirOperation(next: OfflineAirOperationDraft) {
+    setAirOperation(next)
+    setSupplierName(next.operationalSupplierName)
+    setExternalReference(next.locator)
+    setDocumentReference(next.locator)
+    setIssuedAt(next.issuedAt)
+    setPaymentMethod(next.paymentMethod)
+    setPaymentReference(next.paymentReference)
+    setNotes(next.operationalNotes)
+    setTicketNumber(next.tickets[0]?.ticketNumber || '')
+    setReservationEvidence((current) => ({
+      ...current,
+      reservationSystem: next.reservationSystem,
+      reservationConfirmedAt: dateTimeToIso(next.reservationConfirmedAt) || null,
+      airTickets: next.tickets,
+    }))
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
@@ -612,7 +803,7 @@ export function OfflineTravelOperationForm({
       toast.error('A empresa da demanda não está disponível no contexto atual.')
       return
     }
-    if (requiresSelectedHotelQuote && !selectedHotelQuote) {
+    if (requiresSelectedCommercialQuote && !selectedHotelQuote && !selectedAirQuote) {
       toast.error('Carregue a opção escolhida e aprovada antes de registrar a reserva.')
       return
     }
@@ -622,6 +813,14 @@ export function OfflineTravelOperationForm({
       && selectedHotelQuote.option.approvalStatus !== 'approved'
     ) {
       toast.error('A escolha ainda não possui uma aprovação concluída para seguir à reserva.')
+      return
+    }
+    if (
+      createsReservation
+      && selectedAirQuote?.approvalInstanceId
+      && selectedAirQuote.approvalStatus !== 'approved'
+    ) {
+      toast.error('A escolha aérea ainda não possui uma aprovação concluída para seguir à reserva.')
       return
     }
     if (usesExistingReservation && !selectedReservation) {
@@ -641,6 +840,23 @@ export function OfflineTravelOperationForm({
       ? hotelGuestNames(selectedDemand).join('\n')
       : passengersText
     const cleanDetails = reservationDetails(details, effectivePassengersText, reservationEvidence)
+    if (serviceKey === 'aereo' && selectedAirQuote) {
+      if (!airOperation.reservationSystem.trim() || !airOperation.locator.trim() || !airOperation.operationalSupplierName.trim()) {
+        toast.error('Informe sistema de reserva, localizador e fornecedor operacional do aéreo.')
+        return
+      }
+      if (includesIssue) {
+        const missingTicket = airOperation.tickets.some((ticket) => !ticket.passengerName.trim() || !ticket.ticketNumber.trim())
+        if (!airOperation.tickets.length || missingTicket) {
+          toast.error('Informe o número do bilhete de cada passageiro antes de emitir.')
+          return
+        }
+        if (!airOperation.issuedAt.trim()) {
+          toast.error('Informe a data e hora da emissão aérea.')
+          return
+        }
+      }
+    }
     const reservationCandidate = createsReservation
       ? offlineReservationCreateSchema.safeParse({
           demandId: selectedDemand.id,
@@ -720,6 +936,11 @@ export function OfflineTravelOperationForm({
             serviceDetails: cleanDetails,
             operationSource: OFFLINE_TRAVEL_PROVIDER,
             reservationChannel: createsReservation ? channel : undefined,
+            airTickets: serviceKey === 'aereo' ? airOperation.tickets : undefined,
+            airReservationSystem: serviceKey === 'aereo' ? airOperation.reservationSystem : undefined,
+            airReservationConfirmedAt: serviceKey === 'aereo'
+              ? dateTimeToIso(airOperation.reservationConfirmedAt)
+              : undefined,
           },
           notes,
           policyJustification,
@@ -814,7 +1035,7 @@ export function OfflineTravelOperationForm({
       </div>
 
       <form onSubmit={submit} className="mt-5 space-y-5">
-        <fieldset disabled={busy || loadingReservation || loadingSelectedHotelQuote} className="space-y-5 disabled:opacity-70">
+        <fieldset disabled={busy || loadingReservation || loadingSelectedHotelQuote || loadingSelectedAirQuote} className="space-y-5 disabled:opacity-70">
           <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
               Operação
@@ -899,6 +1120,34 @@ export function OfflineTravelOperationForm({
             </div>
           )}
 
+          {selectedDemand && serviceKey === 'aereo' && loadingSelectedAirQuote && (
+            <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50/50 p-4 text-sm text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/20 dark:text-indigo-200">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              Carregando a opção aérea escolhida pelo solicitante...
+            </div>
+          )}
+
+          {selectedDemand && serviceKey === 'aereo' && selectedAirQuote && (
+            <OfflineAirOperationFields
+              approvedSnapshot={selectedAirQuote.snapshot}
+              value={airOperation}
+              mode={operation === 'reservation_and_issue'
+                ? 'reservation_and_issue'
+                : operation === 'issue_existing'
+                  ? 'issue_existing'
+                  : operation === 'correct_existing' ? 'correction' : 'reservation'}
+              disabled={busy || loadingReservation}
+              onChange={changeAirOperation}
+            />
+          )}
+
+          {selectedDemand && serviceKey === 'aereo' && selectedAirQuoteError && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-200">
+              <p className="font-semibold">A opção aérea escolhida não pôde ser carregada.</p>
+              <p className="mt-1">{selectedAirQuoteError}</p>
+            </div>
+          )}
+
           {usesExistingReservation && (
             <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/20">
               <Field label={correctsReservation ? 'Reserva a corrigir *' : 'Reserva offline confirmada *'}>
@@ -966,7 +1215,7 @@ export function OfflineTravelOperationForm({
             </Field>
           </div>
 
-          {showsReservationData && (
+          {showsReservationData && !(serviceKey === 'aereo' && selectedAirQuote) && (
             <section className="space-y-4 rounded-lg border border-bbt-gray-100 p-4 dark:border-slate-700" aria-labelledby="offline-reservation-data-title">
               <div className="flex items-center gap-2">
                 <Route className="h-4 w-4 text-bbt-accent" />
@@ -1071,7 +1320,7 @@ export function OfflineTravelOperationForm({
             </section>
           )}
 
-          <section className="space-y-4 rounded-lg border border-bbt-gray-100 p-4 dark:border-slate-700" aria-labelledby="offline-service-details-title">
+          {!(serviceKey === 'aereo' && selectedAirQuote) && <section className="space-y-4 rounded-lg border border-bbt-gray-100 p-4 dark:border-slate-700" aria-labelledby="offline-service-details-title">
             <div className="flex items-center gap-2">
               <TicketCheck className="h-4 w-4 text-bbt-accent" />
               <h3 id="offline-service-details-title" className="font-semibold text-bbt-primary dark:text-white">
@@ -1109,9 +1358,9 @@ export function OfflineTravelOperationForm({
                 )
               })}
             </div>
-          </section>
+          </section>}
 
-          {includesIssue && (
+          {includesIssue && !(serviceKey === 'aereo' && selectedAirQuote) && (
             <section className="space-y-4 rounded-lg border border-indigo-200 bg-indigo-50/30 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/10" aria-labelledby="offline-issue-data-title">
               <div className="flex items-center gap-2">
                 <ShieldCheck className="h-4 w-4 text-indigo-600 dark:text-indigo-300" />
@@ -1162,6 +1411,31 @@ export function OfflineTravelOperationForm({
             </section>
           )}
 
+          {includesIssue && serviceKey === 'aereo' && selectedAirQuote && (
+            <section className="space-y-4 rounded-lg border border-indigo-200 bg-indigo-50/30 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/10" aria-labelledby="offline-air-document-title">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-indigo-600 dark:text-indigo-300" />
+                <h3 id="offline-air-document-title" className="font-semibold text-bbt-primary dark:text-white">
+                  Documento e voucher
+                </h3>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field label="Referência da emissão *">
+                  <input value={documentReference} onChange={(event) => setDocumentReference(event.target.value)} className="bbt-input" placeholder="Localizador, ordem ou referência da emissão" required />
+                </Field>
+                <Field label="Canal da reserva *">
+                  <select value={channel} onChange={(event) => setChannel(event.target.value as OfflineTravelChannel)} className="bbt-input">
+                    {CHANNEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                <input type="checkbox" checked={generateVoucher} onChange={(event) => setGenerateVoucher(event.target.checked)} className="h-4 w-4 accent-bbt-accent" />
+                Gerar voucher aéreo completo automaticamente
+              </label>
+            </section>
+          )}
+
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Justificativa de política">
               <textarea value={policyJustification} onChange={(event) => setPolicyJustification(event.target.value)} className="bbt-input min-h-24 py-2" placeholder="Informe quando a política exigir justificativa" />
@@ -1197,7 +1471,7 @@ export function OfflineTravelOperationForm({
           <p className="text-xs text-slate-500">
             O servidor validará novamente permissões, lifecycle, política e idempotência.
           </p>
-          <button type="submit" disabled={busy || loadingReservation || loadingSelectedHotelQuote || !confirmed} className="bbt-button-primary disabled:cursor-not-allowed disabled:opacity-60">
+          <button type="submit" disabled={busy || loadingReservation || loadingSelectedHotelQuote || loadingSelectedAirQuote || !confirmed} className="bbt-button-primary disabled:cursor-not-allowed disabled:opacity-60">
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
             {busy ? 'Processando...' : submitLabel(operation)}
           </button>
@@ -1559,4 +1833,8 @@ function normalizeText(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
+}
+
+function airSegmentLocation(code: string | undefined, name: string | undefined): string {
+  return [code?.trim().toUpperCase(), name?.trim()].filter(Boolean).join(' - ')
 }

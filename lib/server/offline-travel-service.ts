@@ -5,7 +5,12 @@ import { randomUUID } from 'node:crypto'
 import type { PoolClient, QueryResultRow } from 'pg'
 
 import { sha256, type PolicyEvaluationResult, type PolicyScopeContext } from '@/lib/policy'
-import { offlineSegmentType, offlineServiceLabel, offlineVoucherType } from '@/lib/offline-travel/catalog'
+import {
+  offlineSegmentType,
+  offlineServiceFromDemand,
+  offlineServiceLabel,
+  offlineVoucherType,
+} from '@/lib/offline-travel/catalog'
 import { formatMinorUnits, minorUnitsToMoney, moneyToMinorUnits } from '@/lib/offline-travel/money'
 import {
   OFFLINE_TRAVEL_SERVICES,
@@ -171,16 +176,14 @@ interface ApprovedOfflineQuoteSelection {
   approvalInstanceId: string | null
   snapshotHash: string
   snapshot: Record<string, unknown>
+  serviceKey: OfflineTravelService
   quotedSupplierName: string
-  hotelId: string
-  hotelName: string
-  hotelCategory: string | null
   destination: string | null
-  roomCategory: string
-  mealPlan: string | null
   startsAt: string | null
   endsAt: string | null
   amounts: OfflineReservationCreateInput['amounts']
+  details: OfflineReservationCreateInput['details']
+  serviceSnapshot: Record<string, unknown>
   commercialBreakdown: Record<string, unknown>
   cancellationPolicy: string | null
   paymentTerms: string | null
@@ -312,10 +315,12 @@ export async function createOfflineReservation(
     }
 
     const formalQuote = await loadApprovedOfflineQuoteSelection(client, principal, demand)
-    if (input.serviceKey === 'hotelaria' && !formalQuote) {
+    if (['hotelaria', 'aereo'].includes(input.serviceKey) && !formalQuote) {
       throw new OfflineTravelError(
-        'OFFLINE_HOTEL_APPROVED_SELECTION_REQUIRED',
-        'A hospedagem precisa de uma cotação vigente, escolhida pelo solicitante e aprovada antes da reserva.',
+        'OFFLINE_APPROVED_SELECTION_REQUIRED',
+        input.serviceKey === 'hotelaria'
+          ? 'A hospedagem precisa de uma cotação vigente, escolhida pelo solicitante e aprovada antes da reserva.'
+          : 'O aéreo precisa de uma cotação vigente, escolhida pelo solicitante e aprovada antes da reserva.',
         409,
         { lifecycleStatus: demand.lifecycle_status },
       )
@@ -551,6 +556,15 @@ export async function createOfflineReservation(
         }),
       ],
     )
+    if (effectiveInput.serviceKey === 'aereo' && quote.formalSelection) {
+      await persistApprovedAirReservation(
+        client,
+        principal,
+        reservationId,
+        quote.optionId,
+        effectiveInput,
+      )
+    }
     if (budgetHold) {
       await commitOfflineBudgetHold(
         client,
@@ -1063,6 +1077,9 @@ export async function issueOfflineReservation(
         dateTimeOrNull(input.issuedAt) || new Date().toISOString(),
       ],
     )
+    if (reservation.service_type === 'aereo') {
+      await persistAirEmissionTickets(client, principal, demand, reservation, emissionId, input)
+    }
     const reservationUpdate = await client.query(
       `update reservations set
          status = $4,
@@ -2070,16 +2087,19 @@ async function loadApprovedOfflineQuoteSelection(
   )
   const row = result.rows[0]
   if (!row) return null
+  const selectedService = offlineServiceFromDemand(row.service_type)
   if (
     row.demand_id !== demand.id
     || row.company_id !== demand.company_id
-    || row.service_type !== 'hotelaria'
+    || !selectedService
+    || !['hotelaria', 'aereo'].includes(selectedService)
+    || !offlineServiceMatchesDemand(demand.service_type, selectedService)
     || row.quote_provider !== OFFLINE_TRAVEL_PROVIDER
     || row.quote_status !== 'selected'
   ) {
     throw new OfflineTravelError(
       'OFFLINE_APPROVED_SELECTION_SCOPE_CONFLICT',
-      'A opcao escolhida nao corresponde ao escopo da demanda hoteleira.',
+      'A opcao escolhida nao corresponde ao servico e ao escopo da demanda.',
       409,
       { selectionId: row.selection_id, quoteId: row.quote_id },
     )
@@ -2149,8 +2169,6 @@ async function loadApprovedOfflineQuoteSelection(
   const snapshotDemand = objectValue(snapshot.demand)
   const snapshotQuote = objectValue(snapshot.quote)
   const snapshotOption = objectValue(snapshot.option)
-  const hotel = objectValue(snapshotOption.hotel)
-  const breakdown = objectValue(snapshotOption.breakdown)
   if (
     String(snapshotDemand.id || '') !== demand.id
     || String(snapshotQuote.id || '') !== row.quote_id
@@ -2163,57 +2181,18 @@ async function loadApprovedOfflineQuoteSelection(
       { selectionId: row.selection_id },
     )
   }
-
-  const hotelId = String(hotel.id || '').trim()
-  const hotelName = String(hotel.name || '').trim()
-  const roomCategory = String(hotel.roomCategory || '').trim()
   const quotedSupplierName = String(snapshotOption.supplierName || '').trim()
-  const totalMinor = moneyToMinorUnits(snapshotOption.amount)
-  const taxesMinor = moneyToMinorUnits(breakdown.taxesSubtotal || 0)
-  if (!hotelId || !hotelName || !roomCategory || !quotedSupplierName || totalMinor < taxesMinor) {
+  if (!quotedSupplierName) {
     throw new OfflineTravelError(
       'OFFLINE_APPROVED_SELECTION_SNAPSHOT_INVALID',
-      'O snapshot aprovado nao possui todos os dados comerciais obrigatorios da hospedagem.',
+      'O snapshot aprovado nao possui o fornecedor comercial selecionado.',
       409,
       { selectionId: row.selection_id },
     )
   }
-  const startsAt = dateTimeOrNull(snapshotOption.startsAt)
-  const endsAt = dateTimeOrNull(snapshotOption.endsAt)
-  if (!startsAt || !endsAt || Date.parse(endsAt) <= Date.parse(startsAt)) {
-    throw new OfflineTravelError(
-      'OFFLINE_APPROVED_SELECTION_DATES_INVALID',
-      'As datas da hospedagem aprovada sao invalidas.',
-      409,
-      { selectionId: row.selection_id },
-    )
-  }
-  const currency = String(snapshotOption.currency || breakdown.currency || 'BRL').trim().toUpperCase()
-  const approved: ApprovedOfflineQuoteSelection = {
-    selectionId: row.selection_id,
-    approvalInstanceId: row.approval_instance_id,
-    snapshotHash: row.snapshot_hash,
-    snapshot,
-    quotedSupplierName,
-    hotelId,
-    hotelName,
-    hotelCategory: textValue(hotel.category) || null,
-    destination: textValue(snapshotDemand.cityName) || null,
-    roomCategory,
-    mealPlan: textValue(hotel.mealPlan) || null,
-    startsAt,
-    endsAt,
-    amounts: {
-      gross: minorUnitsToMoney(totalMinor - taxesMinor),
-      taxes: minorUnitsToMoney(taxesMinor),
-      total: minorUnitsToMoney(totalMinor),
-      currency,
-    },
-    commercialBreakdown: breakdown,
-    cancellationPolicy: textValue(hotel.cancellationPolicy) || null,
-    paymentTerms: textValue(hotel.paymentTerms) || null,
-    refundable: typeof snapshotOption.refundable === 'boolean' ? snapshotOption.refundable : null,
-  }
+  const approved = selectedService === 'aereo'
+    ? approvedAirSelection(row, demand, snapshot, snapshotDemand, snapshotOption, quotedSupplierName)
+    : approvedHotelSelection(row, snapshot, snapshotDemand, snapshotOption, quotedSupplierName)
   return {
     quoteId: row.quote_id,
     optionId: row.option_id,
@@ -2234,13 +2213,10 @@ function reservationInputFromApprovedSelection(
     amounts: approved.amounts,
     details: {
       ...input.details,
-      destination: approved.destination || input.details.destination,
-      itemName: approved.hotelName,
-      category: approved.hotelCategory || undefined,
-      accommodation: approved.roomCategory,
-      mealPlan: approved.mealPlan || undefined,
+      ...approved.details,
       evidence: {
         ...objectValue(input.details.evidence),
+        ...objectValue(approved.details.evidence),
         approvedQuoteSelection: {
           selectionId: approved.selectionId,
           snapshotHash: approved.snapshotHash,
@@ -2255,6 +2231,7 @@ function approvedCommercialTermsMetadata(
   input: OfflineReservationCreateInput,
 ): Record<string, unknown> {
   return {
+    serviceKey: approved.serviceKey,
     selectionId: approved.selectionId,
     approvalInstanceId: approved.approvalInstanceId,
     snapshotHash: approved.snapshotHash,
@@ -2265,14 +2242,7 @@ function approvedCommercialTermsMetadata(
       code: input.supplierCode || null,
       divergedFromQuote: suppliersDiffer(approved.quotedSupplierName, input.supplierName),
     },
-    hotel: {
-      id: approved.hotelId,
-      name: approved.hotelName,
-      category: approved.hotelCategory,
-      destination: approved.destination,
-      accommodation: approved.roomCategory,
-      mealPlan: approved.mealPlan,
-    },
+    service: approved.serviceSnapshot,
     startsAt: approved.startsAt,
     endsAt: approved.endsAt,
     amounts: approved.amounts,
@@ -2280,6 +2250,209 @@ function approvedCommercialTermsMetadata(
     refundable: approved.refundable,
     cancellationPolicy: approved.cancellationPolicy,
     paymentTerms: approved.paymentTerms,
+  }
+}
+
+function approvedHotelSelection(
+  row: FormalQuoteSelectionRow,
+  snapshot: Record<string, unknown>,
+  snapshotDemand: Record<string, unknown>,
+  snapshotOption: Record<string, unknown>,
+  quotedSupplierName: string,
+): ApprovedOfflineQuoteSelection {
+  const hotel = objectValue(snapshotOption.hotel)
+  const breakdown = objectValue(snapshotOption.breakdown)
+  const hotelId = String(hotel.id || '').trim()
+  const hotelName = String(hotel.name || '').trim()
+  const roomCategory = String(hotel.roomCategory || '').trim()
+  const totalMinor = moneyToMinorUnits(snapshotOption.amount)
+  const taxesMinor = moneyToMinorUnits(breakdown.taxesSubtotal || 0)
+  if (!hotelId || !hotelName || !roomCategory || totalMinor < taxesMinor) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_SELECTION_SNAPSHOT_INVALID',
+      'O snapshot aprovado nao possui todos os dados comerciais obrigatorios da hospedagem.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  const startsAt = dateTimeOrNull(snapshotOption.startsAt)
+  const endsAt = dateTimeOrNull(snapshotOption.endsAt)
+  if (!startsAt || !endsAt || Date.parse(endsAt) <= Date.parse(startsAt)) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_SELECTION_DATES_INVALID',
+      'As datas da hospedagem aprovada sao invalidas.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  const destination = textValue(snapshotDemand.cityName || snapshotDemand.destination) || null
+  const currency = String(snapshotOption.currency || breakdown.currency || 'BRL').trim().toUpperCase()
+  return {
+    selectionId: row.selection_id,
+    approvalInstanceId: row.approval_instance_id,
+    snapshotHash: row.snapshot_hash,
+    snapshot,
+    serviceKey: 'hotelaria',
+    quotedSupplierName,
+    destination,
+    startsAt,
+    endsAt,
+    amounts: {
+      gross: minorUnitsToMoney(totalMinor - taxesMinor),
+      taxes: minorUnitsToMoney(taxesMinor),
+      total: minorUnitsToMoney(totalMinor),
+      currency,
+    },
+    details: {
+      destination: destination || undefined,
+      itemName: hotelName,
+      category: textValue(hotel.category) || undefined,
+      accommodation: roomCategory,
+      mealPlan: textValue(hotel.mealPlan) || undefined,
+    },
+    serviceSnapshot: {
+      kind: 'hotelaria',
+      id: hotelId,
+      name: hotelName,
+      category: textValue(hotel.category) || null,
+      destination,
+      accommodation: roomCategory,
+      mealPlan: textValue(hotel.mealPlan) || null,
+    },
+    commercialBreakdown: breakdown,
+    cancellationPolicy: textValue(hotel.cancellationPolicy) || null,
+    paymentTerms: textValue(hotel.paymentTerms) || null,
+    refundable: typeof snapshotOption.refundable === 'boolean' ? snapshotOption.refundable : null,
+  }
+}
+
+function approvedAirSelection(
+  row: FormalQuoteSelectionRow,
+  demand: DemandRow,
+  snapshot: Record<string, unknown>,
+  snapshotDemand: Record<string, unknown>,
+  snapshotOption: Record<string, unknown>,
+  quotedSupplierName: string,
+): ApprovedOfflineQuoteSelection {
+  const air = objectValue(snapshotOption.air)
+  const pricing = objectValue(air.pricing || snapshotOption.breakdown)
+  const segments = Array.isArray(air.segments) ? air.segments.map(objectValue) : []
+  if (!segments.length) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_AIR_SEGMENTS_REQUIRED',
+      'O itinerario aereo aprovado nao possui trechos validos.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  for (const [index, segment] of segments.entries()) {
+    const departureAt = dateTimeOrNull(segment.departureAt)
+    const arrivalAt = dateTimeOrNull(segment.arrivalAt)
+    if (
+      !String(segment.originCode || segment.originName || '').trim()
+      || !String(segment.destinationCode || segment.destinationName || '').trim()
+      || !departureAt
+      || !arrivalAt
+      || Date.parse(arrivalAt) <= Date.parse(departureAt)
+    ) {
+      throw new OfflineTravelError(
+        'OFFLINE_APPROVED_AIR_SEGMENT_INVALID',
+        `O trecho ${index + 1} do itinerario aprovado e invalido.`,
+        409,
+        { selectionId: row.selection_id, segmentIndex: index },
+      )
+    }
+  }
+  const firstSegment = segments[0]
+  const lastSegment = segments[segments.length - 1]
+  const startsAt = dateTimeOrNull(snapshotOption.startsAt || firstSegment.departureAt)
+  const endsAt = dateTimeOrNull(snapshotOption.endsAt || lastSegment.arrivalAt)
+  if (!startsAt || !endsAt || Date.parse(endsAt) <= Date.parse(startsAt)) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_SELECTION_DATES_INVALID',
+      'As datas do itinerario aereo aprovado sao invalidas.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  const fareMinor = moneyToMinorUnits(pricing.fare || 0)
+  const taxesMinor = moneyToMinorUnits(pricing.taxes || 0)
+  const ravMinor = moneyToMinorUnits(pricing.rav || 0)
+  const racMinor = moneyToMinorUnits(pricing.rac || 0)
+  const totalMinor = moneyToMinorUnits(pricing.total ?? snapshotOption.amount)
+  if (totalMinor !== fareMinor + taxesMinor + ravMinor + racMinor) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_AIR_TOTAL_INVALID',
+      'A composicao financeira do aereo aprovado nao fecha com o total.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  const currency = String(pricing.currency || snapshotOption.currency || 'BRL').trim().toUpperCase()
+  const airlineName = String(air.airlineName || quotedSupplierName).trim()
+  const destination = textValue(snapshotDemand.destination || demand.destination)
+    || textValue(firstSegment.destinationName || firstSegment.destinationCode)
+    || null
+  const flightNumbers = segments
+    .map((segment) => String(segment.flightNumber || '').trim())
+    .filter(Boolean)
+  const cabinClass = textValue(firstSegment.cabinClass || firstSegment.className || air.cabinClass)
+  const baggagePieces = Number(firstSegment.baggagePieces)
+  const details: OfflineReservationCreateInput['details'] = {
+    origin: textValue(firstSegment.originName || firstSegment.originCode) || undefined,
+    destination: destination || undefined,
+    itemName: airlineName,
+    serviceNumber: flightNumbers.join(' / ') || undefined,
+    className: cabinClass || undefined,
+    category: Number.isFinite(baggagePieces) ? `${baggagePieces} bagagem(ns)` : undefined,
+    passengers: [demand.passenger_name_snapshot].filter(Boolean),
+    evidence: {
+      approvedAirQuote: {
+        airlineName,
+        airlineCode: textValue(air.airlineCode) || null,
+        reservationSystem: textValue(air.reservationSystem) || null,
+        locator: textValue(air.locator) || null,
+        ticketingDeadline: dateTimeOrNull(air.ticketingDeadline),
+        segments,
+        pricing,
+        fareRules: textValue(air.fareRules) || null,
+        changePolicy: textValue(air.changePolicy) || null,
+        cancellationPolicy: textValue(air.cancellationPolicy) || null,
+      },
+    },
+  }
+  return {
+    selectionId: row.selection_id,
+    approvalInstanceId: row.approval_instance_id,
+    snapshotHash: row.snapshot_hash,
+    snapshot,
+    serviceKey: 'aereo',
+    quotedSupplierName,
+    destination,
+    startsAt,
+    endsAt,
+    amounts: {
+      gross: minorUnitsToMoney(fareMinor),
+      taxes: minorUnitsToMoney(taxesMinor + ravMinor + racMinor),
+      total: minorUnitsToMoney(totalMinor),
+      currency,
+    },
+    details,
+    serviceSnapshot: {
+      kind: 'aereo',
+      airlineName,
+      airlineCode: textValue(air.airlineCode) || null,
+      reservationSystem: textValue(air.reservationSystem) || null,
+      locator: textValue(air.locator) || null,
+      ticketingDeadline: dateTimeOrNull(air.ticketingDeadline),
+      segments,
+    },
+    commercialBreakdown: pricing,
+    cancellationPolicy: textValue(air.cancellationPolicy) || null,
+    paymentTerms: textValue(air.paymentTerms) || null,
+    refundable: typeof air.refundable === 'boolean'
+      ? air.refundable
+      : typeof snapshotOption.refundable === 'boolean' ? snapshotOption.refundable : null,
   }
 }
 
@@ -2417,6 +2590,210 @@ async function ensureOfflineQuoteArtifact(
   return { quoteId, optionId, selectionId: null, intentHash }
 }
 
+async function persistApprovedAirReservation(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  reservationId: string,
+  quoteOptionId: string,
+  input: OfflineReservationCreateInput,
+): Promise<void> {
+  const detail = await client.query(
+    `insert into air_reservation_details (
+       tenant_id, reservation_id, source_quote_option_id,
+       reservation_system, locator, issuance_deadline,
+       exchange_rate, mileage, reference_fare_minor,
+       fare_amount_minor, tax_amount_minor, rav_amount_minor, rac_amount_minor,
+       total_amount_minor, currency, change_policy, cancellation_policy, notes,
+       metadata, created_by, updated_by
+     )
+     select quote_detail.tenant_id, $3, quote_detail.quote_option_id,
+            coalesce(nullif($7, ''), quote_detail.reservation_system), $4, quote_detail.issuance_deadline,
+            quote_detail.exchange_rate, quote_detail.mileage, quote_detail.reference_fare_minor,
+            quote_detail.fare_amount_minor, quote_detail.tax_amount_minor,
+            quote_detail.rav_amount_minor, quote_detail.rac_amount_minor,
+            quote_detail.total_amount_minor, quote_detail.currency,
+            quote_detail.change_policy, quote_detail.cancellation_policy, quote_detail.notes,
+            quote_detail.metadata || $5::jsonb, $6, $6
+     from air_quote_option_details quote_detail
+     where quote_detail.tenant_id = $1 and quote_detail.quote_option_id = $2`,
+    [
+      principal.tenantId,
+      quoteOptionId,
+      reservationId,
+      input.externalReference,
+      JSON.stringify({
+        source: 'approved_air_quote',
+        operationalSupplierName: input.supplierName,
+        operationalSupplierCode: input.supplierCode || null,
+        channel: input.channel,
+        reservationConfirmedAt: objectValue(input.details.evidence).reservationConfirmedAt || null,
+      }),
+      principal.user.id,
+      textValue(objectValue(input.details.evidence).reservationSystem) || '',
+    ],
+  )
+  if (detail.rowCount !== 1) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_AIR_QUOTE_DETAILS_MISSING',
+      'Os dados estruturados da opcao aerea aprovada nao foram encontrados.',
+      409,
+      { quoteOptionId },
+    )
+  }
+
+  const segments = await client.query(
+    `insert into air_reservation_segments (
+       tenant_id, reservation_id, source_quote_segment_id, sequence,
+       airline_code, airline_name, flight_number, booking_class, cabin_class,
+       baggage_pieces, origin_code, origin_name, destination_code,
+       destination_name, departs_at, arrives_at, status, metadata
+     )
+     select quote_segment.tenant_id, $3, quote_segment.id, quote_segment.sequence,
+            quote_segment.airline_code, quote_segment.airline_name,
+            quote_segment.flight_number, quote_segment.booking_class,
+            quote_segment.cabin_class, quote_segment.baggage_pieces,
+            quote_segment.origin_code, quote_segment.origin_name,
+            quote_segment.destination_code, quote_segment.destination_name,
+            quote_segment.departs_at, quote_segment.arrives_at, 'reserved',
+            quote_segment.metadata || $4::jsonb
+     from air_quote_segments quote_segment
+     where quote_segment.tenant_id = $1 and quote_segment.quote_option_id = $2
+     order by quote_segment.sequence`,
+    [
+      principal.tenantId,
+      quoteOptionId,
+      reservationId,
+      JSON.stringify({ source: 'approved_air_quote' }),
+    ],
+  )
+  if (!segments.rowCount) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_AIR_QUOTE_SEGMENTS_MISSING',
+      'O itinerario estruturado da opcao aerea aprovada nao foi encontrado.',
+      409,
+      { quoteOptionId },
+    )
+  }
+}
+
+async function persistAirEmissionTickets(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demand: DemandRow,
+  reservation: ReservationRow,
+  emissionId: string,
+  input: OfflineIssueCreateInput,
+): Promise<void> {
+  const reservationAir = await client.query<{
+    airline_code: string
+    airline_name: string
+  }>(
+    `select segment.airline_code, segment.airline_name
+     from air_reservation_details detail
+     join air_reservation_segments segment
+       on segment.tenant_id = detail.tenant_id
+      and segment.reservation_id = detail.reservation_id
+     where detail.tenant_id = $1 and detail.reservation_id = $2
+     order by segment.sequence
+     limit 1`,
+    [principal.tenantId, reservation.id],
+  )
+  const airline = reservationAir.rows[0]
+  if (!airline) {
+    throw new OfflineTravelError(
+      'OFFLINE_AIR_RESERVATION_DETAILS_MISSING',
+      'A reserva aerea nao possui itinerario estruturado para emissao.',
+      409,
+      { reservationId: reservation.id },
+    )
+  }
+
+  const tickets = airTicketsFromIssue(input, demand.passenger_name_snapshot)
+  if (!tickets.length) {
+    throw new OfflineTravelError(
+      'OFFLINE_TICKET_REQUIRED',
+      'Informe ao menos um bilhete com o nome do passageiro para concluir a emissao aerea.',
+      422,
+    )
+  }
+  const fareMinor = moneyToMinorUnits(reservation.gross_amount)
+  const taxMinor = moneyToMinorUnits(reservation.tax_amount)
+  const issuedAt = dateTimeOrNull(input.issuedAt) || new Date().toISOString()
+
+  for (const [index, ticket] of tickets.entries()) {
+    const passengerFareMinor = distributedMinorAmount(fareMinor, tickets.length, index)
+    const passengerTaxMinor = distributedMinorAmount(taxMinor, tickets.length, index)
+    await client.query(
+      `insert into air_emission_tickets (
+         tenant_id, emission_id, reservation_id, passenger_name, ticket_number,
+         issuing_airline_code, issuing_airline_name, fare_amount_minor,
+         tax_amount_minor, total_amount_minor, currency, status, metadata,
+         issued_at, created_by
+       ) values (
+         $1, $2, $3, $4, $5,
+         $6, $7, $8,
+         $9, $10, $11, 'issued', $12::jsonb,
+         $13::timestamptz, $14
+       )`,
+      [
+        principal.tenantId,
+        emissionId,
+        reservation.id,
+        ticket.passengerName,
+        ticket.ticketNumber,
+        airline.airline_code,
+        airline.airline_name,
+        passengerFareMinor,
+        passengerTaxMinor,
+        passengerFareMinor + passengerTaxMinor,
+        reservation.currency,
+        JSON.stringify({ source: 'offline', documentReference: input.document.reference }),
+        issuedAt,
+        principal.user.id,
+      ],
+    )
+  }
+  await client.query(
+    `update air_reservation_segments
+     set status = 'issued', updated_at = now()
+     where tenant_id = $1 and reservation_id = $2 and status = 'reserved'`,
+    [principal.tenantId, reservation.id],
+  )
+}
+
+function airTicketsFromIssue(
+  input: OfflineIssueCreateInput,
+  fallbackPassengerName: string,
+): Array<{ passengerName: string; ticketNumber: string }> {
+  const details = objectValue(input.details)
+  const rawTickets = Array.isArray(details.airTickets)
+    ? details.airTickets
+    : Array.isArray(details.tickets) ? details.tickets : []
+  const tickets = rawTickets.flatMap((raw) => {
+    const ticket = objectValue(raw)
+    const passengerName = textValue(ticket.passengerName || ticket.passenger_name)
+    const ticketNumber = textValue(ticket.ticketNumber || ticket.ticket_number)
+    return passengerName && ticketNumber ? [{ passengerName, ticketNumber }] : []
+  })
+  if (!tickets.length) {
+    const ticketNumber = textValue(input.document.ticketNumber)
+      || (input.document.kind === 'bilhete' ? textValue(input.document.reference) : null)
+    if (ticketNumber) tickets.push({ passengerName: fallbackPassengerName, ticketNumber })
+  }
+  const uniqueNumbers = new Set<string>()
+  return tickets.filter((ticket) => {
+    const normalized = ticket.ticketNumber.toLocaleUpperCase('pt-BR')
+    if (uniqueNumbers.has(normalized)) return false
+    uniqueNumbers.add(normalized)
+    return true
+  })
+}
+
+function distributedMinorAmount(totalMinor: number, count: number, index: number): number {
+  const base = Math.floor(totalMinor / count)
+  return base + (index < totalMinor % count ? 1 : 0)
+}
+
 async function insertOfflineSegment(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -2454,6 +2831,93 @@ async function insertOfflineSegment(
   return segmentId
 }
 
+interface AirVoucherDetailRow extends QueryResultRow {
+  reservation_system: string
+  issuance_deadline: string | Date | null
+  exchange_rate: string | number
+  mileage: string | number
+  reference_fare_minor: string | number
+  fare_amount_minor: string | number
+  tax_amount_minor: string | number
+  rav_amount_minor: string | number
+  rac_amount_minor: string | number
+  cancellation_policy: string | null
+  notes: string | null
+  metadata: Record<string, unknown>
+}
+
+interface AirVoucherSegmentRow extends QueryResultRow {
+  sequence: string | number
+  airline_code: string
+  airline_name: string
+  flight_number: string
+  booking_class: string
+  cabin_class: string
+  baggage_pieces: string | number
+  origin_code: string
+  origin_name: string | null
+  destination_code: string
+  destination_name: string | null
+  departs_at: string | Date
+  arrives_at: string | Date
+}
+
+interface AirVoucherTicketRow extends QueryResultRow {
+  passenger_name: string
+  ticket_number: string
+  issuing_airline_code: string
+  issuing_airline_name: string
+}
+
+async function loadAirVoucherData(
+  client: PoolClient,
+  tenantId: string,
+  reservationId: string,
+  emissionId: string,
+): Promise<{
+  detail: AirVoucherDetailRow
+  segments: AirVoucherSegmentRow[]
+  tickets: AirVoucherTicketRow[]
+}> {
+  const [detailResult, segmentsResult, ticketsResult] = await Promise.all([
+    client.query<AirVoucherDetailRow>(
+      `select reservation_system, issuance_deadline, exchange_rate, mileage,
+              reference_fare_minor, fare_amount_minor, tax_amount_minor,
+              rav_amount_minor, rac_amount_minor, cancellation_policy, notes, metadata
+       from air_reservation_details
+       where tenant_id = $1 and reservation_id = $2`,
+      [tenantId, reservationId],
+    ),
+    client.query<AirVoucherSegmentRow>(
+      `select sequence, airline_code, airline_name, flight_number, booking_class,
+              cabin_class, baggage_pieces, origin_code, origin_name,
+              destination_code, destination_name, departs_at, arrives_at
+       from air_reservation_segments
+       where tenant_id = $1 and reservation_id = $2
+       order by sequence`,
+      [tenantId, reservationId],
+    ),
+    client.query<AirVoucherTicketRow>(
+      `select passenger_name, ticket_number, issuing_airline_code, issuing_airline_name
+       from air_emission_tickets
+       where tenant_id = $1 and reservation_id = $2 and emission_id = $3
+         and status = 'issued'
+       order by passenger_name, ticket_number`,
+      [tenantId, reservationId, emissionId],
+    ),
+  ])
+  const detail = detailResult.rows[0]
+  if (!detail || !segmentsResult.rows.length || !ticketsResult.rows.length) {
+    throw new OfflineTravelError(
+      'OFFLINE_AIR_VOUCHER_DATA_INCOMPLETE',
+      'Os dados estruturados do aereo estao incompletos para gerar o voucher.',
+      409,
+      { reservationId, emissionId },
+    )
+  }
+  return { detail, segments: segmentsResult.rows, tickets: ticketsResult.rows }
+}
+
 async function createOfflineVoucher(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -2477,6 +2941,11 @@ async function createOfflineVoucher(
   const now = input.issuedAt ? new Date(input.issuedAt).toISOString() : new Date().toISOString()
   const reservationMetadata = objectValue(reservation.metadata)
   const details = objectValue(reservationMetadata.details)
+  const airVoucherData = service === 'aereo'
+    ? await loadAirVoucherData(client, principal.tenantId, reservation.id, emissionId)
+    : null
+  const firstAirSegment = airVoucherData?.segments[0]
+  const lastAirSegment = airVoucherData?.segments[airVoucherData.segments.length - 1]
   const supplierName = String(reservationMetadata.supplierName || 'Fornecedor offline')
   const externalReference = textValue(reservationMetadata.externalReference)
   const voucher: VoucherEmitido = {
@@ -2488,20 +2957,60 @@ async function createOfflineVoucher(
     empresa_id: demand.company_id,
     funcionario_id: demand.employee_id,
     passageiro_nome: demand.passenger_name_snapshot,
-    passageiros: Array.isArray(details.passengers)
-      ? details.passengers.map(String).filter(Boolean)
-      : [demand.passenger_name_snapshot],
+    passageiros: airVoucherData?.tickets.length
+      ? airVoucherData.tickets.map((ticket) => ticket.passenger_name)
+      : Array.isArray(details.passengers)
+        ? details.passengers.map(String).filter(Boolean)
+        : [demand.passenger_name_snapshot],
     fornecedor_nome: supplierName,
     data_checkin: service === 'hotelaria' ? dateOnly(reservation.start_at) : undefined,
     data_checkout: service === 'hotelaria' ? dateOnly(reservation.end_at) : undefined,
-    cia_aerea: service === 'aereo' ? supplierName : undefined,
-    numero_voo: service === 'aereo' ? textValue(details.serviceNumber) : undefined,
-    origem: textValue(details.origin),
-    destino: textValue(details.destination),
+    cia_aerea: service === 'aereo'
+      ? firstAirSegment?.airline_name || supplierName
+      : undefined,
+    numero_voo: service === 'aereo' && airVoucherData?.segments.length
+      ? airVoucherData.segments.map((segment) => `${segment.airline_code} ${segment.flight_number}`).join(' / ')
+      : service === 'aereo' ? textValue(details.serviceNumber) : undefined,
+    origem: firstAirSegment
+      ? firstAirSegment.origin_name || firstAirSegment.origin_code
+      : textValue(details.origin),
+    destino: lastAirSegment
+      ? lastAirSegment.destination_name || lastAirSegment.destination_code
+      : textValue(details.destination),
     data_ida: dateOnly(reservation.start_at),
     data_volta: dateOnly(reservation.end_at),
-    classe: textValue(details.className),
+    classe: firstAirSegment?.cabin_class || textValue(details.className),
     localizador: externalReference,
+    sistema_reserva: airVoucherData?.detail.reservation_system,
+    prazo_emissao: dateTimeOrNull(airVoucherData?.detail.issuance_deadline) || undefined,
+    tarifa_referencia: airVoucherData
+      ? minorUnitsToMoney(Number(airVoucherData.detail.reference_fare_minor))
+      : undefined,
+    rav: airVoucherData ? minorUnitsToMoney(Number(airVoucherData.detail.rav_amount_minor)) : undefined,
+    rac: airVoucherData ? minorUnitsToMoney(Number(airVoucherData.detail.rac_amount_minor)) : undefined,
+    cambio: airVoucherData ? numberValue(airVoucherData.detail.exchange_rate) : undefined,
+    milhagem: airVoucherData ? Number(airVoucherData.detail.mileage) : undefined,
+    trechos_aereos: airVoucherData?.segments.map((segment) => ({
+      sequencia: Number(segment.sequence),
+      companhia_codigo: segment.airline_code,
+      companhia_nome: segment.airline_name,
+      numero_voo: segment.flight_number,
+      classe_reserva: segment.booking_class,
+      cabine: segment.cabin_class,
+      bagagens: Number(segment.baggage_pieces),
+      origem_codigo: segment.origin_code,
+      origem_nome: segment.origin_name || undefined,
+      destino_codigo: segment.destination_code,
+      destino_nome: segment.destination_name || undefined,
+      saida_em: new Date(segment.departs_at).toISOString(),
+      chegada_em: new Date(segment.arrives_at).toISOString(),
+    })),
+    bilhetes_aereos: airVoucherData?.tickets.map((ticket) => ({
+      passageiro_nome: ticket.passenger_name,
+      numero_bilhete: ticket.ticket_number,
+      companhia_codigo: ticket.issuing_airline_code,
+      companhia_nome: ticket.issuing_airline_name,
+    })),
     locadora: service === 'locacao' ? supplierName : undefined,
     categoria_carro: service === 'locacao' ? textValue(details.category) : undefined,
     retirada_local: service === 'locacao' ? textValue(details.pickupLocation) : undefined,
@@ -2511,11 +3020,21 @@ async function createOfflineVoucher(
     numero_confirmacao: externalReference,
     data_confirmacao: now,
     confirmado_por: principal.user.name,
-    tarifa_total: numberValue(reservation.gross_amount),
-    taxas: numberValue(reservation.tax_amount),
+    tarifa_total: airVoucherData
+      ? minorUnitsToMoney(Number(airVoucherData.detail.fare_amount_minor))
+      : numberValue(reservation.gross_amount),
+    taxas: airVoucherData
+      ? minorUnitsToMoney(Number(airVoucherData.detail.tax_amount_minor))
+      : numberValue(reservation.tax_amount),
     total: numberValue(reservation.final_amount),
     centro_custo: demand.cost_center || undefined,
-    observacoes: input.notes || textValue(reservationMetadata.notes),
+    politica_cancelamento: airVoucherData?.detail.cancellation_policy || undefined,
+    reembolsavel: airVoucherData
+      ? (typeof objectValue(airVoucherData.detail.metadata).refundable === 'boolean'
+        ? Boolean(objectValue(airVoucherData.detail.metadata).refundable)
+        : undefined)
+      : undefined,
+    observacoes: input.notes || airVoucherData?.detail.notes || textValue(reservationMetadata.notes),
     observacoes_internas: `Emissao offline ${emissionId}. Documento: ${input.document.kind}.`,
     origem_voucher: 'criado',
     fingerprint: `offline-emission:${emissionId}`,

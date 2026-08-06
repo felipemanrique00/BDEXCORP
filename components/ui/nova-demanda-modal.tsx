@@ -34,7 +34,9 @@ import {
 import { formatCurrency } from '@/lib/utils'
 import { PassageiroAutocomplete } from '@/components/ui/passageiro-autocomplete'
 import { HotelDemandConfigurator } from '@/components/travel/hotel-demand-configurator'
+import { AirDemandConfigurator } from '@/components/travel/air-demand-configurator'
 import { hotelDemandDetailsSchema } from '@/lib/hotel-demand/model'
+import { detalhesAereoSchema } from '@/lib/validators'
 import { isHotelDemandLockedForNormalEdit } from '@/lib/offline-travel/hotel-guests'
 import { PolicyValidator } from '@/components/ui/policy-validator'
 import {
@@ -45,7 +47,7 @@ import {
 } from '@/lib/ia-hotel-search'
 import type {
   Atendimento, TipoServico, Prioridade, OrigemAtendimento,
-  DetalhesAereo, DetalhesHotel, DetalhesCarro, DetalhesPacote, ClasseAerea,
+  DetalhesAereo, DetalhesHotel, DetalhesCarro, DetalhesPacote,
   FormaPagamento,
   FonteReferenciaEconomiaAtendimento,
   Hotel,
@@ -435,6 +437,15 @@ export function NovaDemandaModal({
       const hotelDemand = hotelDemandDetailsSchema.safeParse(detHotel)
       if (!hotelDemand.success) {
         toast.error(hotelDemand.error.issues[0]?.message || 'Revise destino, datas, quartos e hospedes.')
+        return
+      }
+    }
+    if (tipoServico === 'Aéreo') {
+      const airDemand = detalhesAereoSchema.safeParse(detAereo)
+      if (!airDemand.success || !airDemand.data.trechos?.length) {
+        toast.error(airDemand.success
+          ? 'Informe ao menos um trecho aéreo completo.'
+          : airDemand.error.issues[0]?.message || 'Revise os trechos, datas e horários do aéreo.')
         return
       }
     }
@@ -883,24 +894,11 @@ export function NovaDemandaModal({
 
         {tipoServico === 'Aéreo' && (
           <CampoBox titulo="Detalhes do Aéreo" icon={Plane}>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field label="Origem"><input value={detAereo.origem || ''} onChange={(e) => setDetAereo({ ...detAereo, origem: e.target.value })} className="bbt-input" placeholder="GRU, GYN" /></Field>
-              <Field label="Destino"><input value={detAereo.destino || ''} onChange={(e) => setDetAereo({ ...detAereo, destino: e.target.value })} className="bbt-input" placeholder="MIA, CGH" /></Field>
-              <Field label="Data Ida"><DateInput aria-label="Data de ida do voo" value={detAereo.data_ida || ''} onChange={(e) => setDetAereo({ ...detAereo, data_ida: e.target.value })} className="bbt-input" /></Field>
-              <Field label="Data Volta"><DateInput aria-label="Data de volta do voo" value={detAereo.data_volta || ''} onChange={(e) => setDetAereo({ ...detAereo, data_volta: e.target.value })} className="bbt-input" /></Field>
-              <Field label="Cia Aérea"><input value={detAereo.cia_aerea || ''} onChange={(e) => setDetAereo({ ...detAereo, cia_aerea: e.target.value })} className="bbt-input" placeholder="LATAM, Azul" /></Field>
-              <Field label="Classe">
-                <select value={detAereo.classe || 'Econômica'} onChange={(e) => setDetAereo({ ...detAereo, classe: e.target.value as ClasseAerea })} className="bbt-input">
-                  <option>Econômica</option><option>Econômica Premium</option><option>Executiva</option><option>Primeira</option>
-                </select>
-              </Field>
-              <Field label="Localizador / PNR"><input value={detAereo.localizador || ''} onChange={(e) => setDetAereo({ ...detAereo, localizador: e.target.value })} className="bbt-input uppercase" /></Field>
-              <Field label="Número do Bilhete"><input value={detAereo.numero_bilhete || ''} onChange={(e) => setDetAereo({ ...detAereo, numero_bilhete: e.target.value })} className="bbt-input" /></Field>
-            </div>
-            <label className="mt-3 flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={detAereo.internacional || false} onChange={(e) => setDetAereo({ ...detAereo, internacional: e.target.checked })} />
-              <span>Voo internacional</span>
-            </label>
+            <AirDemandConfigurator
+              value={detAereo}
+              onChange={setDetAereo}
+              disabled={readOnly}
+            />
           </CampoBox>
         )}
 

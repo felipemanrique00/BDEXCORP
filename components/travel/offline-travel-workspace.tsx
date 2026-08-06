@@ -1,8 +1,11 @@
 'use client'
 
-import { BedDouble, Check, Circle, ClipboardCheck } from 'lucide-react'
+import { BedDouble, Check, Circle, ClipboardCheck, Plane } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import OfflineAirQuoteWorkspace, {
+  type OfflineAirQuoteContext,
+} from '@/components/travel/offline-air-quote-workspace'
 import OfflineHotelQuoteForm, {
   type OfflineHotelQuoteContext,
 } from '@/components/travel/offline-hotel-quote-form'
@@ -20,11 +23,12 @@ interface OfflineTravelWorkspaceProps {
   reservationCompanyIds?: readonly string[]
   initialDemandId?: string
   canQuoteHotels: boolean
+  canQuoteAir?: boolean
   canOperateReservations: boolean
   onCompleted: () => void
 }
 
-type OfflineWorkspacePanel = 'hotel_quote' | 'reservation'
+type OfflineWorkspacePanel = 'hotel_quote' | 'air_quote' | 'reservation'
 
 const OFFLINE_FLOW_STAGES = [
   'Solicitação',
@@ -37,8 +41,9 @@ const OFFLINE_FLOW_STAGES = [
 ] as const
 
 export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
+  const canQuoteAir = props.canQuoteAir ?? props.canQuoteHotels
   const [panel, setPanel] = useState<OfflineWorkspacePanel>(() => (
-    props.canQuoteHotels ? 'hotel_quote' : 'reservation'
+    props.canQuoteHotels ? 'hotel_quote' : canQuoteAir ? 'air_quote' : 'reservation'
   ))
   const [sharedDemandId, setSharedDemandId] = useState('')
   const [context, setContext] = useState<OfflineTravelContext>({
@@ -49,6 +54,7 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
   const appliedInitialDemandRef = useRef('')
   const sharedDemandIdRef = useRef('')
   const hotelQuoteContextReadyRef = useRef(false)
+  const airQuoteContextReadyRef = useRef(false)
   const operationContextReadyRef = useRef(false)
   const activeStage = useMemo(() => stageFromContext(context), [context])
   const quoteCompanyIds = useMemo(
@@ -89,14 +95,16 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
     if (appliedInitialDemandRef.current === requested) return
     const demand = props.demands.find((item) => item.id === requested)
     if (!demand) return
-    const canQuoteDemand = props.canQuoteHotels && quoteCompanyIds.has(demand.empresa_id)
+    const canQuoteHotelDemand = props.canQuoteHotels && isHotelDemand(demand) && quoteCompanyIds.has(demand.empresa_id)
+    const canQuoteAirDemand = canQuoteAir && isAirDemand(demand) && quoteCompanyIds.has(demand.empresa_id)
     const canOperateDemand = props.canOperateReservations && reservationCompanyIds.has(demand.empresa_id)
-    if (!canQuoteDemand && !canOperateDemand) return
+    if (!canQuoteHotelDemand && !canQuoteAirDemand && !canOperateDemand) return
 
     const lifecycleStatus = demandLifecycleStatus(demand)
     appliedInitialDemandRef.current = requested
     sharedDemandIdRef.current = requested
     hotelQuoteContextReadyRef.current = false
+    airQuoteContextReadyRef.current = false
     operationContextReadyRef.current = false
     setSharedDemandId(requested)
     setContext({
@@ -104,10 +112,13 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
       lifecycleStatus,
       operation: 'reservation',
     })
-    setPanel(canQuoteDemand && isHotelDemand(demand) && canReceiveHotelQuote(lifecycleStatus)
+    setPanel(canReceiveQuote(lifecycleStatus) && canQuoteHotelDemand
       ? 'hotel_quote'
-      : 'reservation')
+      : canReceiveQuote(lifecycleStatus) && canQuoteAirDemand
+        ? 'air_quote'
+        : 'reservation')
   }, [
+    canQuoteAir,
     props.canOperateReservations,
     props.canQuoteHotels,
     props.demands,
@@ -117,13 +128,32 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
   ])
 
   useEffect(() => {
-    if (panel === 'hotel_quote' && !props.canQuoteHotels) setPanel('reservation')
-    if (panel === 'reservation' && !props.canOperateReservations) setPanel('hotel_quote')
-  }, [panel, props.canOperateReservations, props.canQuoteHotels])
+    const panelAllowed = panel === 'hotel_quote'
+      ? props.canQuoteHotels
+      : panel === 'air_quote'
+        ? canQuoteAir
+        : props.canOperateReservations
+    if (panelAllowed) return
+    if (props.canQuoteHotels) setPanel('hotel_quote')
+    else if (canQuoteAir) setPanel('air_quote')
+    else if (props.canOperateReservations) setPanel('reservation')
+  }, [canQuoteAir, panel, props.canOperateReservations, props.canQuoteHotels])
 
   const handleHotelQuoteContext = useCallback((nextContext: OfflineHotelQuoteContext) => {
     if (!nextContext.demandId && sharedDemandIdRef.current && !hotelQuoteContextReadyRef.current) return
     hotelQuoteContextReadyRef.current = true
+    sharedDemandIdRef.current = nextContext.demandId
+    setSharedDemandId(nextContext.demandId)
+    setContext({
+      demandId: nextContext.demandId,
+      lifecycleStatus: nextContext.lifecycleStatus,
+      operation: 'reservation',
+    })
+  }, [])
+
+  const handleAirQuoteContext = useCallback((nextContext: OfflineAirQuoteContext) => {
+    if (!nextContext.demandId && sharedDemandIdRef.current && !airQuoteContextReadyRef.current) return
+    airQuoteContextReadyRef.current = true
     sharedDemandIdRef.current = nextContext.demandId
     setSharedDemandId(nextContext.demandId)
     setContext({
@@ -144,11 +174,20 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
   function selectPanel(nextPanel: OfflineWorkspacePanel) {
     if (nextPanel === panel) return
     if (nextPanel === 'hotel_quote' && !props.canQuoteHotels) return
+    if (nextPanel === 'air_quote' && !canQuoteAir) return
     if (nextPanel === 'reservation' && !props.canOperateReservations) return
     if (nextPanel === 'hotel_quote') hotelQuoteContextReadyRef.current = false
+    else if (nextPanel === 'air_quote') airQuoteContextReadyRef.current = false
     else operationContextReadyRef.current = false
     setPanel(nextPanel)
   }
+
+  const availablePanelCount = Number(props.canQuoteHotels) + Number(canQuoteAir) + Number(props.canOperateReservations)
+  const panelGridClass = availablePanelCount >= 3
+    ? 'md:grid-cols-3'
+    : availablePanelCount === 2
+      ? 'md:grid-cols-2'
+      : ''
 
   return (
     <div className="space-y-4">
@@ -199,7 +238,7 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
       </section>
 
       <section className="bbt-card p-3" aria-label="Área de trabalho do consultor">
-        <div className={`grid gap-2 ${props.canQuoteHotels && props.canOperateReservations ? 'md:grid-cols-2' : ''}`} role="tablist" aria-label="Etapa operacional offline">
+        <div className={`grid gap-2 ${panelGridClass}`} role="tablist" aria-label="Etapa operacional offline">
           {props.canQuoteHotels && <button
             type="button"
             role="tab"
@@ -216,6 +255,25 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
               <span className="block text-sm font-semibold">Cotação de hotel</span>
               <span className="mt-1 block text-xs leading-5 text-slate-500">
                 Monte alternativas para o solicitante escolher antes da aprovação.
+              </span>
+            </span>
+          </button>}
+          {canQuoteAir && <button
+            type="button"
+            role="tab"
+            aria-selected={panel === 'air_quote'}
+            onClick={() => selectPanel('air_quote')}
+            className={`flex items-start gap-3 rounded-lg border p-4 text-left transition ${
+              panel === 'air_quote'
+                ? 'border-bbt-accent bg-bbt-accent/10 text-bbt-primary dark:text-white'
+                : 'border-bbt-gray-100 hover:border-bbt-accent/60 dark:border-slate-700'
+            }`}
+          >
+            <Plane className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+            <span>
+              <span className="block text-sm font-semibold">Cotação aérea</span>
+              <span className="mt-1 block text-xs leading-5 text-slate-500">
+                Monte itinerários com conexões, bagagem, tarifas e prazo de emissão.
               </span>
             </span>
           </button>}
@@ -248,6 +306,14 @@ export function OfflineTravelWorkspace(props: OfflineTravelWorkspaceProps) {
           initialDemandId={sharedDemandId || undefined}
           onCompleted={props.onCompleted}
           onContextChange={handleHotelQuoteContext}
+        />
+      ) : panel === 'air_quote' && canQuoteAir ? (
+        <OfflineAirQuoteWorkspace
+          demands={quoteDemands}
+          companies={quoteCompanies}
+          initialDemandId={sharedDemandId || undefined}
+          onCompleted={props.onCompleted}
+          onContextChange={handleAirQuoteContext}
         />
       ) : (
         <OfflineTravelOperationForm
@@ -299,7 +365,16 @@ function isHotelDemand(demand: Atendimento): boolean {
   return service === 'hotel' || service === 'hotelaria' || service.includes('hosped')
 }
 
-function canReceiveHotelQuote(lifecycleStatus: string): boolean {
+function isAirDemand(demand: Atendimento): boolean {
+  const service = String(demand.tipo_servico || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+  return service === 'aereo' || service === 'air'
+}
+
+function canReceiveQuote(lifecycleStatus: string): boolean {
   return [
     'draft',
     'submitted',

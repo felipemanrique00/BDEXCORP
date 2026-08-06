@@ -650,6 +650,7 @@ export function labelOcupante(tipo: TipoServico): string {
 }
 
 export interface DetalhesAereo {
+  trip_type?: 'one_way' | 'round_trip' | 'multi_city'
   origem?: string
   destino?: string
   data_ida?: string
@@ -665,6 +666,22 @@ export interface DetalhesAereo {
   tarifa?: number
   taxas?: number
   status_bilhete?: string
+  /** Trechos solicitados; os campos planos acima continuam como compatibilidade. */
+  trechos?: AirDemandLeg[]
+  preferred_airlines?: string[]
+  baggage_pieces?: number
+  flexible_dates?: boolean
+  flexible_times?: boolean
+}
+
+export interface AirDemandLeg {
+  sequence: number
+  direction?: 'outbound' | 'return' | 'multi_city'
+  origin: string
+  destination: string
+  departure_date: string
+  earliest_time?: string
+  latest_time?: string
 }
 
 export interface DetalhesHotel {
@@ -926,6 +943,29 @@ export interface VoucherQuartoDetalhe {
   hospedes?: string[]
 }
 
+export interface VoucherTrechoAereo {
+  sequencia: number
+  companhia_codigo: string
+  companhia_nome: string
+  numero_voo: string
+  classe_reserva: string
+  cabine: string
+  bagagens: number
+  origem_codigo: string
+  origem_nome?: string
+  destino_codigo: string
+  destino_nome?: string
+  saida_em: string
+  chegada_em: string
+}
+
+export interface VoucherBilheteAereo {
+  passageiro_nome: string
+  numero_bilhete: string
+  companhia_codigo: string
+  companhia_nome: string
+}
+
 export interface VoucherEmitido {
   id: string                          // ex: "H-26262"
   numero: string                      // numero sequencial: "26262"
@@ -995,6 +1035,15 @@ export interface VoucherEmitido {
   data_volta?: string
   classe?: string
   localizador?: string
+  sistema_reserva?: string
+  prazo_emissao?: string
+  tarifa_referencia?: number
+  rav?: number
+  rac?: number
+  cambio?: number
+  milhagem?: number
+  trechos_aereos?: VoucherTrechoAereo[]
+  bilhetes_aereos?: VoucherBilheteAereo[]
 
   // Carro-specific
   locadora?: string

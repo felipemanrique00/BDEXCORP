@@ -21,7 +21,16 @@ describe('tenant reset policy', () => {
     ])
 
     expect(new Set(migrationTables)).toEqual(classifiedTables)
-    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(164)
+    expect(TENANT_BUSINESS_RESET_TABLES).toEqual(expect.arrayContaining([
+      'air_demand_details',
+      'air_demand_legs',
+      'air_quote_option_details',
+      'air_quote_segments',
+      'air_reservation_details',
+      'air_reservation_segments',
+      'air_emission_tickets',
+    ]))
+    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(171)
     expect(TENANT_RESET_PRESERVED_TABLES).toHaveLength(17)
   })
 

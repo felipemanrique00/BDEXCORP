@@ -1092,6 +1092,7 @@ export default function ReservasPage() {
             reservationCompanyIds={reservationCompanyIds}
             initialDemandId={demandaVinculadaId || undefined}
             canQuoteHotels={canOperateQuotes}
+            canQuoteAir={canOperateQuotes}
             canOperateReservations={canOperateReservations}
             onCompleted={refresh}
           />

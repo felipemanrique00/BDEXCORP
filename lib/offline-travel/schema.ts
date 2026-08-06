@@ -22,17 +22,19 @@ export const offlineTravelServiceSchema = z.enum(OFFLINE_TRAVEL_SERVICES)
 export type OfflineTravelService = z.infer<typeof offlineTravelServiceSchema>
 
 const DEMAND_SERVICE_ALIASES: Record<OfflineTravelService, readonly string[]> = {
-  aereo: ['aereo', 'voo', 'passagem aerea', 'transporte aereo'],
+  // Os primeiros aliases sao os codigos relacionais gravados em `demands`.
+  // Os demais preservam compatibilidade com a origem legada e com importacoes.
+  aereo: ['air', 'aereo', 'voo', 'passagem aerea', 'transporte aereo'],
   hotelaria: ['hotel', 'hotelaria', 'hospedagem', 'meio de hospedagem'],
-  locacao: ['carro', 'locacao', 'locacao de veiculo', 'aluguel de carro', 'veiculo'],
-  rodoviario: ['rodoviario', 'onibus', 'passagem rodoviaria'],
+  locacao: ['car', 'carro', 'locacao', 'locacao de veiculo', 'aluguel de carro', 'veiculo'],
+  rodoviario: ['bus', 'rodoviario', 'onibus', 'passagem rodoviaria'],
   ferroviario: ['ferroviario', 'trem', 'passagem ferroviaria'],
   transfer: ['transfer', 'traslado'],
-  seguro: ['seguro', 'seguro viagem'],
-  pacotes: ['pacote', 'pacotes'],
+  seguro: ['insurance', 'seguro', 'seguro viagem'],
+  pacotes: ['package', 'pacote', 'pacotes'],
   lazer: ['lazer', 'evento', 'ingresso'],
   maritimo: ['maritimo', 'navio', 'cruzeiro', 'balsa'],
-  outros: ['outro', 'outros', 'servico diverso', 'servicos diversos'],
+  outros: ['other', 'outro', 'outros', 'servico diverso', 'servicos diversos'],
 }
 
 /**

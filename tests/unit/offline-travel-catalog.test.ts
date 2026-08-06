@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  OFFLINE_SERVICE_DEFINITIONS,
   offlineSegmentType,
+  offlineServiceDefinition,
+  offlineServiceFromDemand,
   offlineServiceLabel,
   offlineVoucherType,
 } from '@/lib/offline-travel/catalog'
@@ -51,4 +54,15 @@ describe('offline travel catalog', () => {
       expect(VOUCHER_PREFIX[offlineVoucherType(service)]).toBe(prefix)
     },
   )
+
+  it('centralizes relational demand codes and module capabilities', () => {
+    expect(OFFLINE_SERVICE_DEFINITIONS).toHaveLength(OFFLINE_TRAVEL_SERVICES.length)
+    expect(offlineServiceFromDemand('air')).toBe('aereo')
+    expect(offlineServiceFromDemand('Aéreo')).toBe('aereo')
+    expect(offlineServiceFromDemand('car')).toBe('locacao')
+    expect(offlineServiceFromDemand('bus')).toBe('rodoviario')
+    expect(offlineServiceDefinition('hotelaria').capabilities.formalChoice).toBe(true)
+    expect(offlineServiceDefinition('aereo').capabilities.formalChoice).toBe(true)
+    expect(offlineServiceDefinition('transfer').capabilities.formalChoice).toBe(false)
+  })
 })
