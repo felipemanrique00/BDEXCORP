@@ -125,14 +125,30 @@ describeWithDatabase('PostgreSQL AI action governance', () => {
     expect(replay.replayed).toBe(true)
 
     const hotels = await tenantTransaction(tenantId, (client) =>
-      client.query<{ count: string }>(
-        `select count(*)::text as count
+      client.query<{
+        count: string
+        normalized_name: string | null
+        source: string | null
+        created_by: string | null
+        updated_by: string | null
+      }>(
+        `select count(*)::text as count,
+                min(normalized_name) as normalized_name,
+                min(source) as source,
+                min(created_by::text) as created_by,
+                min(updated_by::text) as updated_by
          from hotels
          where tenant_id = $1 and name = 'Hotel Governado'`,
         [tenantId],
       ),
     )
     expect(Number(hotels.rows[0].count)).toBe(1)
+    expect(hotels.rows[0].normalized_name).toBe('hotel governado')
+    expect(hotels.rows[0]).toMatchObject({
+      source: 'assistant.confirmed_action',
+      created_by: ownerUserId,
+      updated_by: ownerUserId,
+    })
   })
 
   it('prevents another user from confirming the proposal', async () => {

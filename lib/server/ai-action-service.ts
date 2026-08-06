@@ -15,6 +15,7 @@ import { writeAuditEvent } from '@/lib/server/audit-log'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import { createRelationalDemand } from '@/lib/server/demand-service'
+import { normalizeName } from '@/lib/server/geography-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 
 const proposalInputSchema = z.object({
@@ -522,17 +523,19 @@ async function executeProposal(
       const id = createEntityId('hotel')
       await client.query(
         `insert into hotels (
-           id, tenant_id, name, city, state, country, phone, email,
+           id, tenant_id, name, normalized_name, city, state, country, phone, email,
            address, category, billing_enabled, billing_info, amenities,
-           status
+           status, source, created_by, updated_by
          ) values (
-           $1, $2, $3, $4, $5, $6, $7, $8,
-           $9, $10, $11, $12, $13::jsonb, 'active'
+           $1, $2, $3, $4, $5, $6, $7, $8, $9,
+           $10, $11, $12, $13, $14::jsonb, 'active',
+           'assistant.confirmed_action', $15, $15
          )`,
         [
           id,
           principal.tenantId,
           hotel.nome,
+          normalizeName(hotel.nome),
           hotel.cidade || null,
           hotel.uf?.toUpperCase() || null,
           hotel.pais.toUpperCase(),
@@ -543,6 +546,7 @@ async function executeProposal(
           hotel.faturado,
           hotel.info_faturamento || null,
           JSON.stringify({ observacoes: hotel.observacoes || null, source: 'assistant.confirmed_action' }),
+          principal.user.id,
         ],
       )
       return { entityType: 'hotel', entityId: id, replayed: false }
