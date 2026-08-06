@@ -1,7 +1,11 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import {
   assessDemandUpdate,
+  lifecycleAllowsNormalHotelDemandEdit,
   lifecycleAllowsMaterialDemandEdit,
   type DemandUpdateSnapshot,
 } from '@/lib/demands/update-governance'
@@ -21,7 +25,27 @@ const base: DemandUpdateSnapshot = {
   passengerName: 'Aldo Fernandes Junior',
 }
 
+const demandServiceSource = readFileSync(
+  resolve(process.cwd(), 'lib/server/demand-service.ts'),
+  'utf8',
+)
+
 describe('demand update governance', () => {
+  it('mantem a elegibilidade de edicao segura para o bundle do navegador', () => {
+    const hotelGuestsSource = readFileSync(
+      resolve(process.cwd(), 'lib/offline-travel/hotel-guests.ts'),
+      'utf8',
+    )
+    const eligibilitySource = readFileSync(
+      resolve(process.cwd(), 'lib/demands/edit-eligibility.ts'),
+      'utf8',
+    )
+
+    expect(hotelGuestsSource).toContain('@/lib/demands/edit-eligibility')
+    expect(hotelGuestsSource).not.toContain('@/lib/demands/update-governance')
+    expect(eligibilitySource).not.toMatch(/node:|createHash|crypto/)
+  })
+
   it('detecta mudancas materiais em dados financeiros e de viagem', () => {
     const assessment = assessDemandUpdate(base, {
       ...base,
@@ -47,5 +71,16 @@ describe('demand update governance', () => {
     expect(lifecycleAllowsMaterialDemandEdit('reserved')).toBe(false)
     expect(lifecycleAllowsMaterialDemandEdit('issued')).toBe(false)
     expect(lifecycleAllowsMaterialDemandEdit('closed')).toBe(false)
+  })
+
+  it('bloqueia a edicao hoteleira comum desde a cotacao', () => {
+    expect(lifecycleAllowsNormalHotelDemandEdit('submitted')).toBe(true)
+    expect(lifecycleAllowsNormalHotelDemandEdit('quoting')).toBe(false)
+    expect(lifecycleAllowsNormalHotelDemandEdit('pending_choice')).toBe(false)
+    expect(lifecycleAllowsNormalHotelDemandEdit('pending_cost_approval')).toBe(false)
+    expect(lifecycleAllowsNormalHotelDemandEdit('approved')).toBe(false)
+    expect(lifecycleAllowsNormalHotelDemandEdit('reserved')).toBe(false)
+    expect(demandServiceSource).toContain('HOTEL_DEMAND_NORMAL_EDIT_LOCKED')
+    expect(demandServiceSource).toContain('lifecycleAllowsNormalHotelDemandEdit(current.lifecycle_status)')
   })
 })

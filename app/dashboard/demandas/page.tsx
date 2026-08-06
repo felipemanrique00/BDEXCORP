@@ -3,15 +3,15 @@ import { useState, useMemo, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useStore } from '@/lib/store'
 import { getCurrentUser, getAllUsers, hasPermission } from '@/lib/auth'
-import { getAllAtendimentos, updateAtendimento } from '@/lib/atendimentos-storage'
+import { getAllAtendimentos } from '@/lib/atendimentos-storage'
 import { getAllVouchersEmitidos } from '@/lib/vouchers-emitidos-storage'
 import { getOperationalAlerts } from '@/lib/operational-alerts'
 import {
   analisarRepasses, executarRepasse, pegarDemanda,
   calcularPrioridadeAuto, diasAteCheckin, formatarDiasCheckin, corPrioridade, scorePrioridade,
 } from '@/lib/priorizacao'
-import type { Atendimento, Prioridade, StatusAtendimento } from '@/types'
-import { STATUS_LABEL, labelOcupante } from '@/types'
+import type { Atendimento, Prioridade } from '@/types'
+import { labelOcupante } from '@/types'
 import {
   ListChecks, Users as UsersIcon, Clock, AlertTriangle, Zap, Hand,
   ArrowRightLeft, CheckCircle2, Calendar, Hotel as HotelIcon, Plane, Car,
@@ -31,11 +31,18 @@ import {
   DemandClientError,
   listDemandsFromServer,
   updateDemandAssignmentOnServer,
-  updateDemandStatusOnServer,
   type DemandDomainRollout,
   type RelationalDemandClientItem,
 } from '@/lib/demands-client'
 import { requestDemandTransfer } from '@/lib/demand-transfer-client'
+import { getAllSolicitantesEmpresa } from '@/lib/solicitantes-storage'
+import {
+  filterDemandsForOperationalAssignment,
+  scopeDemandsForRequester,
+} from '@/lib/demands/requester-ownership'
+import { isRequesterUser } from '@/lib/user-access-kind'
+import { demandFocusIdFromSearch } from '@/lib/demands/focus-query'
+import { travelLifecycleStatusLabel } from '@/lib/travel-lifecycle/presentation'
 
 type Aba = 'fila' | 'minhas' | 'alertas' | 'operacao' | 'balanceamento' | 'kanban' | 'status'
 
@@ -59,7 +66,11 @@ export default function DemandasPage() {
     [empresas, includesCompany],
   )
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const podeVerTudo = hasPermission(user, 'ver_produtividade_todos') || Boolean(user?.corporate_profile && hasPermission(user, 'ver_demandas'))
+  const requesterView = isRequesterUser(user)
+  const podeVerTudo = !requesterView && (
+    hasPermission(user, 'ver_produtividade_todos')
+    || Boolean(user?.corporate_profile && hasPermission(user, 'ver_demandas'))
+  )
   const podeRepassarDireto = hasPermission(user, 'ver_produtividade_todos')
     || hasPermission(user, 'gerenciar_usuarios')
 
@@ -86,6 +97,19 @@ export default function DemandasPage() {
     () => new Map(relationalItems.map((item) => [item.id, item])),
     [relationalItems],
   )
+  const requesterRecords = useMemo(() => {
+    void reload
+    if (typeof window === 'undefined' || !requesterView) return []
+    return getAllSolicitantesEmpresa()
+  }, [reload, requesterView])
+  const trustedRequesterDemandIds = useMemo(
+    () => new Set(
+      requesterView && user?.role_key === 'requester'
+        ? relationalItems.map((item) => item.id)
+        : [],
+    ),
+    [relationalItems, requesterView, user?.role_key],
+  )
   const allAtendimentos = useMemo(() => {
     void reload
     if (typeof window === 'undefined') return []
@@ -95,8 +119,17 @@ export default function DemandasPage() {
         merged.set(item.id, item.demand)
       }
     })
-    return [...merged.values()]
-  }, [demandRollout, relationalItems, reload])
+    return scopeDemandsForRequester({
+      user,
+      demands: [...merged.values()],
+      requesters: requesterRecords,
+      trustedServerDemandIds: trustedRequesterDemandIds,
+    })
+  }, [demandRollout, relationalItems, reload, requesterRecords, trustedRequesterDemandIds, user])
+  const requesterOwnDemandIds = useMemo(
+    () => new Set(requesterView ? allAtendimentos.map((demand) => demand.id) : []),
+    [allAtendimentos, requesterView],
+  )
 
   useEffect(() => {
     if (filtroEmpresa && !empresasNoContexto.some((empresa) => empresa.id === filtroEmpresa)) {
@@ -134,16 +167,18 @@ export default function DemandasPage() {
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
     if (todas.length > 0) marcarUltimaVista(todas[0].id)
 
-    const atendimentoId = new URLSearchParams(window.location.search).get('id')?.trim()
+    const atendimentoId = demandFocusIdFromSearch(window.location.search)
     if (atendimentoId) {
       const demandaAlvo = todosAtendimentos.find((item) => item.id === atendimentoId)
       if (demandaAlvo) {
         setAba('operacao')
         setBusca(demandaAlvo.serial_os || demandaAlvo.id)
-        setEditando(demandaAlvo)
+        if (!requesterView || requesterOwnDemandIds.has(demandaAlvo.id)) {
+          setEditando(demandaAlvo)
+        }
       }
     }
-  }, [allAtendimentos, includesCompany])
+  }, [allAtendimentos, includesCompany, requesterOwnDemandIds, requesterView])
 
   const agentes = useMemo(() => {
     void reload
@@ -161,9 +196,12 @@ export default function DemandasPage() {
       ? [...all]
       : all.filter((a) => ['em_andamento', 'aguardando_cliente', 'pendente'].includes(a.status))
 
-    if (!podeVerTudo && user) {
-      filtrados = filtrados.filter((a) => a.agente_user_id === user.id || !a.agente_user_id)
-    }
+    filtrados = filterDemandsForOperationalAssignment({
+      demands: filtrados,
+      userId: user?.id,
+      canViewAll: podeVerTudo,
+      requesterView,
+    })
 
     if (filtroEmpresa) filtrados = filtrados.filter((a) => a.empresa_id === filtroEmpresa)
     if (tipoFiltro !== 'todos') filtrados = filtrados.filter((a) => a.tipo_servico === tipoFiltro)
@@ -187,7 +225,7 @@ export default function DemandasPage() {
       _dias: diasAteCheckin(a),
       _score: scorePrioridade(a),
     }))
-  }, [reload, filtroEmpresa, tipoFiltro, filtroPrioridade, busca, empresasNoContexto, includesCompany, podeVerTudo, user, aba, allAtendimentos])
+  }, [reload, filtroEmpresa, tipoFiltro, filtroPrioridade, busca, empresasNoContexto, includesCompany, podeVerTudo, requesterView, user, aba, allAtendimentos])
 
   const analise = useMemo(() => {
     void reload
@@ -209,6 +247,14 @@ export default function DemandasPage() {
     void reload
     if (typeof window === 'undefined') return []
     let list = getAllVouchersEmitidos().filter((voucher) => includesCompany(voucher.empresa_id, 'ver_vouchers'))
+    if (requesterView) {
+      const ownDemandIds = new Set(allAtendimentos.map((demand) => demand.id))
+      const ownVoucherIds = new Set(allAtendimentos.flatMap((demand) => demand.voucher_ids || []))
+      list = list.filter((voucher) => (
+        ownVoucherIds.has(voucher.id)
+        || Boolean(voucher.atendimento_id && ownDemandIds.has(voucher.atendimento_id))
+      ))
+    }
     if (filtroEmpresa) list = list.filter((v) => v.empresa_id === filtroEmpresa)
     if (tipoFiltro !== 'todos') list = list.filter((v) => v.tipo === tipoFiltro)
     if (busca.trim()) {
@@ -223,17 +269,19 @@ export default function DemandasPage() {
       )
     }
     return list
-  }, [reload, filtroEmpresa, tipoFiltro, busca, includesCompany])
+  }, [reload, filtroEmpresa, tipoFiltro, busca, includesCompany, requesterView, allAtendimentos])
 
   const minhas = useMemo(() => {
+    if (requesterView) return [...atendimentos].sort((a: any, b: any) => b._score - a._score)
     return atendimentos.filter((a) => a.agente_user_id === user?.id).sort((a: any, b: any) => b._score - a._score)
-  }, [atendimentos, user])
+  }, [atendimentos, requesterView, user])
 
   const fila = useMemo(() => {
+    if (requesterView) return []
     return atendimentos
       .filter((a) => !a.agente_user_id || a.em_atendimento === false)
       .sort((a: any, b: any) => b._score - a._score)
-  }, [atendimentos])
+  }, [atendimentos, requesterView])
 
   const demandaPageCount = Math.max(1, Math.ceil(atendimentos.length / OPERATION_PAGE_SIZE))
   const currentDemandaPage = Math.min(demandaPage, demandaPageCount)
@@ -256,6 +304,14 @@ export default function DemandasPage() {
   }, [aba, busca, filtroEmpresa, filtroPrioridade, tipoFiltro])
 
   function refresh() { setReload((n) => n + 1) }
+
+  function openDemand(demand: Atendimento) {
+    if (requesterView && !requesterOwnDemandIds.has(demand.id)) {
+      toast.error('Esta demanda não pertence ao seu usuário solicitante.')
+      return
+    }
+    setEditando(demand)
+  }
 
   function upsertRelationalItem(item: RelationalDemandClientItem) {
     setRelationalItems((current) => {
@@ -291,6 +347,10 @@ export default function DemandasPage() {
 
   async function handlePegar(a: Atendimento) {
     if (!user) return
+    if (requesterView) {
+      toast.error('Atribuição e triagem são restritas à equipe operacional.')
+      return
+    }
     if (!includesCompany(a.empresa_id, 'criar_demandas')) {
       toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
       return
@@ -328,6 +388,10 @@ export default function DemandasPage() {
 
   async function handleRepassar(a: Atendimento, novoAgenteId: string) {
     if (!user) return
+    if (requesterView) {
+      toast.error('O repasse é restrito à equipe operacional.')
+      return
+    }
     if (!includesCompany(a.empresa_id, 'criar_demandas')) {
       toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
       return
@@ -393,6 +457,10 @@ export default function DemandasPage() {
 
   async function handleAplicarSugestao(sug: any) {
     if (!user) return
+    if (requesterView) {
+      toast.error('O balanceamento é restrito à equipe operacional.')
+      return
+    }
     if (!includesCompany(sug.atendimento?.empresa_id, 'criar_demandas')) {
       toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
       return
@@ -428,45 +496,12 @@ export default function DemandasPage() {
     }
   }
 
-  async function handleAlterarStatus(a: Atendimento, status: StatusAtendimento) {
-    if (a.status === status) return
-    if (!includesCompany(a.empresa_id, 'criar_demandas')) {
-      toast.error('Seu acesso a esta empresa permite somente consultar demandas.')
-      return
-    }
-    try {
-      const relational = await resolveRelationalItem(a.id, a.empresa_id)
-      if (relational) {
-        const result = await updateDemandStatusOnServer(a.id, {
-          status,
-          expectedVersion: relational.version,
-          reason: `Alteracao operacional para ${STATUS_LABEL[status]}`,
-          idempotencyKey: demandOperationKey(a.id, `status-${status}`),
-        })
-        upsertRelationalItem(result.item)
-        toast.success(`Status alterado para ${STATUS_LABEL[status]}`)
-        return
-      }
-    } catch (error) {
-      reportDemandMutationFailure(error)
-      return
-    }
-    if (updateAtendimento(a.id, { status })) {
-      try {
-        await commitPendingRemoteStorage()
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o status no servidor.')
-        return
-      }
-      toast.success(`Status alterado para ${STATUS_LABEL[status]}`)
-      refresh()
-    } else {
-      toast.error('Não foi possível alterar o status.')
-    }
-  }
-
   async function aplicarTodasSugestoes() {
     if (!user) return
+    if (requesterView) {
+      toast.error('O balanceamento é restrito à equipe operacional.')
+      return
+    }
     let ok = 0
     let failed = 0
     let legacyChanged = false
@@ -519,26 +554,37 @@ export default function DemandasPage() {
         <div className="relative grid gap-5 p-6 lg:p-7 xl:grid-cols-[1fr_auto] xl:items-center">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-200/70">
-              Operação · Atendimento
+              {requesterView ? 'Portal · Solicitações' : 'Operação · Atendimento'}
             </p>
             <h1 className="mt-2 text-2xl font-semibold leading-tight lg:text-3xl flex items-center gap-3">
               <ListChecks className="w-7 h-7 text-cyan-200" />
-              Demandas e Vouchers
+              {requesterView ? 'Minhas demandas' : 'Demandas e Vouchers'}
             </h1>
             <p className="mt-2 max-w-2xl text-sm text-blue-100/75">
-              Operação unificada: demandas criadas, vouchers manuais, PDFs importados e Wintour no mesmo fluxo.
+              {requesterView
+                ? 'Acompanhe somente as solicitações vinculadas ao seu cadastro de solicitante.'
+                : 'Operação unificada: demandas criadas, vouchers manuais, PDFs importados e Wintour no mesmo fluxo.'}
             </p>
-            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2 max-w-2xl">
-              <DemHeroMetric icon={Hand} label="Fila" value={fila.length} />
-              <DemHeroMetric icon={UserCheck} label="Minhas" value={minhas.length} />
-              <DemHeroMetric icon={AlertTriangle} label="Alertas" value={alertas.length} highlight={alertas.length > 0} />
-              <DemHeroMetric icon={FileText} label="Operação" value={atendimentos.length + vouchersOperacao.length} />
-            </div>
+            {requesterView ? (
+              <div className="mt-4 grid max-w-xs grid-cols-1 gap-2">
+                <DemHeroMetric icon={ListChecks} label="Minhas solicitações" value={atendimentos.length} />
+              </div>
+            ) : (
+              <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2 max-w-2xl">
+                <DemHeroMetric icon={Hand} label="Fila" value={fila.length} />
+                <DemHeroMetric icon={UserCheck} label="Minhas" value={minhas.length} />
+                <DemHeroMetric icon={AlertTriangle} label="Alertas" value={alertas.length} highlight={alertas.length > 0} />
+                <DemHeroMetric icon={FileText} label="Operação" value={atendimentos.length + vouchersOperacao.length} />
+              </div>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button onClick={() => { setEditando(null); setNovaDemandaModal(true) }}
+            <button onClick={() => {
+              if (requesterView) router.push('/dashboard/portal-empresa')
+              else { setEditando(null); setNovaDemandaModal(true) }
+            }}
               className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-5 py-3 text-[#061631] font-semibold text-sm hover:brightness-105 transition shadow-lg shadow-cyan-500/20">
-              <Zap className="w-4 h-4" /> Nova Demanda
+              <Zap className="w-4 h-4" /> {requesterView ? 'Abrir portal' : 'Nova Demanda'}
             </button>
             <button onClick={refresh}
               className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-white text-sm hover:bg-white/15 transition border border-white/15">
@@ -560,17 +606,23 @@ export default function DemandasPage() {
 
       {/* Abas */}
       <div className="bbt-tabs overflow-x-auto">
-        <BtnAba active={aba === 'fila'} onClick={() => setAba('fila')} icon={Hand} label={`Fila (${fila.length})`} />
-        <BtnAba active={aba === 'minhas'} onClick={() => setAba('minhas')} icon={UserCheck} label={`Minhas (${minhas.length})`} />
-        <BtnAba active={aba === 'alertas'} onClick={() => setAba('alertas')} icon={AlertTriangle} label={`Alertas (${alertas.length})`} badge={alertas.length > 0} />
-        <BtnAba active={aba === 'operacao'} onClick={() => setAba('operacao')} icon={FileText} label={`Operação (${atendimentos.length + vouchersOperacao.length})`} />
-        <BtnAba active={aba === 'status'} onClick={() => setAba('status')} icon={Filter} label="Por Status" />
-        {podeVerTudo && (
+        {requesterView ? (
+          <BtnAba active={aba === 'operacao'} onClick={() => setAba('operacao')} icon={FileText} label={`Minhas demandas (${atendimentos.length})`} />
+        ) : (
           <>
-            <BtnAba active={aba === 'balanceamento'} onClick={() => setAba('balanceamento')} icon={ArrowRightLeft}
-              label={`Balanceamento${analise.sugestoes.length > 0 ? ` (${analise.sugestoes.length})` : ''}`}
-              badge={analise.sugestoes.length > 0} />
-            <BtnAba active={aba === 'kanban'} onClick={() => setAba('kanban')} icon={UsersIcon} label="Por Agente" />
+            <BtnAba active={aba === 'fila'} onClick={() => setAba('fila')} icon={Hand} label={`Fila (${fila.length})`} />
+            <BtnAba active={aba === 'minhas'} onClick={() => setAba('minhas')} icon={UserCheck} label={`Minhas (${minhas.length})`} />
+            <BtnAba active={aba === 'alertas'} onClick={() => setAba('alertas')} icon={AlertTriangle} label={`Alertas (${alertas.length})`} badge={alertas.length > 0} />
+            <BtnAba active={aba === 'operacao'} onClick={() => setAba('operacao')} icon={FileText} label={`Operação (${atendimentos.length + vouchersOperacao.length})`} />
+            <BtnAba active={aba === 'status'} onClick={() => setAba('status')} icon={Filter} label="Por Status" />
+            {podeVerTudo && (
+              <>
+                <BtnAba active={aba === 'balanceamento'} onClick={() => setAba('balanceamento')} icon={ArrowRightLeft}
+                  label={`Balanceamento${analise.sugestoes.length > 0 ? ` (${analise.sugestoes.length})` : ''}`}
+                  badge={analise.sugestoes.length > 0} />
+                <BtnAba active={aba === 'kanban'} onClick={() => setAba('kanban')} icon={UsersIcon} label="Por Agente" />
+              </>
+            )}
           </>
         )}
       </div>
@@ -624,9 +676,9 @@ export default function DemandasPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {fila.map((a) => (
                 <DemandaCard key={a.id} demanda={a as any} empresas={empresas} agentes={agentes}
-                  onPegar={() => handlePegar(a)}
-                  onRepassar={() => setRepasseModal(a)}
-                  onStatusChange={(st: StatusAtendimento) => handleAlterarStatus(a, st)}
+                  onPegar={!requesterView ? () => handlePegar(a) : undefined}
+                  onRepassar={!requesterView ? () => setRepasseModal(a) : undefined}
+                  showOperationalLinks={!requesterView}
                   showAgente />
               ))}
             </div>
@@ -644,8 +696,8 @@ export default function DemandasPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {minhas.map((a) => (
                 <DemandaCard key={a.id} demanda={a as any} empresas={empresas} agentes={agentes}
-                  onRepassar={() => setRepasseModal(a)}
-                  onStatusChange={(st: StatusAtendimento) => handleAlterarStatus(a, st)}
+                  onRepassar={!requesterView ? () => setRepasseModal(a) : undefined}
+                  showOperationalLinks={!requesterView}
                   isOwn />
               ))}
             </div>
@@ -686,7 +738,7 @@ export default function DemandasPage() {
 
       {/* ABA: BALANCEAMENTO (só master/supervisor) */}
       {aba === 'operacao' && (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className={`grid grid-cols-1 gap-4 ${requesterView ? '' : 'xl:grid-cols-2'}`}>
           <div className="bbt-card p-4">
             <div className="flex items-center justify-between gap-2 mb-3">
               <h3 className="font-semibold flex items-center gap-2">
@@ -700,8 +752,7 @@ export default function DemandasPage() {
               ) : (
                 atendimentosPaginados.map((a) => (
                   <DemandaCardMini key={a.id} demanda={a as any} empresas={empresas}
-                    onClick={() => setEditando(a)}
-                    onStatusChange={(st: StatusAtendimento) => handleAlterarStatus(a, st)}
+                    onClick={() => openDemand(a)}
                     mostrarAgente={podeVerTudo} agentes={agentes} />
                 ))
               )}
@@ -714,7 +765,7 @@ export default function DemandasPage() {
             />
           </div>
 
-          <div className="bbt-card p-4">
+          {!requesterView && <div className="bbt-card p-4">
             <div className="flex items-center justify-between gap-2 mb-3">
               <h3 className="font-semibold flex items-center gap-2">
                 <FileText className="w-4 h-4 text-bbt-accent" /> Vouchers vinculados/importados
@@ -755,7 +806,7 @@ export default function DemandasPage() {
               total={vouchersOperacao.length}
               onPageChange={setVoucherPage}
             />
-          </div>
+          </div>}
         </div>
       )}
 
@@ -865,7 +916,7 @@ export default function DemandasPage() {
                     ) : (
                       minhasAg.slice(0, kanbanLimit).map((a) => (
                         <DemandaCardMini key={a.id} demanda={a as any} empresas={empresas}
-                          onClick={() => setEditando(a)} />
+                          onClick={() => openDemand(a)} />
                       ))
                     )}
                     {minhasAg.length > kanbanLimit && (
@@ -911,8 +962,7 @@ export default function DemandasPage() {
                     ) : (
                       items.slice(0, kanbanLimit).map((a) => (
                         <DemandaCardMini key={a.id} demanda={a as any} empresas={empresas}
-                          onClick={() => setEditando(a)}
-                          onStatusChange={(st: StatusAtendimento) => handleAlterarStatus(a, st)}
+                          onClick={() => openDemand(a)}
                           mostrarAgente={podeVerTudo} agentes={agentes} />
                       ))
                     )}
@@ -1004,6 +1054,8 @@ export default function DemandasPage() {
         open={!!editando || novaDemandaModal}
         onClose={() => { setEditando(null); setNovaDemandaModal(false) }}
         editing={editando}
+        requesterOwnershipVerified={Boolean(editando && requesterOwnDemandIds.has(editando.id))}
+        readOnly={Boolean(editando && requesterView && !includesCompany(editando.empresa_id, 'criar_demandas'))}
         onSaved={() => { refresh(); setNovaDemandaModal(false); setEditando(null) }}
       />
 
@@ -1092,7 +1144,16 @@ function BtnAba({ active, onClick, icon: Icon, label, badge }: any) {
   )
 }
 
-function DemandaCard({ demanda, empresas, agentes, onPegar, onRepassar, onStatusChange, isOwn, showAgente }: any) {
+function DemandaCard({
+  demanda,
+  empresas,
+  agentes,
+  onPegar,
+  onRepassar,
+  isOwn,
+  showAgente,
+  showOperationalLinks = true,
+}: any) {
   const empresa = empresas.find((e: any) => e.id === demanda.empresa_id)
   const agente = agentes.find((x: any) => x.id === demanda.agente_user_id)
   const cor = corPrioridade(demanda._prioridade)
@@ -1147,42 +1208,39 @@ function DemandaCard({ demanda, empresas, agentes, onPegar, onRepassar, onStatus
             <ArrowRightLeft className="w-3 h-3" /> Repassar
           </button>
         )}
-        <a
-          href={`/dashboard/reservas?atendimento=${encodeURIComponent(demanda.id)}&os=${encodeURIComponent(serialOS || '')}`}
-          onClick={(e) => e.stopPropagation()}
-          className="bbt-button-ghost text-[11px] py-1.5 px-2 flex items-center justify-center gap-1"
-          title={`Abrir ${serialOS} em Reservas e cotações`}
-          aria-label={`Abrir ${serialOS} em Reservas e cotações`}
-        >
-          <CalendarCheck className="w-3 h-3" />
-        </a>
-        <a
-          href={`/dashboard/vouchers/novo?atendimento=${demanda.id}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="bbt-button-ghost text-[11px] py-1.5 px-2 flex items-center justify-center gap-1"
-          title="Gerar Voucher"
-        >
-          <FileText className="w-3 h-3" />
-        </a>
+        {showOperationalLinks && (
+          <>
+            <a
+              href={`/dashboard/reservas?atendimento=${encodeURIComponent(demanda.id)}&os=${encodeURIComponent(serialOS || '')}`}
+              onClick={(e) => e.stopPropagation()}
+              className="bbt-button-ghost text-[11px] py-1.5 px-2 flex items-center justify-center gap-1"
+              title={`Abrir ${serialOS} em Reservas e cotações`}
+              aria-label={`Abrir ${serialOS} em Reservas e cotações`}
+            >
+              <CalendarCheck className="w-3 h-3" />
+            </a>
+            <a
+              href={`/dashboard/vouchers/novo?atendimento=${demanda.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="bbt-button-ghost text-[11px] py-1.5 px-2 flex items-center justify-center gap-1"
+              title="Gerar Voucher"
+            >
+              <FileText className="w-3 h-3" />
+            </a>
+          </>
+        )}
       </div>
-      {onStatusChange && (
-        <select
-          value={demanda.status}
-          onChange={(e) => onStatusChange(e.target.value as StatusAtendimento)}
-          className="mt-2 w-full h-8 rounded-md border border-bbt-gray-100 dark:border-slate-700 bg-white/80 dark:bg-slate-900/70 px-2 text-[11px] text-slate-700 dark:text-slate-200"
-        >
-          {(['pendente', 'em_andamento', 'aguardando_cliente', 'finalizado', 'cancelado'] as StatusAtendimento[]).map((st) => (
-            <option key={st} value={st}>{STATUS_LABEL[st]}</option>
-          ))}
-        </select>
-      )}
+      <div className="mt-2 rounded-md bg-white/70 px-2 py-1.5 text-[10px] font-semibold text-slate-600 dark:bg-slate-900/60 dark:text-slate-300">
+        {travelLifecycleStatusLabel(demanda.relational_lifecycle_status || demanda.status)}
+        <span className="ml-1 font-normal text-slate-400">· automático</span>
+      </div>
     </div>
   )
 }
 
-function DemandaCardMini({ demanda, empresas, onClick, onStatusChange, mostrarAgente, agentes }: any) {
+function DemandaCardMini({ demanda, empresas, onClick, mostrarAgente, agentes }: any) {
   const empresa = empresas.find((e: any) => e.id === demanda.empresa_id)
   const cor = corPrioridade(demanda._prioridade)
   const agente = mostrarAgente && agentes ? agentes.find((u: any) => u.id === demanda.agente_user_id) : null
@@ -1207,17 +1265,6 @@ function DemandaCardMini({ demanda, empresas, onClick, onStatusChange, mostrarAg
           {agente && <div className="text-[9px] text-slate-400 truncate ml-1 max-w-[100px]">{agente.name.split(' ')[0]}</div>}
         </div>
       </button>
-      {onStatusChange && (
-        <select
-          value={demanda.status}
-          onChange={(e) => onStatusChange(e.target.value as StatusAtendimento)}
-          className="mt-2 w-full h-7 rounded-md border border-bbt-gray-100 bg-white/80 px-1.5 text-[10px]"
-        >
-          {(['pendente', 'em_andamento', 'aguardando_cliente', 'finalizado', 'cancelado'] as StatusAtendimento[]).map((st) => (
-            <option key={st} value={st}>{STATUS_LABEL[st]}</option>
-          ))}
-        </select>
-      )}
     </div>
   )
 }

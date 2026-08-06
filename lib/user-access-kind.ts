@@ -27,6 +27,22 @@ export function userAccessKind(
   return user.corporate_profile ? 'corporate' : 'internal'
 }
 
+/**
+ * Identifica o perfil pessoal de solicitante sem confundir administradores
+ * corporativos com solicitantes que receberam permissões adicionais.
+ *
+ * A checagem do tipo de acesso vem primeiro para preservar os perfis internos,
+ * inclusive em cadastros antigos que ainda carreguem `corporate_profile`.
+ */
+export function isRequesterUser(
+  user: Pick<User, 'role' | 'role_key' | 'corporate_profile'> | null | undefined,
+): boolean {
+  if (!user || userAccessKind(user) !== 'corporate') return false
+  const roleKey = String(user.role_key || '').trim()
+  if (roleKey) return roleKey === 'requester'
+  return user.corporate_profile === 'requester'
+}
+
 export function isRequesterLinkableMembershipRole(roleKey: string | null | undefined): boolean {
   return CORPORATE_ROLE_KEYS.has(String(roleKey || '').trim())
 }

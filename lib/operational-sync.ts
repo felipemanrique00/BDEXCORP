@@ -68,7 +68,8 @@ function joinUnique(parts: Array<string | undefined | null>, separator = ' | ', 
 }
 
 function asTipoServico(tipo: VoucherTipo): TipoServico {
-  return tipo
+  if (tipo === 'Hotel' || tipo === 'Aéreo' || tipo === 'Carro' || tipo === 'Pacote') return tipo
+  return 'Outro'
 }
 
 export function asVoucherTipo(tipo: TipoServico): VoucherTipo {

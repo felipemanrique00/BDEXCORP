@@ -93,18 +93,26 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
 
   return (
     <CorporateContextProvider user={sessionUser}>
-      <div className="flex min-h-screen bg-[#f4f6fa] dark:bg-[#10142b]">
-        <Sidebar
-          user={sessionUser}
-          mobileOpen={mobileNavigationOpen}
-          onMobileClose={() => setMobileNavigationOpen(false)}
-        />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <Header user={sessionUser} onOpenNavigation={() => setMobileNavigationOpen(true)} />
-          <main className="min-w-0 flex-1 overflow-x-hidden p-4 pb-24 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24">
+      <div className="flex min-h-screen bg-[#f4f6fa] print:block print:min-h-0 print:bg-white dark:bg-[#10142b]">
+        <div className="contents print:hidden">
+          <Sidebar
+            user={sessionUser}
+            mobileOpen={mobileNavigationOpen}
+            onMobileClose={() => setMobileNavigationOpen(false)}
+          />
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col print:block">
+          <div className="print:hidden">
+            <Header user={sessionUser} onOpenNavigation={() => setMobileNavigationOpen(true)} />
+          </div>
+          <main className="min-w-0 flex-1 overflow-x-hidden p-4 pb-24 print:overflow-visible print:p-0 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24">
             {hydratedPath === pathname ? children : <RouteLoadingState />}
           </main>
-          {hydratedPath === pathname && <QuickAIPopup />}
+          {hydratedPath === pathname && (
+            <div className="print:hidden">
+              <QuickAIPopup />
+            </div>
+          )}
         </div>
       </div>
     </CorporateContextProvider>

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { PoolClient, QueryResultRow } from 'pg'
 
 import type {
+  IntegrationProvider,
   TravelCancellationRequest,
   TravelFareRequest,
   TravelIssueRequest,
@@ -30,6 +31,10 @@ import {
 import { withTenantTransaction } from '@/lib/server/database'
 import { evaluateAndPersistPoliciesInTransaction } from '@/lib/server/policy-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import {
+  isRequesterReadPrincipal,
+  requesterOwnDemandExistsSql,
+} from '@/lib/server/requester-read-scope'
 import { logError } from '@/lib/server/logger'
 import { persistTravelTransitionInTransaction } from '@/lib/server/travel-lifecycle-persistence'
 import { allowedTravelCommands } from '@/lib/travel-lifecycle/machine'
@@ -358,6 +363,19 @@ export interface TravelQuoteExecutionResult {
   replayed: boolean
 }
 
+export interface GovernedTravelQuoteExecutionOptions {
+  provider?: IntegrationProvider
+  persistOptionDetails?: (context: {
+    client: PoolClient
+    principal: RequestPrincipal
+    demandId: string
+    companyId: string
+    databaseQuoteId: string
+    optionIdsByProviderId: ReadonlyMap<string, string>
+    quote: TravelQuote
+  }) => Promise<void>
+}
+
 export interface TravelReservationExecutionResult {
   reservation: TravelReservation
   databaseReservationId: string
@@ -464,12 +482,15 @@ export async function listGovernedTravelQuotes(
   const limit = Math.max(1, Math.min(200, Number(filters.limit || 100)))
   const offset = Math.max(0, Number(filters.offset || 0))
   return withTenantTransaction(principal.tenantId, async (client) => {
-    await bootstrapLegacySupplierReservations(client, principal.tenantId)
     const parameters: unknown[] = [principal.tenantId, allowedCompanyIds]
     const conditions = [
       'quote.tenant_id = $1',
       'quote.company_id = any($2::text[])',
     ]
+    if (isRequesterReadPrincipal(principal)) {
+      parameters.push(principal.user.id)
+      conditions.push(requesterOwnDemandExistsSql('demand', `$${parameters.length}`))
+    }
     if (filters.demandId) {
       parameters.push(filters.demandId)
       conditions.push(`quote.demand_id = $${parameters.length}`)
@@ -482,13 +503,15 @@ export async function listGovernedTravelQuotes(
     const countResult = await client.query<{ total: string }>(
       `select count(*)::text as total
        from travel_quotes quote
+       join demands demand
+         on demand.tenant_id = quote.tenant_id and demand.id = quote.demand_id
        where ${where}`,
       parameters,
     )
     parameters.push(limit, offset)
     const rows = await client.query<TravelQuoteListRow>(
       `select quote.id, quote.demand_id, demand.demand_number,
-              quote.company_id, company.name as company_name,
+              quote.company_id, coalesce(company.trade_name, company.legal_name) as company_name,
               quote.employee_id, demand.passenger_name_snapshot,
               quote.provider, quote.provider_quote_id, quote.service_type,
               quote.status, quote.currency, quote.minimum_amount,
@@ -587,11 +610,16 @@ export async function listGovernedTravelReservations(
   const limit = Math.max(1, Math.min(200, Number(filters.limit || 100)))
   const offset = Math.max(0, Number(filters.offset || 0))
   return withTenantTransaction(principal.tenantId, async (client) => {
+    await bootstrapLegacySupplierReservations(client, principal.tenantId)
     const parameters: unknown[] = [principal.tenantId, allowedCompanyIds]
     const conditions = [
       'reservation.tenant_id = $1',
       'reservation.company_id = any($2::text[])',
     ]
+    if (isRequesterReadPrincipal(principal)) {
+      parameters.push(principal.user.id)
+      conditions.push(requesterOwnDemandExistsSql('demand', `$${parameters.length}`))
+    }
     if (filters.demandId) {
       parameters.push(filters.demandId)
       conditions.push(`reservation.demand_id = $${parameters.length}`)
@@ -607,7 +635,7 @@ export async function listGovernedTravelReservations(
         or demand.demand_number ilike $${parameters.length}
         or coalesce(reservation.provider_reference, '') ilike $${parameters.length}
         or reservation.passenger_name_snapshot ilike $${parameters.length}
-        or coalesce(company.name, '') ilike $${parameters.length}
+        or coalesce(company.trade_name, company.legal_name, '') ilike $${parameters.length}
       )`)
     }
     const where = conditions.join(' and ')
@@ -624,7 +652,7 @@ export async function listGovernedTravelReservations(
     parameters.push(limit, offset)
     const rows = await client.query<TravelReservationListRow>(
       `select reservation.id, reservation.demand_id, demand.demand_number,
-              reservation.company_id, company.name as company_name,
+              reservation.company_id, coalesce(company.trade_name, company.legal_name) as company_name,
               reservation.employee_id, reservation.passenger_name_snapshot,
               reservation.provider, reservation.provider_reference,
               reservation.status, reservation.service_type,
@@ -689,7 +717,7 @@ async function bootstrapLegacySupplierReservations(
      )
      select
        'legacy-supplier-' || md5($1::text || ':' || coalesce(nullif(trim(item->>'id'), ''), item::text)),
-       $1,
+       $1::uuid,
        demand.id,
        company.id,
        employee.id,
@@ -761,10 +789,10 @@ async function bootstrapLegacySupplierReservations(
       and company.id = demand.company_id
      left join employees employee
        on employee.tenant_id = storage.tenant_id
-      and employee.id = nullif(trim(item->>'funcionario_id'), '')
+      and employee.id::text = nullif(trim(item->>'funcionario_id'), '')
       and employee.company_id = company.id
       and employee.deleted_at is null
-     where storage.tenant_id = $1
+     where storage.tenant_id = $1::uuid
        and storage.key = 'bbt-supplier-reservations-v1'
        and jsonb_typeof(item) = 'object'
      on conflict do nothing`,
@@ -777,8 +805,10 @@ export async function executeGovernedTravelQuote(
   request: TravelQuoteRequest,
   fallbackIdempotencyKey: string,
   executeProvider: (request: TravelQuoteRequest) => Promise<TravelQuote>,
+  options: GovernedTravelQuoteExecutionOptions = {},
 ): Promise<TravelQuoteExecutionResult> {
-  const preparation = await prepareQuote(principal, request, fallbackIdempotencyKey)
+  const provider = options.provider || PROVIDER
+  const preparation = await prepareQuote(principal, request, fallbackIdempotencyKey, provider)
   if (preparation.kind === 'replay') return { ...preparation.result, replayed: true }
   if (preparation.kind === 'stop') throw preparation.error
   if (preparation.kind === 'approval') {
@@ -815,7 +845,7 @@ export async function executeGovernedTravelQuote(
     throw error
   }
 
-  const completed = await completeQuote(principal, preparation, quote)
+  const completed = await completeQuote(principal, preparation, quote, options.persistOptionDetails)
   return { ...completed, replayed: false }
 }
 
@@ -1376,6 +1406,7 @@ async function prepareQuote(
   principal: RequestPrincipal,
   request: TravelQuoteRequest,
   fallbackIdempotencyKey: string,
+  provider: IntegrationProvider = PROVIDER,
 ): Promise<QuotePreparation> {
   const idempotencyKey = normalizedIdempotencyKey(request.idempotencyKey || fallbackIdempotencyKey)
   return withTenantTransaction(principal.tenantId, async (client) => {
@@ -1388,7 +1419,9 @@ async function prepareQuote(
       throw new TravelGovernanceError('STALE_LIFECYCLE_VERSION', 'A demanda foi alterada por outro usuario. Atualize a pagina.', 409)
     }
 
-    const providerCompanyId = await resolveProviderCompanyId(client, principal.tenantId, demand.company_id)
+    const providerCompanyId = provider === PROVIDER
+      ? await resolveProviderCompanyId(client, principal.tenantId, demand.company_id)
+      : null
     const providerRequest: TravelQuoteRequest = {
       ...request,
       demandId: demand.id,
@@ -1402,7 +1435,7 @@ async function prepareQuote(
       operation: 'quote',
       request: sanitizePayload(providerRequest),
     })
-    const existing = await lockProviderOperation(client, principal.tenantId, 'quote', idempotencyKey)
+    const existing = await lockProviderOperation(client, principal.tenantId, 'quote', idempotencyKey, provider)
     if (existing) {
       assertMatchingOperation(existing, requestHash)
       const replay = replayedQuoteResult(existing)
@@ -1492,12 +1525,12 @@ async function prepareQuote(
        on conflict (tenant_id, provider, operation_type, idempotency_key) do nothing
        returning id, lease_token`,
       [
-        operationId, principal.tenantId, demand.id, demand.company_id, PROVIDER,
+        operationId, principal.tenantId, demand.id, demand.company_id, provider,
         idempotencyKey, requestHash, JSON.stringify(sanitizePayload(providerRequest)), principal.user.id,
       ],
     )
     if (!inserted.rowCount) {
-      const concurrent = await lockProviderOperation(client, principal.tenantId, 'quote', idempotencyKey)
+      const concurrent = await lockProviderOperation(client, principal.tenantId, 'quote', idempotencyKey, provider)
       if (!concurrent) throw new TravelGovernanceError('TRAVEL_OPERATION_CONFLICT', 'Conflito ao registrar a operacao.', 409)
       assertMatchingOperation(concurrent, requestHash)
       throwPendingOrFailedOperation(concurrent)
@@ -1745,6 +1778,7 @@ async function completeQuote(
   principal: RequestPrincipal,
   preparation: ReadyQuotePreparation,
   quote: TravelQuote,
+  persistOptionDetails?: GovernedTravelQuoteExecutionOptions['persistOptionDetails'],
 ): Promise<TravelQuoteExecutionResult> {
   return withTenantTransaction(principal.tenantId, async (client) => {
     const operation = await lockOperationByLease(client, principal.tenantId, preparation.operationId, preparation.leaseToken)
@@ -1782,8 +1816,9 @@ async function completeQuote(
       ],
     )
     const databaseQuoteId = quoteResult.rows[0].id
+    const optionIdsByProviderId = new Map<string, string>()
     for (const option of quote.options) {
-      await client.query(
+      const optionResult = await client.query<{ id: string }>(
         `insert into travel_quote_options (
            tenant_id, quote_id, provider_option_id, supplier_name, title, subtitle,
            amount, currency, refundable, policy_status, starts_at, ends_at, city,
@@ -1802,7 +1837,8 @@ async function completeQuote(
            ends_at = excluded.ends_at,
            city = excluded.city,
            metadata = excluded.metadata,
-           provider_payload = excluded.provider_payload`,
+           provider_payload = excluded.provider_payload
+         returning id`,
         [
           principal.tenantId, databaseQuoteId, option.id, option.supplierName || null,
           option.title, option.subtitle || null, finiteOrNull(option.price), option.currency || 'BRL',
@@ -1811,6 +1847,18 @@ async function completeQuote(
           JSON.stringify(sanitizePayload(option.raw ?? {})),
         ],
       )
+      optionIdsByProviderId.set(option.id, optionResult.rows[0].id)
+    }
+    if (persistOptionDetails) {
+      await persistOptionDetails({
+        client,
+        principal,
+        demandId: demand.id,
+        companyId: demand.company_id,
+        databaseQuoteId,
+        optionIdsByProviderId,
+        quote,
+      })
     }
 
     if (demand.lifecycle_status === 'quoting') {
@@ -2395,9 +2443,16 @@ async function advanceDemandToQuotation(
       idempotencyKey: `${idempotencyKey}:submit`, requirements, metadata: { requestHash },
     })
   }
-  if (demand.lifecycle_status === 'submitted' || demand.lifecycle_status === 'pending_merit_approval') {
+  if (demand.lifecycle_status === 'submitted') {
+    const command: TravelLifecycleCommand = requirements.approvalInstanceId
+      ? 'approve_merit'
+      : 'accept_for_quotation'
+    demand = await persistTransition(client, principal, demand, command, {
+      idempotencyKey: `${idempotencyKey}:${command}`, requirements, metadata: { requestHash },
+    })
+  } else if (demand.lifecycle_status === 'pending_merit_approval') {
     demand = await persistTransition(client, principal, demand, 'approve_merit', {
-      idempotencyKey: `${idempotencyKey}:merit`, requirements, metadata: { requestHash },
+      idempotencyKey: `${idempotencyKey}:approve-merit`, requirements, metadata: { requestHash },
     })
   }
   if (['approved_for_quotation', 'pending_choice', 'failed'].includes(demand.lifecycle_status)) {
@@ -3201,12 +3256,13 @@ async function lockProviderOperation(
   tenantId: string,
   operationType: string,
   idempotencyKey: string,
+  provider: IntegrationProvider = PROVIDER,
 ): Promise<ProviderOperationRow | null> {
   const result = await client.query<ProviderOperationRow>(
     `select * from travel_provider_operations
      where tenant_id = $1 and provider = $2 and operation_type = $3 and idempotency_key = $4
      for update`,
-    [tenantId, PROVIDER, operationType, idempotencyKey],
+    [tenantId, provider, operationType, idempotencyKey],
   )
   return result.rows[0] || null
 }

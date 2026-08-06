@@ -1,5 +1,6 @@
 import { governanceJsonBody, requestGovernanceJson } from '@/lib/governance-client'
 import type { ApprovalWorkflowSnapshot } from '@/lib/approvals/types'
+import type { ApprovalSubjectPresentation } from '@/lib/approvals/subject-presentation'
 
 export interface ApprovalInstanceSummary {
   id: string
@@ -11,6 +12,13 @@ export interface ApprovalInstanceSummary {
   companyId: string
   companyName: string
   employeeId: string | null
+  demandNumber: string | null
+  serviceType: string | null
+  travelerName: string | null
+  requesterName: string | null
+  travelStartDate: string | null
+  travelEndDate: string | null
+  destination: string | null
   type: string
   status: 'pending' | 'in_progress' | 'approved' | 'rejected' | 'cancelled' | 'expired' | 'failed' | 'superseded'
   version: number
@@ -22,23 +30,33 @@ export interface ApprovalInstanceSummary {
 }
 
 export interface ApprovalAssignmentDetail {
-  id: string
-  userId: string | null
+  id?: string
+  userId?: string | null
   userName: string | null
-  userEmail: string | null
+  userEmail?: string | null
   status: string
-  source: string
-  delegatedFromUserId: string | null
+  source?: string
+  delegatedFromUserId?: string | null
   assignedAt: string
   respondedAt: string | null
 }
 
-export interface ApprovalInstanceDetail extends ApprovalInstanceSummary {
+export interface ApprovalInstanceDetail extends Omit<
+  ApprovalInstanceSummary,
+  'workflowId' | 'workflowVersionId' | 'reservationId' | 'companyId' | 'employeeId' | 'version'
+> {
+  workflowId?: string
+  workflowVersionId?: string
+  reservationId?: string | null
+  companyId?: string
+  employeeId?: string | null
+  version?: number
   subject: Record<string, unknown>
-  workflow: ApprovalWorkflowSnapshot
+  presentation?: ApprovalSubjectPresentation
+  workflow: ApprovalWorkflowSnapshot | null
   steps: Array<{
-    id: string
-    nodeId: string
+    id?: string
+    nodeId?: string
     nodeName: string
     approvalKind: string | null
     stepNumber: number
@@ -46,7 +64,7 @@ export interface ApprovalInstanceDetail extends ApprovalInstanceSummary {
     completionMode: string
     quorum: number | null
     dueAt: string | null
-    version: number
+    version?: number
     assignments: ApprovalAssignmentDetail[]
   }>
   decisions: Array<Record<string, unknown>>

@@ -669,8 +669,15 @@ export interface DetalhesAereo {
 
 export interface DetalhesHotel {
   hotel_id?: number
+  /** Preferencias ordenadas informadas pelo solicitante (maximo de 10). */
+  preferred_hotel_ids?: string[]
+  /** Compatibilidade com demandas anteriores; espelha o primeiro item. */
+  preferred_hotel_id?: string
   hotel_nome?: string
   cidade?: string
+  country_id?: string
+  subdivision_id?: string
+  city_id?: string
   data_checkin?: string
   data_checkout?: string
   num_hospedes?: number
@@ -678,6 +685,28 @@ export interface DetalhesHotel {
   noites?: number
   tarifa_unitaria?: number
   localizador?: string
+  rooms?: HotelDemandRoom[]
+  purpose?: string
+  accessibility_notes?: string
+  preferences?: Record<string, unknown>
+  needs_review?: boolean
+}
+
+export interface HotelDemandGuest {
+  slot_index: number
+  role: 'responsible' | 'companion' | 'guest'
+  employee_id?: string
+  name: string
+  email?: string
+  phone?: string
+  is_external: boolean
+}
+
+export interface HotelDemandRoom {
+  client_id: string
+  occupancy_code: 'single' | 'couple' | 'double' | 'twin' | 'triple' | 'quadruple' | 'family'
+  notes?: string
+  guests: HotelDemandGuest[]
 }
 
 export interface DetalhesCarro {
@@ -705,6 +734,7 @@ export interface Atendimento {
   /** Identificador operacional legível usado para vincular demanda, cotação, reserva, emissão e voucher. */
   serial_os?: string
   empresa_id: string
+  solicitante_id?: string
   funcionario_id: string | null
   passageiro_nome: string
   tipo_servico: TipoServico
@@ -849,9 +879,52 @@ export function aplicarConfigEmpresa(
 // Diferente do "Voucher" antigo (que é só anexo de PDF/imagem em IndexedDB)
 // ============================================================
 
-export type VoucherTipo = 'Hotel' | 'Aéreo' | 'Carro' | 'Pacote'
+export type VoucherTipo =
+  | 'Hotel'
+  | 'Aéreo'
+  | 'Carro'
+  | 'Pacote'
+  | 'Rodoviário'
+  | 'Ferroviário'
+  | 'Transfer'
+  | 'Seguro'
+  | 'Lazer'
+  | 'Marítimo'
+  | 'Serviço'
 export type VoucherStatus = 'rascunho' | 'emitido' | 'confirmado' | 'cancelado'
 export type VoucherOrigem = 'criado' | 'importado' | 'pdf' | 'ia'
+export type VoucherPresentationSource = 'company' | 'group' | 'system'
+
+export interface VoucherPresentationSettings {
+  showConfirmedValues: boolean
+  showCancellationTerms: boolean
+  showAdministrativeData: boolean
+  sources: {
+    showConfirmedValues: VoucherPresentationSource
+    showCancellationTerms: VoucherPresentationSource
+    showAdministrativeData: VoucherPresentationSource
+  }
+  groupId: string | null
+}
+
+export interface VoucherHospedeDetalhe {
+  nome: string
+  papel?: string
+  principal?: boolean
+  codigo?: string
+  documento?: string
+  email?: string
+  telefone?: string
+  quarto?: number
+}
+
+export interface VoucherQuartoDetalhe {
+  numero: number
+  acomodacao?: string
+  categoria?: string
+  regime?: string
+  hospedes?: string[]
+}
 
 export interface VoucherEmitido {
   id: string                          // ex: "H-26262"
@@ -864,24 +937,54 @@ export interface VoucherEmitido {
   passageiro_nome: string             // pode ter mais de um (usar passageiros[])
   passageiros?: string[]              // múltiplos hóspedes
   cpf?: string
+  hospedes_detalhes?: VoucherHospedeDetalhe[]
 
-  // Fornecedor/Hotel
+  // Contexto corporativo e aprovação
+  empresa_nome?: string
+  empresa_documento?: string
+  unidade_negocio?: string
+  departamento?: string
+  solicitante_nome?: string
+  solicitante_email?: string
+  autorizadores?: string[]
+  autorizado_em?: string
+  data_solicitacao?: string
+  reserva_id?: string
+  data_reserva?: string
+
+  // Fornecedor operacional que efetivou a reserva
   fornecedor_nome: string             // ex: "STRASSEN HOTEL"
+  fornecedor_codigo?: string
   fornecedor_endereco?: string
   fornecedor_cidade?: string
   fornecedor_telefone?: string
   fornecedor_email?: string
+  canal_reserva?: string
 
   // Hotel-specific
+  hotel_nome?: string
+  hotel_endereco?: string
+  hotel_cidade?: string
+  hotel_telefone?: string
+  hotel_email?: string
   hotel_categoria?: string            // STANDARD, SUPERIOR
   tipo_apartamento?: string           // INDIVIDUAL, DUPLO, TRIPLO
+  quartos?: VoucherQuartoDetalhe[]
   num_apartamentos?: number
   num_hospedes?: number
   data_checkin?: string
   data_checkout?: string
+  checkin_em?: string
+  checkout_em?: string
   noites?: number
   regime?: string                     // CAFÉ DA MANHÃ, ALL INCLUSIVE
   forma_pagamento_voucher?: string    // FATURAR SOMENTE DIÁRIAS, FATURAR TUDO
+  referencia_pagamento?: string
+  condicoes_pagamento?: string
+  prazo_cancelamento?: string
+  politica_cancelamento?: string
+  politica_no_show?: string
+  reembolsavel?: boolean
 
   // Aéreo-specific
   cia_aerea?: string
@@ -908,9 +1011,12 @@ export interface VoucherEmitido {
 
   // Financeiro
   valor_diaria?: number
+  taxas_diaria?: number
+  taxa_servico?: number
   tarifa_total?: number
   taxas?: number
   total: number
+  moeda?: string
   centro_custo?: string
   numero_solicitacao?: string
 
@@ -921,6 +1027,9 @@ export interface VoucherEmitido {
   importado_em?: string
   fingerprint?: string
 
+  // Configuracao efetiva calculada no servidor; nunca e persistida como dado do voucher.
+  presentation_settings?: VoucherPresentationSettings
+
   // Auditoria
   emitido_por_user_id: string
   emitido_por_user_name: string
@@ -930,7 +1039,17 @@ export interface VoucherEmitido {
 }
 
 export const VOUCHER_PREFIX: Record<VoucherTipo, string> = {
-  Hotel: 'H', Aéreo: 'A', Carro: 'C', Pacote: 'P',
+  Hotel: 'H',
+  Aéreo: 'A',
+  Carro: 'C',
+  Pacote: 'P',
+  Rodoviário: 'R',
+  Ferroviário: 'F',
+  Transfer: 'T',
+  Seguro: 'S',
+  Lazer: 'L',
+  Marítimo: 'M',
+  Serviço: 'O',
 }
 
 export function gerarNumeroVoucher(tipo: VoucherTipo, lastNumero: number): string {

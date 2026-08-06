@@ -21,7 +21,7 @@ describe('tenant reset policy', () => {
     ])
 
     expect(new Set(migrationTables)).toEqual(classifiedTables)
-    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(143)
+    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(164)
     expect(TENANT_RESET_PRESERVED_TABLES).toHaveLength(17)
   })
 

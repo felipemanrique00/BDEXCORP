@@ -47,6 +47,11 @@ const TRANSITIONS: Record<TravelLifecycleCommand, TransitionDefinition> = {
       )
     },
   },
+  accept_for_quotation: {
+    from: ['submitted'],
+    to: 'approved_for_quotation',
+    validate: requirePolicy,
+  },
   start_quotation: { from: ['approved_for_quotation', 'pending_choice', 'failed'], to: 'quoting', validate: requirePolicy },
   complete_quotation: { from: ['quoting'], to: 'pending_choice' },
   select_offer: {
@@ -70,6 +75,15 @@ const TRANSITIONS: Record<TravelLifecycleCommand, TransitionDefinition> = {
       requireTrue(requirements.approvalsSatisfied, 'APPROVAL_PENDING', 'A aprovacao de custo ainda nao foi concluida.')
       requireTrue(requirements.budgetSatisfied, 'BUDGET_REQUIRED', 'O orcamento precisa estar validado.')
     },
+  },
+  return_to_choice: {
+    from: ['pending_cost_approval'],
+    to: 'pending_choice',
+    validate: (requirements) => requireTrue(
+      requirements.humanConfirmed,
+      'HUMAN_CONFIRMATION_REQUIRED',
+      'Confirme o retorno da demanda para uma nova escolha.',
+    ),
   },
   start_reservation: {
     from: ['approved'],

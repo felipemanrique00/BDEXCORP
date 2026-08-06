@@ -41,6 +41,7 @@ import { sincronizarTudoOperacional } from '@/lib/operational-sync'
 import { useFiltroPersistente } from '@/lib/filtros'
 import { formatarValor, formatarData } from '@/lib/normalizers'
 import { Modal } from '@/components/ui/modal'
+import { DateInput } from '@/components/ui/date-input'
 import { toast } from 'sonner'
 import {
   Wallet, ArrowDownCircle, ArrowUpCircle, AlertTriangle, TrendingUp,
@@ -595,12 +596,12 @@ export default function FinanceiroPage() {
           </select>
         </div>
         <div>
-          <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Desde</label>
-          <input type="date" value={filtro.desde || ''} onChange={(e) => setFiltro({ desde: e.target.value })} className="bbt-input text-sm" />
+          <label htmlFor="financeiro-filtro-desde" className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Desde</label>
+          <DateInput id="financeiro-filtro-desde" value={filtro.desde || ''} onChange={(e) => setFiltro({ desde: e.target.value })} className="text-sm" />
         </div>
         <div>
-          <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Até</label>
-          <input type="date" value={filtro.ate || ''} onChange={(e) => setFiltro({ ate: e.target.value })} className="bbt-input text-sm" />
+          <label htmlFor="financeiro-filtro-ate" className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Até</label>
+          <DateInput id="financeiro-filtro-ate" value={filtro.ate || ''} onChange={(e) => setFiltro({ ate: e.target.value })} className="text-sm" />
         </div>
         <div>
           <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Status</label>
@@ -926,16 +927,16 @@ export default function FinanceiroPage() {
             <p className="text-sm text-slate-500">Agrupa contas a receber do periodo para emissao e acompanhamento da cobranca.</p>
             <EmpresaCarteiraSelect empresas={empresasNoContexto} value={empresaSelecionadaId} onChange={(empresa_id) => setFiltro({ empresa_id })} />
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Inicio</label>
-              <input type="date" value={periodoFatura.inicio} onChange={(e) => setPeriodoFatura({ ...periodoFatura, inicio: e.target.value })} className="bbt-input" />
+              <label htmlFor="fatura-periodo-inicio" className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Inicio</label>
+              <DateInput id="fatura-periodo-inicio" value={periodoFatura.inicio} onChange={(e) => setPeriodoFatura({ ...periodoFatura, inicio: e.target.value })} />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Fim</label>
-              <input type="date" value={periodoFatura.fim} onChange={(e) => setPeriodoFatura({ ...periodoFatura, fim: e.target.value })} className="bbt-input" />
+              <label htmlFor="fatura-periodo-fim" className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Fim</label>
+              <DateInput id="fatura-periodo-fim" value={periodoFatura.fim} onChange={(e) => setPeriodoFatura({ ...periodoFatura, fim: e.target.value })} />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Vencimento</label>
-              <input type="date" value={periodoFatura.vencimento} onChange={(e) => setPeriodoFatura({ ...periodoFatura, vencimento: e.target.value })} className="bbt-input" />
+              <label htmlFor="fatura-periodo-vencimento" className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Vencimento</label>
+              <DateInput id="fatura-periodo-vencimento" value={periodoFatura.vencimento} onChange={(e) => setPeriodoFatura({ ...periodoFatura, vencimento: e.target.value })} />
             </div>
             <button onClick={gerarFatura} className="bbt-button-primary w-full">
               <ReceiptText className="w-4 h-4" /> Gerar/atualizar fatura
@@ -1070,8 +1071,8 @@ function PagamentoForm({ lancamento, userId, userName, onSucesso }: any) {
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div>
-          <label className="text-xs uppercase tracking-wider text-slate-500">Data</label>
-          <input type="date" value={data} onChange={(e) => setData(e.target.value)} className="bbt-input w-full" />
+          <label htmlFor="pagamento-data" className="text-xs uppercase tracking-wider text-slate-500">Data</label>
+          <DateInput id="pagamento-data" value={data} onChange={(e) => setData(e.target.value)} className="w-full" />
         </div>
         <div>
           <label className="text-xs uppercase tracking-wider text-slate-500">Forma</label>

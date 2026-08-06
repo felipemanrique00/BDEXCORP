@@ -1,6 +1,8 @@
 'use client'
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { demandFocusHref } from '@/lib/demands/focus-query'
+import { approvalPolicyLabel } from '@/lib/approvals/subject-presentation'
 import { toast } from 'sonner'
 import {
   CheckCircle2, XCircle, Clock, AlertTriangle,
@@ -56,6 +58,10 @@ export function LegacyApprovalsPanel() {
   }, [filtro, includesCompany, reload])
 
   const empresaById = useMemo(() => new Map(empresasNoContexto.map((e) => [e.id, e])), [empresasNoContexto])
+  const demandaSelecionada = useMemo(
+    () => selecionada ? getAtendimentoById(selecionada.atendimento_id) : null,
+    [selecionada, reload],
+  )
 
   function aprovar(s: SolicitacaoAprovacao) {
     if (!user) return
@@ -169,6 +175,7 @@ export function LegacyApprovalsPanel() {
           <div className="divide-y divide-bbt-gray-100 dark:divide-slate-700">
             {solicitacoes.map((s) => {
               const empresa = empresaById.get(s.empresa_id)
+              const demanda = getAtendimentoById(s.atendimento_id)
               const passoAtivo = s.passos.find((p) => p.status === 'pendente')
               return (
                 <button
@@ -193,7 +200,9 @@ export function LegacyApprovalsPanel() {
                     <div className="mt-1 font-semibold text-bbt-text dark:text-white truncate">
                       {empresa?.nome || 'Empresa não identificada'}
                       <span className="font-normal text-slate-500"> · </span>
-                      <span className="font-mono text-slate-500">{s.atendimento_id.slice(-8)}</span>
+                      <span className="font-normal text-slate-500">
+                        {demanda?.serial_os || demanda?.numero_solicitacao || 'Demanda vinculada'}
+                      </span>
                     </div>
                     <div className="text-xs text-slate-500 truncate">
                       {s.motivo_aprovacao} · solicitado por {s.solicitado_por_nome}
@@ -227,7 +236,7 @@ export function LegacyApprovalsPanel() {
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="text-lg font-bold text-bbt-primary dark:text-white">
-                  Solicitação {selecionada.id.slice(-8)}
+                  {demandaSelecionada?.serial_os || demandaSelecionada?.numero_solicitacao || 'Solicitação para aprovação'}
                 </h2>
                 <p className="text-sm text-slate-500">{selecionada.motivo_aprovacao}</p>
               </div>
@@ -250,10 +259,10 @@ export function LegacyApprovalsPanel() {
               <div className="flex items-center justify-between text-sm">
                 <span className="text-slate-500">Atendimento</span>
                 <Link
-                  href={`/dashboard/demandas?focus=${selecionada.atendimento_id}`}
-                  className="font-mono text-xs text-bbt-accent hover:underline"
+                  href={demandFocusHref(selecionada.atendimento_id)}
+                  className="text-xs font-semibold text-bbt-accent hover:underline"
                 >
-                  {selecionada.atendimento_id.slice(-10)} →
+                  Abrir demanda →
                 </Link>
               </div>
               <div className="flex items-center justify-between text-sm">
@@ -275,7 +284,7 @@ export function LegacyApprovalsPanel() {
                   {selecionada.violacoes_codigo.map((c) => (
                     <li key={c} className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-300">
                       <AlertTriangle className="w-4 h-4 shrink-0" />
-                      <code className="text-xs">{c}</code>
+                      <span className="text-xs">{approvalPolicyLabel(c)}</span>
                     </li>
                   ))}
                 </ul>

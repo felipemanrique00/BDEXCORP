@@ -33,6 +33,7 @@
 
 import { AI_SHORT_NAME } from '@/lib/branding'
 import { canManageUserAccess, hasPermission } from '@/lib/auth'
+import { isRequesterUser } from '@/lib/user-access-kind'
 import type { User } from '@/types'
 
 export interface SidebarMenuItem {
@@ -88,6 +89,7 @@ export function buildSidebarMenu({
   const podeGerenciarIa = hasPermission(user, 'gerenciar_ia')
   const podeVerInteligencia = hasPermission(user, 'ver_inteligencia')
   const podeAcessarPortalViajante = hasPermission(user, 'acessar_portal_viajante')
+  const isRequester = isRequesterUser(user)
 
   return [
     {
@@ -109,19 +111,19 @@ export function buildSidebarMenu({
           icon: Navigation,
           hidden: !podeAcessarPortalViajante,
         },
-        { href: '/dashboard/caixa-entrada', label: 'Entrada de demandas', description: 'E-mail, áudio, PDF e texto', icon: Inbox, badge: naoLidas || undefined, hidden: !podeCriarDemandas },
+        { href: '/dashboard/caixa-entrada', label: 'Entrada de demandas', description: 'E-mail, áudio, PDF e texto', icon: Inbox, badge: naoLidas || undefined, hidden: isRequester || !podeCriarDemandas },
         {
           href: '/dashboard/demandas',
           label: 'Fila de demandas',
           description: 'Triagem, SLA, status e alertas',
           icon: Briefcase,
           badge: alertasHoje || novasDemandas || undefined,
-          hidden: !podeVerDemandas,
+          hidden: isRequester || !podeVerDemandas,
         },
-        { href: '/dashboard/reservas', label: 'Reservas e cotações', description: 'Fornecedores, APIs e portais', icon: CalendarCheck, hidden: !podeVerReservas },
-        { href: '/dashboard/vouchers', label: 'Vouchers emitidos', description: 'Documentos emitidos e enviados', icon: FileStack, hidden: !podeVerVouchers },
+        { href: '/dashboard/reservas', label: 'Reservas e cotações', description: 'Fornecedores, APIs e portais', icon: CalendarCheck, hidden: isRequester || !podeVerReservas },
+        { href: '/dashboard/vouchers', label: 'Vouchers emitidos', description: 'Documentos emitidos e enviados', icon: FileStack, hidden: isRequester || !podeVerVouchers },
         { href: '/dashboard/aprovacoes', label: 'Aprovações', description: 'Workflow multinível de viagens', icon: ShieldCheck, hidden: !podeAprovar },
-        { href: '/dashboard/risco', label: 'Centro de risco', description: 'Duty of care e viajantes em campo', icon: ShieldAlert, hidden: !podeVerDemandas },
+        { href: '/dashboard/risco', label: 'Centro de risco', description: 'Duty of care e viajantes em campo', icon: ShieldAlert, hidden: isRequester || !podeVerDemandas },
         { href: '/dashboard/produtividade', label: 'Equipe e produtividade', description: 'Agentes, carga, fila e SLA', icon: BarChart3, hidden: !podeProdutividade },
         { href: '/dashboard/ia', label: `Central ${AI_SHORT_NAME}`, description: 'Assistente, canais e agente operacional', icon: Bot, activeWhen: ['/dashboard/ia', '/dashboard/ia-chat', '/dashboard/ia-operacional', '/dashboard/assistente'], hidden: !podeUsarIa },
       ],
@@ -131,9 +133,9 @@ export function buildSidebarMenu({
       label: 'Integrações',
       itens: [
         { href: '/dashboard/wintour', label: 'Wintour', description: 'Importação diária de vendas', icon: Database, hidden: !podeImportar },
-        { href: '/dashboard/reservas', label: 'Conector Tech Travel', description: 'Aéreo, hotel, locação e OS', icon: Hotel, hidden: !podeGerenciarIntegracoes },
+        { href: '/dashboard/reservas', label: 'Conector Tech Travel', description: 'Aéreo, hotel, locação e OS', icon: Hotel, hidden: isRequester || !podeGerenciarIntegracoes },
         { href: '/dashboard/importar', label: 'Importações gerais', description: 'Planilhas, XML, PDF e bases gerais', icon: Upload, hidden: !podeImportar },
-        { href: '/dashboard/emissoes', label: 'Emissões e importações', description: 'Tech Travel, XLS, XLSX e PDF', icon: FileStack, hidden: !podeVerEmissoes },
+        { href: '/dashboard/emissoes', label: 'Emissões e importações', description: 'Tech Travel, XLS, XLSX e PDF', icon: FileStack, hidden: isRequester || !podeVerEmissoes },
       ],
     },
     {
@@ -153,7 +155,8 @@ export function buildSidebarMenu({
         { href: '/dashboard/empresas', label: 'Empresas', description: 'Clientes, políticas, acessos e contratos', icon: Building2, hidden: !podeVerEmpresas && !podeCadastrarEmpresas },
         { href: '/dashboard/grupos', label: 'Grupos / holdings', description: 'Holdings, grupos econômicos e vínculos', icon: Network, hidden: !hasPermission(user, 'gerenciar_empresas_grupo') },
         { href: '/dashboard/funcionarios', label: 'Viajantes', description: 'Funcionários, documentos e perfis', icon: Users, hidden: !podeVerFuncionarios },
-        { href: '/dashboard/hoteis', label: 'Hotéis', description: 'Fornecedores e tarifas negociadas', icon: Hotel, hidden: !hasPermission(user, 'cadastrar_hoteis') && !podeVerReservas },
+        { href: '/dashboard/fornecedores', label: 'Fornecedores', description: 'Cadastro comercial e base geográfica', icon: Building2, hidden: isRequester || (!hasPermission(user, 'cadastrar_hoteis') && !podeVerReservas) },
+        { href: '/dashboard/hoteis/catalogo', label: 'Hotéis', description: 'Propriedades, fornecedores e localidades', icon: Hotel, hidden: isRequester || (!hasPermission(user, 'cadastrar_hoteis') && !podeVerReservas) },
       ],
     },
     {

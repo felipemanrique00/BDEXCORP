@@ -7,7 +7,7 @@ import type { TravelLifecycleRecord } from '@/lib/travel-lifecycle'
 
 describe('travel lifecycle persistence', () => {
   it('configura o comando e a idempotencia na transacao antes de atualizar a demanda', async () => {
-    const query = vi.fn(async (text: string) => {
+    const query = vi.fn(async (text: string, _values?: unknown[]) => {
       if (text.includes('select command from travel_state_events')) {
         return { rows: [], rowCount: 0 }
       }
@@ -42,6 +42,11 @@ describe('travel lifecycle persistence', () => {
       ['submit', 'demand-a:submit'],
     )
     expect(query.mock.calls[2]?.[0]).toContain('update demands set')
+    expect(query.mock.calls[2]?.[0]).toContain('status = $11')
+    expect(query.mock.calls[2]?.[0]).toContain('version = version + 1')
+    expect(query.mock.calls[2]?.[0]).toContain("metadata -> 'legacySnapshot'")
+    expect(query.mock.calls[2]?.[0]).toContain("'finalizado_em', $6::timestamptz")
+    expect(query.mock.calls[2]?.[1]).toEqual(expect.arrayContaining(['submitted', 'pendente']))
   })
 })
 

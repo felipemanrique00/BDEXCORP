@@ -7,6 +7,7 @@ import type { RequestPrincipal } from '@/lib/server/request-context'
 import { getTenantDataSummary } from '@/lib/server/system-data-summary-service'
 import {
   getTravelerPortalOverview,
+  getTravelerVoucherDownloadDescriptor,
   getTravelerVoucherFileId,
 } from '@/lib/server/traveler-portal-service'
 import { PERMISSOES_PADRAO_POR_PERFIL, type Permissoes } from '@/types'
@@ -220,6 +221,54 @@ describeWithDatabase('PostgreSQL traveler portal', () => {
 
     await expect(getTravelerVoucherFileId(principal, voucherLinked)).resolves.toBe(fileLinked)
     await expect(getTravelerVoucherFileId(principal, voucherDenied)).resolves.toBeNull()
+  })
+
+  it('resolves current presentation rules before exposing a persisted voucher artifact', async () => {
+    await tenantTransaction(pool, tenantId, async (client) => {
+      await client.query(
+        `update vouchers
+         set metadata = $3::jsonb
+         where tenant_id = $1 and id = $2`,
+        [
+          tenantId,
+          voucherLinked,
+          JSON.stringify({
+            numero: '1001',
+            tipo: 'Hotel',
+            passageiro_nome: 'Pessoa Vinculada',
+            fornecedor_nome: 'Hotel Portal Teste',
+            hotel_nome: 'Hotel Portal Teste',
+            total: 999.99,
+            moeda: 'BRL',
+            emitido_por_user_id: userId,
+            emitido_por_user_name: 'Operador Interno',
+          }),
+        ],
+      )
+      await client.query(
+        `insert into voucher_presentation_settings (
+           tenant_id, scope_type, company_id,
+           show_confirmed_values, show_cancellation_terms, show_administrative_data,
+           created_by, updated_by
+         ) values ($1, 'company', $2, false, false, false, $3, $3)`,
+        [tenantId, companyAllowed, userId],
+      )
+    })
+
+    const descriptor = await getTravelerVoucherDownloadDescriptor(principal, voucherLinked)
+    expect(descriptor).toEqual(expect.objectContaining({
+      fileId: fileLinked,
+      presentationSettings: expect.objectContaining({
+        showConfirmedValues: false,
+        showCancellationTerms: false,
+        showAdministrativeData: false,
+      }),
+      voucher: expect.objectContaining({
+        id: voucherLinked,
+        hotel_nome: 'Hotel Portal Teste',
+        presentation_settings: expect.objectContaining({ showConfirmedValues: false }),
+      }),
+    }))
   })
 
   it('summarizes reservations using the current relational schema', async () => {

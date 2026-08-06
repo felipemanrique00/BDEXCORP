@@ -42,6 +42,7 @@ import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import type { Atendimento, Empresa, VoucherEmitido } from '@/types'
 import type { TechEmissionRecord, TechEmissionsReport } from '@/lib/integrations/tech/tech-emissions-types'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import { DateInput } from '@/components/ui/date-input'
 
 const SKIP_TECH_CLIENT = '__skip__'
 
@@ -613,14 +614,14 @@ export default function ImportarEmissoesPage() {
                 </div>
               </div>
               <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-[minmax(150px,1fr)_minmax(150px,1fr)_auto] lg:w-auto">
-                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
-                  Início
-                  <input aria-label="Data inicial do relatório Tech Travel" type="date" value={techStartDate} onChange={(event) => setTechStartDate(event.target.value)} className="bbt-input mt-1 w-full" />
-                </label>
-                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
-                  Fim
-                  <input aria-label="Data final do relatório Tech Travel" type="date" value={techEndDate} onChange={(event) => setTechEndDate(event.target.value)} className="bbt-input mt-1 w-full" />
-                </label>
+                <div className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  <label htmlFor="tech-travel-start-date">Início</label>
+                  <DateInput id="tech-travel-start-date" aria-label="Data inicial do relatório Tech Travel" value={techStartDate} onChange={(event) => setTechStartDate(event.target.value)} className="bbt-input mt-1 w-full" />
+                </div>
+                <div className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  <label htmlFor="tech-travel-end-date">Fim</label>
+                  <DateInput id="tech-travel-end-date" aria-label="Data final do relatório Tech Travel" value={techEndDate} onChange={(event) => setTechEndDate(event.target.value)} className="bbt-input mt-1 w-full" />
+                </div>
                 <button type="button" onClick={consultarTechTravel} disabled={techLoading} className="bbt-button-primary flex h-10 items-center justify-center gap-2 self-end disabled:cursor-not-allowed disabled:opacity-60">
                   {techLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CloudDownload className="h-4 w-4" />}
                   Consultar

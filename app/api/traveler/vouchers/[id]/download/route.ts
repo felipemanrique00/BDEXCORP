@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server'
 
 import { guardApiRequest, runInApiGuardContext } from '@/lib/security/api-guard'
+import { renderVoucherHtml } from '@/lib/assistant/pdf'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import { readStoredFile, StoredFileNotFoundError } from '@/lib/server/file-storage'
 import { logError } from '@/lib/server/logger'
-import { getTravelerVoucherFileId } from '@/lib/server/traveler-portal-service'
+import { getTravelerVoucherDownloadDescriptor } from '@/lib/server/traveler-portal-service'
+import { requiresSanitizedVoucherRendering } from '@/lib/vouchers/presentation'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -31,15 +33,45 @@ export async function GET(
       return notFound(guard.requestId)
     }
 
-    const fileId = await runInApiGuardContext(
+    const descriptor = await runInApiGuardContext(
       guard,
-      () => getTravelerVoucherFileId(guard.principal!, id),
+      () => getTravelerVoucherDownloadDescriptor(guard.principal!, id),
     )
-    if (!fileId) return notFound(guard.requestId)
+    if (!descriptor) return notFound(guard.requestId)
+
+    if (requiresSanitizedVoucherRendering(descriptor.presentationSettings)) {
+      if (!descriptor.voucher) return sanitizedArtifactUnavailable(guard.requestId)
+      const html = renderVoucherHtml(descriptor.voucher, true)
+      const bytes = new TextEncoder().encode(html)
+      await runInApiGuardContext(
+        guard,
+        () => writeAuditEvent({
+          action: 'traveler.voucher.download',
+          result: 'success',
+          entityType: 'voucher',
+          entityId: id,
+          metadata: { presentation: 'sanitized-html' },
+        }),
+      )
+      return new NextResponse(bytes, {
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': String(bytes.byteLength),
+          'Content-Disposition': contentDisposition(`voucher-${id}.html`),
+          'Cache-Control': 'no-store, private',
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+          'X-Content-Type-Options': 'nosniff',
+          'X-Request-Id': guard.requestId,
+          'X-Voucher-Presentation': 'sanitized',
+        },
+      })
+    }
+
+    if (!descriptor.fileId) return notFound(guard.requestId)
 
     const file = await runInApiGuardContext(
       guard,
-      () => readStoredFile(guard.principal!, fileId),
+      () => readStoredFile(guard.principal!, descriptor.fileId!),
     )
     await runInApiGuardContext(
       guard,
@@ -86,6 +118,24 @@ export async function GET(
       },
     )
   }
+}
+
+function sanitizedArtifactUnavailable(requestId: string): NextResponse {
+  return NextResponse.json(
+    {
+      ok: false,
+      code: 'TRAVELER_VOUCHER_SANITIZED_ARTIFACT_UNAVAILABLE',
+      error: 'O voucher precisa ser regenerado para aplicar as regras atuais de exibicao.',
+      requestId,
+    },
+    {
+      status: 409,
+      headers: {
+        'Cache-Control': 'no-store, private',
+        'X-Request-Id': requestId,
+      },
+    },
+  )
 }
 
 function notFound(requestId: string): NextResponse {

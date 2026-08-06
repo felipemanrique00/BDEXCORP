@@ -33,6 +33,7 @@ import {
 
 import { AereoMap } from '@/components/reports/aereo-map'
 import { BBTLogo } from '@/components/branding/bbt-logo'
+import { DateInput } from '@/components/ui/date-input'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { canAccessCompanyPermission, getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
@@ -261,11 +262,11 @@ export function AereoExecutivoReport({
       <section className="bbt-card p-4">
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.1fr_1fr_auto]">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <Field label="Inicio">
-              <input type="date" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} className="bbt-input" />
+            <Field label="Inicio" htmlFor="aereo-executivo-data-inicio">
+              <DateInput id="aereo-executivo-data-inicio" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} />
             </Field>
-            <Field label="Fim">
-              <input type="date" value={dataFim} onChange={(event) => setDataFim(event.target.value)} className="bbt-input" />
+            <Field label="Fim" htmlFor="aereo-executivo-data-fim">
+              <DateInput id="aereo-executivo-data-fim" value={dataFim} onChange={(event) => setDataFim(event.target.value)} />
             </Field>
           </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -411,7 +412,16 @@ export function AereoExecutivoReport({
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, htmlFor }: { label: string; children: React.ReactNode; htmlFor?: string }) {
+  if (htmlFor) {
+    return (
+      <div className="block">
+        <label htmlFor={htmlFor} className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</label>
+        {children}
+      </div>
+    )
+  }
+
   return (
     <label className="block">
       <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</span>

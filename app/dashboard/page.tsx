@@ -25,7 +25,6 @@ import {
   Building2,
   CalendarDays,
   Car,
-  CheckCircle2,
   ChevronRight,
   CircleDollarSign,
   ClipboardPlus,
@@ -36,7 +35,6 @@ import {
   Headphones,
   Hotel,
   Leaf,
-  LifeBuoy,
   ListChecks,
   Loader2,
   MapPin,
@@ -64,7 +62,6 @@ import {
   calcularEstatisticasAtendimentos,
   getAllAtendimentos,
 } from '@/lib/atendimentos-storage'
-import { persistDemandStatusWithCompatibility } from '@/lib/demand-persistence-client'
 import {
   adicionarLancamento,
   calcularResumoFinanceiroDaLista,
@@ -80,6 +77,7 @@ import { useStore } from '@/lib/store'
 import { getAllVouchersEmitidos } from '@/lib/vouchers-emitidos-storage'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { travelLifecycleStatusLabel } from '@/lib/travel-lifecycle/presentation'
 import { calcularResumoCRM } from '@/lib/crm'
 import {
   loadOperationalCommunicationOverview,
@@ -519,26 +517,6 @@ export default function DashboardPage() {
     toast.success('Despesa adicionada ao financeiro.')
   }
 
-  async function alterarStatusDemanda(id: string, status: StatusAtendimento) {
-    const atendimento = atendimentos.find((item) => item.id === id)
-    if (!atendimento || !includesCompany(atendimento.empresa_id, 'criar_demandas')) {
-      toast.error('Seu perfil nao pode alterar esta demanda.')
-      return
-    }
-    try {
-      await persistDemandStatusWithCompatibility(
-        atendimento,
-        status,
-        `Alteracao de status pelo dashboard executivo`,
-      )
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Falha ao confirmar o status no servidor.')
-      return
-    }
-    setReload((n) => n + 1)
-    toast.success('Status da demanda atualizado.')
-  }
-
   async function salvarResumoExecutivo() {
     try {
       await saveExecutiveReportSnapshot({
@@ -643,7 +621,6 @@ export default function DashboardPage() {
                     atendimento={viagem}
                     empresa={empresaPorId(empresasVisiveis, viagem.empresa_id)}
                     index={index}
-                    onStatusChange={alterarStatusDemanda}
                   />
                 ))}
                 {viagens.length === 0 && (
@@ -666,7 +643,6 @@ export default function DashboardPage() {
             submitting={deskNoteSubmitting}
             setDeskNote={setDeskNote}
             onSend={salvarNotaDesk}
-            onStatusChange={alterarStatusDemanda}
             iaStatus={iaStatus}
           />
         </div>
@@ -779,7 +755,6 @@ export default function DashboardPage() {
         <OperationalQueue
           demandas={demandasCriticas}
           empresas={empresasDemandas}
-          onStatusChange={alterarStatusDemanda}
         />
         <SustainabilityPanel co2={co2} stats={stats.por_tipo} vouchers={vouchers} />
       </section>
@@ -822,17 +797,17 @@ function TripCard({
   atendimento,
   empresa,
   index,
-  onStatusChange,
 }: {
   atendimento: Atendimento
   empresa?: Empresa
   index: number
-  onStatusChange: (id: string, status: StatusAtendimento) => void
 }) {
   const Icon = SERVICE_META[atendimento.tipo_servico]?.icon || Plane
   const date = dataServico(atendimento)
   const route = destinoServico(atendimento)
-  const status = statusLabel(atendimento.status)
+  const status = travelLifecycleStatusLabel(
+    atendimento.relational_lifecycle_status || atendimento.status,
+  )
   const backgrounds = [
     'from-sky-400 via-blue-700 to-slate-950',
     'from-amber-300 via-orange-700 to-slate-950',
@@ -865,18 +840,9 @@ function TripCard({
         </div>
         <div className="flex items-center justify-between gap-2">
           <span className="truncate text-xs font-medium text-white">{atendimento.passageiro_nome}</span>
-          <select
-            value={atendimento.status}
-            onChange={(event) => onStatusChange(atendimento.id, event.target.value as StatusAtendimento)}
-            className="h-8 rounded-md border border-white/10 bg-white/10 px-2 text-xs font-semibold text-white outline-none"
-            aria-label="Alterar status da viagem"
-          >
-            <option className="text-slate-900" value="pendente">Pendente</option>
-            <option className="text-slate-900" value="em_andamento">Em andamento</option>
-            <option className="text-slate-900" value="aguardando_cliente">Aguardando</option>
-            <option className="text-slate-900" value="finalizado">Finalizada</option>
-            <option className="text-slate-900" value="cancelado">Cancelada</option>
-          </select>
+          <span className="rounded-md border border-white/10 bg-white/10 px-2 py-1 text-[11px] font-semibold text-white">
+            {status} · automático
+          </span>
         </div>
       </div>
     </article>
@@ -916,7 +882,6 @@ function TravelDeskPanel({
   submitting,
   setDeskNote,
   onSend,
-  onStatusChange,
   iaStatus,
 }: {
   demandas: Atendimento[]
@@ -925,7 +890,6 @@ function TravelDeskPanel({
   submitting: boolean
   setDeskNote: (value: string) => void
   onSend: () => void
-  onStatusChange: (id: string, status: StatusAtendimento) => void
   iaStatus: StatusIA | null
 }) {
   const first = demandas[0]
@@ -971,21 +935,16 @@ function TravelDeskPanel({
               {first.passageiro_nome}
             </div>
             <p className="mt-1 text-xs text-blue-50/75">{destinoServico(first)}</p>
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={() => onStatusChange(first.id, 'em_andamento')}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-white px-2.5 text-xs font-semibold text-bbt-primary"
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-blue-50">
+                {travelLifecycleStatusLabel(first.relational_lifecycle_status || first.status)} · automático
+              </span>
+              <Link
+                href={`/dashboard/demandas?id=${encodeURIComponent(first.id)}`}
+                className="inline-flex h-8 items-center rounded-md bg-white px-2.5 text-xs font-semibold text-bbt-primary"
               >
-                <LifeBuoy className="h-3.5 w-3.5" />
-                Assumir
-              </button>
-              <button
-                onClick={() => onStatusChange(first.id, 'finalizado')}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-400 px-2.5 text-xs font-semibold text-emerald-950"
-              >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                Resolver
-              </button>
+                Abrir demanda
+              </Link>
             </div>
           </div>
         )}
@@ -1887,11 +1846,9 @@ function ExpenseReports({
 function OperationalQueue({
   demandas,
   empresas,
-  onStatusChange,
 }: {
   demandas: Atendimento[]
   empresas: Empresa[]
-  onStatusChange: (id: string, status: StatusAtendimento) => void
 }) {
   return (
     <section className="rounded-lg border border-bbt-gray-100 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
@@ -1929,18 +1886,9 @@ function OperationalQueue({
                 <span className={`rounded-md px-2 py-1 text-[11px] font-semibold ${prioridadeClass(demanda.prioridade)}`}>
                   {demanda.prioridade}
                 </span>
-                <select
-                  value={demanda.status}
-                  onChange={(event) => onStatusChange(demanda.id, event.target.value as StatusAtendimento)}
-                  className="h-9 rounded-md border border-bbt-gray-100 bg-white px-2 text-xs font-semibold text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                  aria-label="Alterar status da demanda"
-                >
-                  <option value="pendente">Pendente</option>
-                  <option value="em_andamento">Em andamento</option>
-                  <option value="aguardando_cliente">Aguardando</option>
-                  <option value="finalizado">Finalizado</option>
-                  <option value="cancelado">Cancelado</option>
-                </select>
+                <span className="rounded-md border border-bbt-gray-100 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-white">
+                  {travelLifecycleStatusLabel(demanda.relational_lifecycle_status || demanda.status)} · automático
+                </span>
               </div>
             </div>
           )

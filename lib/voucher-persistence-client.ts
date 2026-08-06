@@ -6,7 +6,48 @@ import {
 } from '@/lib/vouchers-emitidos-storage'
 import type { VoucherEmitido } from '@/types'
 
-type VoucherCreateInput = Omit<VoucherEmitido, 'id' | 'numero' | 'created_at' | 'updated_at' | 'version'>
+type VoucherCreateInput = Omit<
+  VoucherEmitido,
+  'id' | 'numero' | 'created_at' | 'updated_at' | 'version' | 'presentation_settings'
+>
+
+export interface VoucherListClientFilters {
+  companyId?: string
+  search?: string
+  limit?: number
+  offset?: number
+}
+
+export interface VoucherListClientResult {
+  items: VoucherEmitido[]
+  total: number
+}
+
+export async function listVouchersFromServer(
+  filters: VoucherListClientFilters = {},
+  signal?: AbortSignal,
+): Promise<VoucherListClientResult> {
+  const search = new URLSearchParams()
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') search.set(key, String(value))
+  })
+  const response = await fetch(`/api/vouchers${search.size ? `?${search}` : ''}`, {
+    cache: 'no-store',
+    signal,
+  })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok || !result?.ok || !Array.isArray(result.items)) {
+    throw new Error(result?.error || 'Nao foi possivel carregar os vouchers do servidor.')
+  }
+  const items = result.items.filter(isVoucherEmitido) as VoucherEmitido[]
+  if (items.length !== result.items.length) {
+    throw new Error('O servidor retornou uma lista de vouchers invalida.')
+  }
+  return {
+    items,
+    total: Number.isFinite(Number(result.total)) ? Number(result.total) : items.length,
+  }
+}
 
 export async function createVoucherOnServer(input: VoucherCreateInput): Promise<VoucherEmitido> {
   const {
@@ -33,7 +74,10 @@ export async function upsertVoucherBatchOnServer(
 ): Promise<VoucherEmitido[]> {
   const saved: VoucherEmitido[] = []
   for (let offset = 0; offset < vouchers.length; offset += 500) {
-    const chunk = vouchers.slice(offset, offset + 500)
+    const chunk = vouchers.slice(offset, offset + 500).map((voucher) => {
+      const { presentation_settings: _presentationSettings, ...persistable } = voucher
+      return persistable
+    })
     const response = await fetch('/api/vouchers/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -95,6 +139,7 @@ export async function updateVoucherOnServer(
     version: _version,
     emitido_por_user_id: _actorId,
     emitido_por_user_name: _actorName,
+    presentation_settings: _presentationSettings,
     ...mutablePatch
   } = patch
   const response = await fetch(`/api/vouchers/${encodeURIComponent(id)}`, {
@@ -134,4 +179,14 @@ export async function getVoucherFromServer(id: string): Promise<VoucherEmitido> 
   }
   aplicarVouchersEmitidosDoServidor([result.voucher])
   return result.voucher as VoucherEmitido
+}
+
+function isVoucherEmitido(value: unknown): value is VoucherEmitido {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<VoucherEmitido>
+  return typeof candidate.id === 'string'
+    && typeof candidate.numero === 'string'
+    && typeof candidate.empresa_id === 'string'
+    && typeof candidate.status === 'string'
+    && typeof candidate.created_at === 'string'
 }

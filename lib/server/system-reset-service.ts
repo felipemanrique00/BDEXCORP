@@ -150,14 +150,16 @@ async function releaseTenantResetReferences(
     [tenantId],
   )
   await client.query(
-    `update reservations
+     `update reservations
      set last_policy_evaluation_id = null,
-         selected_quote_id = null,
-         selected_quote_option_id = null
+          quote_selection_id = null,
+          selected_quote_id = null,
+          selected_quote_option_id = null
      where tenant_id = $1
        and (
-         last_policy_evaluation_id is not null
-         or selected_quote_id is not null
+          last_policy_evaluation_id is not null
+          or quote_selection_id is not null
+          or selected_quote_id is not null
          or selected_quote_option_id is not null
        )`,
     [tenantId],

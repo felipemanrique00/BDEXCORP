@@ -1,5 +1,6 @@
 'use client'
 import { addDaysISODate, todayISODate } from '@/lib/date'
+import { DateInput } from '@/components/ui/date-input'
 import { useMemo, useState, useEffect } from 'react'
 import { getCurrentUser, getAgentesBBT, hasPermission, perfilBBTLabel } from '@/lib/auth'
 import { getEstatisticas } from '@/lib/atendimentos-storage'
@@ -85,9 +86,9 @@ export default function ProdutividadePage() {
           <span className="text-sm font-semibold">Período de análise</span>
         </div>
         <div className="flex flex-wrap gap-3 items-center">
-          <input type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} className="bbt-input w-auto" />
+          <DateInput aria-label="Data inicial do período de análise" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} className="w-auto" containerClassName="w-auto" />
           <span className="text-slate-400">até</span>
-          <input type="date" value={dataFim} onChange={(e) => setDataFim(e.target.value)} className="bbt-input w-auto" />
+          <DateInput aria-label="Data final do período de análise" value={dataFim} onChange={(e) => setDataFim(e.target.value)} className="w-auto" containerClassName="w-auto" />
           <div className="flex gap-1 ml-2">
             <button onClick={() => setPeriodo(7)} className="bbt-button-ghost text-xs px-2 py-1">7d</button>
             <button onClick={() => setPeriodo(30)} className="bbt-button-ghost text-xs px-2 py-1">30d</button>

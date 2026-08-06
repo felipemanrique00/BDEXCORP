@@ -18,6 +18,9 @@ const securityHeaders = [
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
+  // O servidor local automatico usa um cache separado para que `next build`
+  // nunca invalide os chunks/manifests do ambiente de desenvolvimento.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   outputFileTracingRoot: __dirname,
   poweredByHeader: false,
 

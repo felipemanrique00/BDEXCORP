@@ -572,7 +572,13 @@ async function loadPublishedPolicies(
      order by version.priority desc, version.id`,
     [tenantId, context.evaluatedAt, scopePairs],
   )
-  return Promise.all(versions.rows.map((version) => hydrateExecutablePolicy(client, tenantId, version.policy_code, version)))
+  const hydrated: ExecutablePolicyVersion[] = []
+  // A PoolClient executes one query at a time. Hydrating in parallel on the
+  // same client causes overlapping queries and will be rejected by pg 9.
+  for (const version of versions.rows) {
+    hydrated.push(await hydrateExecutablePolicy(client, tenantId, version.policy_code, version))
+  }
+  return hydrated
 }
 
 async function loadPolicyVersionsByIds(client: PoolClient, tenantId: string, ids: string[]): Promise<ExecutablePolicyVersion[]> {
@@ -585,7 +591,11 @@ async function loadPolicyVersionsByIds(client: PoolClient, tenantId: string, ids
     [tenantId, ids],
   )
   if (rows.rowCount !== new Set(ids).size) throw new PolicyServiceError('POLICY_VERSION_NOT_FOUND', 'Uma ou mais versoes nao foram encontradas.', 404)
-  return Promise.all(rows.rows.map((row) => hydrateExecutablePolicy(client, tenantId, row.policy_code, row)))
+  const hydrated: ExecutablePolicyVersion[] = []
+  for (const row of rows.rows) {
+    hydrated.push(await hydrateExecutablePolicy(client, tenantId, row.policy_code, row))
+  }
+  return hydrated
 }
 
 async function hydrateExecutablePolicy(
@@ -760,7 +770,11 @@ async function loadPolicyVersionsForConflict(
      where version.tenant_id = $1 and version.id <> $2 and version.status in ('approved', 'published')`,
     [tenantId, excludedVersionId],
   )
-  return Promise.all(rows.rows.map((row) => hydrateExecutablePolicy(client, tenantId, row.policy_code, row)))
+  const hydrated: ExecutablePolicyVersion[] = []
+  for (const row of rows.rows) {
+    hydrated.push(await hydrateExecutablePolicy(client, tenantId, row.policy_code, row))
+  }
+  return hydrated
 }
 
 async function availableDependencies(client: PoolClient, principal: RequestPrincipal): Promise<Set<string>> {

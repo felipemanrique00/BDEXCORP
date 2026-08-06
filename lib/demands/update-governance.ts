@@ -1,19 +1,8 @@
 import { assessTravelReapproval } from '@/lib/travel-lifecycle'
-
-const LOCKED_MATERIAL_EDIT_STATES = new Set([
-  'reserving',
-  'reserved',
-  'pending_issuance',
-  'issuing',
-  'issued',
-  'partially_issued',
-  'canceled',
-  'expired',
-  'failed',
-  'pending_refund',
-  'refunded',
-  'closed',
-])
+export {
+  lifecycleAllowsMaterialDemandEdit,
+  lifecycleAllowsNormalHotelDemandEdit,
+} from '@/lib/demands/edit-eligibility'
 
 export interface DemandUpdateSnapshot {
   companyId: string
@@ -79,8 +68,4 @@ export function assessDemandUpdate(
     previousHash: result.previousHash,
     currentHash: result.currentHash,
   }
-}
-
-export function lifecycleAllowsMaterialDemandEdit(lifecycleStatus: string): boolean {
-  return !LOCKED_MATERIAL_EDIT_STATES.has(lifecycleStatus)
 }

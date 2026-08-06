@@ -3,18 +3,20 @@
 import { addDaysISODate, todayISODate } from '@/lib/date'
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '@/lib/store'
-import { getCurrentUser, hasPermission } from '@/lib/auth'
+import { canAccessCompanyPermission, getCurrentUser, hasPermission } from '@/lib/auth'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { getEmpresasDoGrupo } from '@/lib/grupos'
 import { montarMetricasRelatorio } from '@/lib/relatorios'
 import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
 import { formatCurrency } from '@/lib/utils'
-import type { Empresa, Funcionario, GrupoEmpresarial } from '@/types'
+import type { Empresa, Funcionario, GrupoEmpresarial, Permissoes, User } from '@/types'
 import { useCorporateContext } from '@/components/corporate-context-provider'
+import { VoucherPresentationSettingsPanel } from '@/components/vouchers/voucher-presentation-settings-panel'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { SearchInput } from '@/components/ui/search-input'
 import { PageHero } from '@/components/ui/page-hero'
+import { DateInput } from '@/components/ui/date-input'
 import { Building2, Download, Edit2, Eye, Link2, Network, Plus, Trash2, Unlink, Users } from 'lucide-react'
 import { toast } from 'sonner'
 import Link from 'next/link'
@@ -53,6 +55,20 @@ export default function GruposEmpresariaisPage() {
 
   const grupoSelecionado = gruposEmpresariais.find((grupo) => grupo.id === selectedId) || gruposFiltrados[0] || null
   const empresasSemGrupo = empresas.filter((empresa) => !empresa.grupo_id)
+  const podeVerVouchersGrupo = Boolean(grupoSelecionado && hasFullGroupPermission(
+    user,
+    grupoSelecionado.id,
+    'ver_vouchers',
+    empresas,
+    gruposEmpresariais,
+  ))
+  const podeAlterarVoucherGrupo = Boolean(grupoSelecionado && hasFullGroupPermission(
+    user,
+    grupoSelecionado.id,
+    'alterar_configuracoes',
+    empresas,
+    gruposEmpresariais,
+  ))
 
   function abrirNovo() {
     setEditing(null)
@@ -150,9 +166,9 @@ export default function GruposEmpresariaisPage() {
       <div className="bbt-card p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
-            <input type="date" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} className="bbt-input w-auto" />
+            <DateInput aria-label="Data inicial do período dos grupos" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} className="w-auto" containerClassName="w-auto" />
             <span className="text-sm text-slate-400">ate</span>
-            <input type="date" value={dataFim} onChange={(event) => setDataFim(event.target.value)} className="bbt-input w-auto" />
+            <DateInput aria-label="Data final do período dos grupos" value={dataFim} onChange={(event) => setDataFim(event.target.value)} className="w-auto" containerClassName="w-auto" />
           </div>
           <div className="w-full sm:w-80">
             <SearchInput value={busca} onChangeValue={setBusca} placeholder="Buscar grupo..." size="sm" />
@@ -225,6 +241,17 @@ export default function GruposEmpresariaisPage() {
             />
           ) : (
             <div className="bbt-card p-8 text-center text-sm text-slate-400">Selecione ou cadastre um grupo.</div>
+          )}
+
+          {grupoSelecionado && podeVerVouchersGrupo && (
+            <VoucherPresentationSettingsPanel
+              key={`group:${grupoSelecionado.id}`}
+              scopeType="group"
+              scopeId={grupoSelecionado.id}
+              scopeName={grupoSelecionado.nome}
+              canManage={podeAlterarVoucherGrupo}
+              compact
+            />
           )}
 
           {podeGerenciar && empresasSemGrupo.length > 0 && grupoSelecionado && (
@@ -494,4 +521,25 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   )
+}
+
+function hasFullGroupPermission(
+  user: User | null,
+  groupId: string,
+  permission: keyof Permissoes,
+  empresas: Empresa[],
+  grupos: GrupoEmpresarial[],
+): boolean {
+  if (!user || user.ativo === false) return false
+  if (user.platform_admin || user.role_key === 'tenant_admin') return true
+  const activeCompanies = getEmpresasDoGrupo(groupId, empresas, grupos)
+    .filter((empresa) => empresa.ativa !== false)
+  if (!activeCompanies.length) return false
+  return activeCompanies.every((empresa) => canAccessCompanyPermission(
+    user,
+    empresa.id,
+    permission,
+    empresas,
+    grupos,
+  ))
 }

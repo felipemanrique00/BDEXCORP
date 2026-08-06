@@ -22,6 +22,7 @@ import {
   Building2, Tag, DollarSign, MapPin,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { DateInput } from '@/components/ui/date-input'
 
 export default function EditarVoucherPage() {
   const { id } = useParams<{ id: string }>()
@@ -147,6 +148,8 @@ export default function EditarVoucherPage() {
           <Field label="Tipo">
             <select value={v.tipo} onChange={(e) => update('tipo', e.target.value as VoucherTipo)} className="bbt-input">
               <option>Hotel</option><option>Aéreo</option><option>Carro</option><option>Pacote</option>
+              <option>Rodoviário</option><option>Ferroviário</option><option>Transfer</option><option>Seguro</option>
+              <option>Lazer</option><option>Marítimo</option><option>Serviço</option>
             </select>
           </Field>
         </div>
@@ -191,8 +194,8 @@ export default function EditarVoucherPage() {
             <Field label="Tipo Apto"><input value={v.tipo_apartamento || ''} onChange={(e) => update('tipo_apartamento', e.target.value)} className="bbt-input" /></Field>
             <Field label="Apts"><input type="number" value={v.num_apartamentos || 1} onChange={(e) => update('num_apartamentos', Number(e.target.value))} className="bbt-input" /></Field>
             <Field label="Hóspedes"><input type="number" value={v.num_hospedes || 1} onChange={(e) => update('num_hospedes', Number(e.target.value))} className="bbt-input" /></Field>
-            <Field label="Check-in"><input type="date" value={v.data_checkin || ''} onChange={(e) => update('data_checkin', e.target.value)} className="bbt-input" /></Field>
-            <Field label="Check-out"><input type="date" value={v.data_checkout || ''} onChange={(e) => update('data_checkout', e.target.value)} className="bbt-input" /></Field>
+            <Field label="Check-in" htmlFor="voucher-edit-checkin"><DateInput id="voucher-edit-checkin" value={v.data_checkin || ''} onChange={(e) => update('data_checkin', e.target.value)} className="bbt-input" /></Field>
+            <Field label="Check-out" htmlFor="voucher-edit-checkout"><DateInput id="voucher-edit-checkout" value={v.data_checkout || ''} onChange={(e) => update('data_checkout', e.target.value)} className="bbt-input" /></Field>
             <Field label="Valor Diária"><input type="number" step="0.01" value={v.valor_diaria || 0} onChange={(e) => update('valor_diaria', Number(e.target.value))} className="bbt-input" /></Field>
             <Field label="Regime"><input value={v.regime || ''} onChange={(e) => update('regime', e.target.value)} className="bbt-input" /></Field>
             <Field label="Forma Pgto Voucher"><input value={v.forma_pagamento_voucher || ''} onChange={(e) => update('forma_pagamento_voucher', e.target.value)} className="bbt-input" /></Field>
@@ -210,8 +213,8 @@ export default function EditarVoucherPage() {
             <Field label="Classe"><input value={v.classe || ''} onChange={(e) => update('classe', e.target.value)} className="bbt-input" /></Field>
             <Field label="Origem"><input value={v.origem || ''} onChange={(e) => update('origem', e.target.value)} className="bbt-input" /></Field>
             <Field label="Destino"><input value={v.destino || ''} onChange={(e) => update('destino', e.target.value)} className="bbt-input" /></Field>
-            <Field label="Ida"><input type="date" value={v.data_ida || ''} onChange={(e) => update('data_ida', e.target.value)} className="bbt-input" /></Field>
-            <Field label="Volta"><input type="date" value={v.data_volta || ''} onChange={(e) => update('data_volta', e.target.value)} className="bbt-input" /></Field>
+            <Field label="Ida" htmlFor="voucher-edit-data-ida"><DateInput id="voucher-edit-data-ida" value={v.data_ida || ''} onChange={(e) => update('data_ida', e.target.value)} className="bbt-input" /></Field>
+            <Field label="Volta" htmlFor="voucher-edit-data-volta"><DateInput id="voucher-edit-data-volta" value={v.data_volta || ''} onChange={(e) => update('data_volta', e.target.value)} className="bbt-input" /></Field>
           </div>
         </div>
       )}
@@ -220,7 +223,7 @@ export default function EditarVoucherPage() {
         <h2 className="font-semibold text-sm flex items-center gap-2"><Tag className="w-4 h-4 text-bbt-accent" /> Confirmação</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <Field label="Nº Confirmação"><input value={v.numero_confirmacao || ''} onChange={(e) => update('numero_confirmacao', e.target.value)} className="bbt-input" /></Field>
-          <Field label="Data Confirmação"><input type="date" value={v.data_confirmacao || ''} onChange={(e) => update('data_confirmacao', e.target.value)} className="bbt-input" /></Field>
+          <Field label="Data Confirmação" htmlFor="voucher-edit-data-confirmacao"><DateInput id="voucher-edit-data-confirmacao" value={v.data_confirmacao || ''} onChange={(e) => update('data_confirmacao', e.target.value)} className="bbt-input" /></Field>
           <Field label="Confirmado Por"><input value={v.confirmado_por || ''} onChange={(e) => update('confirmado_por', e.target.value)} className="bbt-input" /></Field>
         </div>
       </div>
@@ -252,10 +255,10 @@ export default function EditarVoucherPage() {
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1 tracking-wider">{label}</label>
+      <label htmlFor={htmlFor} className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1 tracking-wider">{label}</label>
       {children}
     </div>
   )

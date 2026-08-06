@@ -22,17 +22,17 @@ import {
 import { toast } from 'sonner'
 
 import { useStore } from '@/lib/store'
+import { DateInput } from '@/components/ui/date-input'
 import { getCurrentUser } from '@/lib/auth'
 import {
   criarAtendimentoParaLista,
   getAllAtendimentos,
-  getAtendimentoById,
-  getAtendimentoBySerialOS,
 } from '@/lib/atendimentos-storage'
 import {
   persistDemandPatchWithCompatibility,
   persistNewDemandWithCompatibility,
 } from '@/lib/demand-persistence-client'
+import { getDemandFromServer, listDemandsFromServer } from '@/lib/demands-client'
 import { encontrarFuncionarioPorCodigo } from '@/lib/funcionario-identidade'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import { listTravelQuotesFromServer } from '@/lib/travel/quote-client'
@@ -60,7 +60,10 @@ import {
   type IntegrationProviderClientRecord,
 } from '@/lib/integrations/provider-catalog-client'
 import type { Atendimento, Funcionario, Prioridade, TipoServico } from '@/types'
+import { isRequesterUser } from '@/lib/user-access-kind'
 import { useCorporateContext, useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import OfflineTravelWorkspace from '@/components/travel/offline-travel-workspace'
+import { PORTAL_REQUESTS_CHOICE_HREF } from '@/lib/portal-relational-sync'
 
 type FormState = {
   serial_os: string
@@ -94,6 +97,8 @@ const SERVICES: Array<{ value: SupplierService; label: string; icon: any; hint: 
 
 const ACTIONS: SupplierCapability[] = ['cotacao', 'reserva', 'emissao', 'status', 'voucher', 'cancelamento', 'remarcacao']
 
+const OFFLINE_TRAVEL_UI_ENABLED = process.env.NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED === 'true'
+
 const INITIAL_FORM: FormState = {
   serial_os: '',
   service: 'hotelaria',
@@ -116,12 +121,37 @@ const INITIAL_FORM: FormState = {
 
 export default function ReservasPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const requesterReadOnly = isRequesterUser(user)
   const { empresas, funcionarios } = useStore()
   const { context, isAllCompaniesSelected } = useCorporateContext()
   const { companyIdsList, includesCompany } = useCorporateCompanyScope()
   const empresasNoContexto = useMemo(
     () => empresas.filter((item) => includesCompany(item.id, 'ver_reservas')),
     [empresas, includesCompany],
+  )
+  const quoteCompanies = useMemo(
+    () => empresasNoContexto.filter((item) => includesCompany(item.id, 'operar_cotacoes')),
+    [empresasNoContexto, includesCompany],
+  )
+  const reservationCompanies = useMemo(
+    () => empresasNoContexto.filter((item) => (
+      includesCompany(item.id, 'operar_reservas')
+      || includesCompany(item.id, 'operar_emissoes')
+    )),
+    [empresasNoContexto, includesCompany],
+  )
+  const canOperateQuotes = quoteCompanies.length > 0
+  const canOperateReservations = reservationCompanies.length > 0
+  const quoteCompanyIds = useMemo(() => quoteCompanies.map((item) => item.id), [quoteCompanies])
+  const reservationCompanyIds = useMemo(
+    () => reservationCompanies.map((item) => item.id),
+    [reservationCompanies],
+  )
+  const canUseOfflineWorkspace = OFFLINE_TRAVEL_UI_ENABLED && canOperateReservations
+  const canAccessOperationalWorkspace = canOperateQuotes || canUseOfflineWorkspace
+  const canConfigureConnections = useMemo(
+    () => empresasNoContexto.some((item) => includesCompany(item.id, 'gerenciar_integracoes')),
+    [empresasNoContexto, includesCompany],
   )
   const selectedReservationCompanyIds = useMemo(
     () => companyIdsList.filter((companyId) => includesCompany(companyId, 'ver_reservas')),
@@ -131,6 +161,7 @@ export default function ReservasPage() {
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<string[]>([])
   const [reload, setReload] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [operationChannel, setOperationChannel] = useState<'online' | 'offline'>('online')
   const [demandaVinculadaId, setDemandaVinculadaId] = useState('')
   const [quotes, setQuotes] = useState<GovernedTravelQuoteSummary[]>([])
   const [quotesLoading, setQuotesLoading] = useState(true)
@@ -138,13 +169,21 @@ export default function ReservasPage() {
   const [relationalReservations, setRelationalReservations] = useState<GovernedTravelReservationSummary[]>([])
   const [reservationsLoading, setReservationsLoading] = useState(true)
   const [reservationsError, setReservationsError] = useState('')
+  const [relationalDemands, setRelationalDemands] = useState<Atendimento[]>([])
+  const [demandsLoading, setDemandsLoading] = useState(true)
+  const [demandsError, setDemandsError] = useState('')
   const [providerCatalog, setProviderCatalog] = useState<IntegrationProviderClientRecord[] | null>(null)
   const [providerCatalogError, setProviderCatalogError] = useState('')
   const initialDemandAppliedRef = useRef(false)
 
+  useEffect(() => {
+    if (!canOperateQuotes && canOperateReservations) setOperationChannel('offline')
+    if (canOperateQuotes && !canOperateReservations) setOperationChannel('online')
+  }, [canOperateQuotes, canOperateReservations])
+
   const empresa = useMemo(
-    () => empresasNoContexto.find((item) => item.id === form.empresa_id),
-    [empresasNoContexto, form.empresa_id],
+    () => quoteCompanies.find((item) => item.id === form.empresa_id),
+    [form.empresa_id, quoteCompanies],
   )
 
   const funcionariosEmpresa = useMemo(
@@ -163,18 +202,20 @@ export default function ReservasPage() {
   const reservasLegadas = useMemo(
     () => {
       void reload
+      if (requesterReadOnly) return []
       return getSupplierReservations(120)
         .filter((reserva) => includesCompany(reserva.empresa_id, 'ver_reservas'))
     },
-    [includesCompany, reload],
+    [includesCompany, reload, requesterReadOnly],
   )
 
   const logs = useMemo(
     () => {
       void reload
+      if (requesterReadOnly) return []
       return getSupplierLogs(80)
     },
-    [reload],
+    [reload, requesterReadOnly],
   )
 
   const reservasLegadasVisiveis = useMemo(() => {
@@ -187,16 +228,76 @@ export default function ReservasPage() {
     return reservasLegadas.filter((reservation) => !migratedReferences.has(reservation.id))
   }, [relationalReservations, reservasLegadas])
 
-  const demandasRecentes = useMemo(() => {
+  const demandasMescladas = useMemo(() => {
     void reload
-    return getAllAtendimentos()
-      .filter((item) => includesCompany(item.empresa_id, 'ver_demandas'))
+    const merged = new Map<string, Atendimento>()
+    const relationalIds = new Set(relationalDemands.map((item) => item.id))
+    const relationalSerials = new Set(relationalDemands.flatMap((item) => {
+      const serial = demandSerialKey(item.serial_os)
+      return serial ? [serial] : []
+    }))
+    getAllAtendimentos().forEach((item) => {
+      if (requesterReadOnly
+        && !relationalIds.has(item.id)
+        && !relationalSerials.has(demandSerialKey(item.serial_os))) return
+      merged.set(item.id, item)
+    })
+    relationalDemands.forEach((item) => merged.set(item.id, item))
+    return Array.from(merged.values())
+  }, [relationalDemands, reload, requesterReadOnly])
+
+  const demandasNoContexto = useMemo(
+    () => demandasMescladas.filter((item) => includesCompany(item.empresa_id, 'ver_demandas')),
+    [demandasMescladas, includesCompany],
+  )
+
+  const demandasOperacionais = useMemo(() => (
+    [...demandasNoContexto]
       .filter((item) => !['finalizado', 'cancelado'].includes(item.status))
       .sort((left, right) => right.created_at.localeCompare(left.created_at))
-      .slice(0, 50)
-  }, [includesCompany, reload])
+  ), [demandasNoContexto])
+  const demandasRecentes = useMemo(
+    () => demandasOperacionais.slice(0, 50),
+    [demandasOperacionais],
+  )
+
+  const demandById = useMemo(
+    () => new Map(demandasMescladas.map((item) => [item.id, item])),
+    [demandasMescladas],
+  )
+  const demandBySerial = useMemo(
+    () => new Map(demandasMescladas.flatMap((item) => {
+      const serial = demandSerialKey(item.serial_os)
+      return serial ? [[serial, item] as const] : []
+    })),
+    [demandasMescladas],
+  )
 
   useEffect(() => {
+    const controller = new AbortController()
+    setDemandsLoading(true)
+    setDemandsError('')
+    void listDemandsFromServer({ limit: 200 })
+      .then((result) => {
+        if (!controller.signal.aborted) setRelationalDemands(result.items.map((item) => item.demand))
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        setRelationalDemands([])
+        setDemandsError(error instanceof Error ? error.message : 'Nao foi possivel carregar as demandas relacionais.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDemandsLoading(false)
+      })
+    return () => controller.abort()
+  }, [reload])
+
+  useEffect(() => {
+    if (!canOperateQuotes) {
+      setProviderCatalog(null)
+      setProviderCatalogError('')
+      return
+    }
     const controller = new AbortController()
     setProviderCatalogError('')
     void listIntegrationProvidersFromServer()
@@ -213,7 +314,7 @@ export default function ReservasPage() {
         )
       })
     return () => controller.abort()
-  }, [reload])
+  }, [canOperateQuotes, reload])
 
   useEffect(() => {
     if (!isAllCompaniesSelected && selectedReservationCompanyIds.length === 0) {
@@ -273,17 +374,16 @@ export default function ReservasPage() {
 
   useEffect(() => {
     setForm((current) => {
-      if (current.empresa_id && includesCompany(current.empresa_id, 'ver_reservas')) return current
-      const companyId = context?.type === 'company' && includesCompany(context.id, 'ver_reservas') ? context.id : ''
+      if (current.empresa_id && includesCompany(current.empresa_id, 'operar_cotacoes')) return current
+      const companyId = context?.type === 'company' && includesCompany(context.id, 'operar_cotacoes') ? context.id : ''
       return current.empresa_id === companyId ? current : { ...current, empresa_id: companyId, funcionario_id: '', funcionario_codigo: '' }
     })
   }, [context, includesCompany])
 
   const demandaVinculada = useMemo(() => {
-    void reload
-    const demanda = demandaVinculadaId ? getAtendimentoById(demandaVinculadaId) || null : null
+    const demanda = demandaVinculadaId ? demandById.get(demandaVinculadaId) || null : null
     return demanda && includesCompany(demanda.empresa_id, 'ver_demandas') ? demanda : null
-  }, [demandaVinculadaId, includesCompany, reload])
+  }, [demandaVinculadaId, demandById, includesCompany])
 
   useEffect(() => {
     const recomendados = selectSuppliersFromCatalog(
@@ -296,29 +396,67 @@ export default function ReservasPage() {
 
   useEffect(() => {
     if (initialDemandAppliedRef.current || typeof window === 'undefined') return
-    initialDemandAppliedRef.current = true
 
     const params = new URLSearchParams(window.location.search)
     const atendimentoId = params.get('atendimento')?.trim() || ''
     const serial = params.get('os')?.trim() || ''
-    if (!atendimentoId && !serial) return
-
-    const demanda = atendimentoId
-      ? getAtendimentoById(atendimentoId)
-      : getAtendimentoBySerialOS(serial)
-    if (!demanda) {
-      toast.error('Não encontrei a demanda informada no acesso direto.')
+    if (!atendimentoId && !serial) {
+      initialDemandAppliedRef.current = true
       return
     }
 
-    if (!includesCompany(demanda.empresa_id, 'ver_demandas')) {
-      toast.error('A demanda informada esta fora do contexto autorizado.')
-      return
+    const cachedDemand = atendimentoId
+      ? demandById.get(atendimentoId)
+      : demandBySerial.get(demandSerialKey(serial))
+    if (!cachedDemand && demandsLoading) return
+
+    let active = true
+    void (async () => {
+      let demanda = cachedDemand || null
+      try {
+        if (!demanda && atendimentoId) {
+          demanda = (await getDemandFromServer(atendimentoId)).demand
+        } else if (!demanda && serial) {
+          const normalizedSerial = demandSerialKey(serial)
+          const result = await listDemandsFromServer({ search: serial, limit: 20 })
+          demanda = result.items.find((item) => (
+            demandSerialKey(item.demandNumber) === normalizedSerial
+            || demandSerialKey(item.demand.serial_os) === normalizedSerial
+          ))?.demand || null
+        }
+      } catch (error) {
+        if (!active || initialDemandAppliedRef.current) return
+        initialDemandAppliedRef.current = true
+        toast.error(error instanceof Error
+          ? error.message
+          : 'Não foi possível consultar a demanda informada no acesso direto.')
+        return
+      }
+
+      if (!active || initialDemandAppliedRef.current) return
+      initialDemandAppliedRef.current = true
+      if (!demanda) {
+        toast.error('Não encontrei a demanda informada no acesso direto.')
+        return
+      }
+      if (!includesCompany(demanda.empresa_id, 'ver_demandas')) {
+        toast.error('A demanda informada esta fora do contexto autorizado.')
+        return
+      }
+
+      setRelationalDemands((current) => mergeDemand(current, demanda))
+      setForm((current) => formFromAtendimento(current, demanda, funcionarios, serial))
+      setDemandaVinculadaId(demanda.id)
+      if (OFFLINE_TRAVEL_UI_ENABLED && serviceFromAtendimento(demanda.tipo_servico) === 'hotelaria') {
+        setOperationChannel('offline')
+      }
+      toast.success(`Demanda ${demanda.serial_os || serial} pronta para cotação/reserva.`)
+    })()
+
+    return () => {
+      active = false
     }
-    setForm((current) => formFromAtendimento(current, demanda, funcionarios, serial))
-    setDemandaVinculadaId(demanda.id)
-    toast.success(`Demanda ${demanda.serial_os || serial} pronta para cotação/reserva.`)
-  }, [funcionarios, includesCompany])
+  }, [demandById, demandBySerial, demandsLoading, funcionarios, includesCompany])
 
   function refresh() {
     setReload((value) => value + 1)
@@ -353,7 +491,7 @@ export default function ReservasPage() {
       return
     }
 
-    const demanda = getAtendimentoBySerialOS(serial)
+    const demanda = demandBySerial.get(demandSerialKey(serial))
     if (!demanda) {
       toast.error('Não encontrei demanda com esse Serial/OS.')
       return
@@ -370,7 +508,7 @@ export default function ReservasPage() {
 
   function selecionarDemandaRecente(atendimentoId: string) {
     if (!atendimentoId) return
-    const demanda = getAtendimentoById(atendimentoId)
+    const demanda = demandById.get(atendimentoId)
     if (!demanda) {
       toast.error('A demanda selecionada não está mais disponível.')
       refresh()
@@ -414,6 +552,10 @@ export default function ReservasPage() {
     }
     if (!includesCompany(form.empresa_id, 'criar_demandas')) {
       toast.error('Voce nao possui permissao para criar operacoes nesta empresa.')
+      return
+    }
+    if (!includesCompany(form.empresa_id, 'operar_cotacoes')) {
+      toast.error('Voce nao possui permissao para operar cotacoes nesta empresa.')
       return
     }
     if (!form.viajante_nome.trim()) {
@@ -463,7 +605,9 @@ export default function ReservasPage() {
       }, providerCatalog || undefined)
 
       const tipoServico = mapTipoServico(form.service)
-      const demandaVinculada = form.serial_os.trim() ? getAtendimentoBySerialOS(form.serial_os) : null
+      const demandaVinculada = form.serial_os.trim()
+        ? demandBySerial.get(demandSerialKey(form.serial_os)) || null
+        : null
       const atendimentoPayload: Omit<Atendimento, 'id' | 'created_at' | 'updated_at'> = {
         empresa_id: form.empresa_id,
         funcionario_id: funcionario?.id || null,
@@ -615,13 +759,57 @@ export default function ReservasPage() {
           <button type="button" onClick={refresh} className="bbt-button-ghost">
             <RefreshCw className="h-4 w-4" /> Atualizar
           </button>
-          <Link href="/dashboard/configuracoes" className="bbt-button-ghost">
-            <Settings className="h-4 w-4" /> Configurar conexões
-          </Link>
+          {canConfigureConnections && (
+            <Link href="/dashboard/configuracoes" className="bbt-button-ghost">
+              <Settings className="h-4 w-4" /> Configurar conexões
+            </Link>
+          )}
         </div>
       </div>
 
-      <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+      {OFFLINE_TRAVEL_UI_ENABLED && canAccessOperationalWorkspace && (
+        <section className="bbt-card p-2" aria-label="Canal da operação de viagem">
+          <div className={`grid gap-2 ${canOperateQuotes && canOperateReservations ? 'sm:grid-cols-2' : ''}`}>
+            {canOperateQuotes && <button
+              type="button"
+              onClick={() => setOperationChannel('online')}
+              aria-pressed={operationChannel === 'online'}
+              className={`rounded-lg px-4 py-3 text-left transition ${operationChannel === 'online' ? 'bg-bbt-primary text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800'}`}
+            >
+              <span className="block text-sm font-semibold">Conectores online</span>
+              <span className={`mt-1 block text-xs ${operationChannel === 'online' ? 'text-white/75' : 'text-slate-500'}`}>Cotação e reserva pelos fornecedores integrados.</span>
+            </button>}
+            {canOperateReservations && <button
+              type="button"
+              onClick={() => setOperationChannel('offline')}
+              aria-pressed={operationChannel === 'offline'}
+              className={`rounded-lg px-4 py-3 text-left transition ${operationChannel === 'offline' ? 'bg-bbt-primary text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800'}`}
+            >
+              <span className="block text-sm font-semibold">Atendimento offline / manual</span>
+              <span className={`mt-1 block text-xs ${operationChannel === 'offline' ? 'text-white/75' : 'text-slate-500'}`}>Reserva, emissão e voucher para qualquer tipo de serviço.</span>
+            </button>}
+          </div>
+        </section>
+      )}
+
+      {!canAccessOperationalWorkspace ? (
+        <section className="bbt-card p-5" aria-label="Acesso ao acompanhamento de viagens">
+          <div className="flex items-start gap-3">
+            <ClipboardList className="mt-0.5 h-5 w-5 shrink-0 text-bbt-accent" />
+            <div>
+              <h2 className="font-semibold text-bbt-primary dark:text-white">Acompanhe suas solicitações</h2>
+              <p className="mt-1 text-sm leading-6 text-slate-500">
+                Seu perfil pode consultar reservas e cotações, mas não executa atividades do consultor.
+                Para escolher uma cotação, abra a demanda correspondente na lista abaixo.
+              </p>
+              <Link href={PORTAL_REQUESTS_CHOICE_HREF} className="mt-3 inline-flex text-sm font-semibold text-bbt-accent hover:underline">
+                Abrir meus pedidos e escolhas
+              </Link>
+            </div>
+          </div>
+        </section>
+      ) : operationChannel === 'online' && canOperateQuotes ? (
+        <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
         <form onSubmit={submit} className="bbt-card p-5">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -727,7 +915,7 @@ export default function ReservasPage() {
                 required
               >
                 <option value="">Selecione a empresa</option>
-                {empresasNoContexto.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}
+                {quoteCompanies.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}
               </select>
             </Field>
 
@@ -775,11 +963,19 @@ export default function ReservasPage() {
             </Field>
 
             <Field label={form.service === 'hotelaria' ? 'Check-in / início' : 'Data ida / início'}>
-              <input type="date" value={form.data_inicio} onChange={(e) => setForm({ ...form, data_inicio: e.target.value })} className="bbt-input" />
+              <DateInput
+                aria-label={form.service === 'hotelaria' ? 'Check-in / início' : 'Data ida / início'}
+                value={form.data_inicio}
+                onChange={(e) => setForm({ ...form, data_inicio: e.target.value })}
+              />
             </Field>
 
             <Field label={form.service === 'hotelaria' ? 'Check-out / fim' : 'Data volta / fim'}>
-              <input type="date" value={form.data_fim} onChange={(e) => setForm({ ...form, data_fim: e.target.value })} className="bbt-input" />
+              <DateInput
+                aria-label={form.service === 'hotelaria' ? 'Check-out / fim' : 'Data volta / fim'}
+                value={form.data_fim}
+                onChange={(e) => setForm({ ...form, data_fim: e.target.value })}
+              />
             </Field>
 
             <Field label="Centro de custo">
@@ -880,9 +1076,29 @@ export default function ReservasPage() {
             </div>
           </div>
         </aside>
-      </section>
+        </section>
+      ) : (
+        <div className="space-y-3">
+          {demandsError && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+              {demandsError} A lista abaixo usa apenas o cache local como contingencia.
+            </div>
+          )}
+          <OfflineTravelWorkspace
+            demands={demandasNoContexto}
+            companies={empresasNoContexto}
+            reservations={relationalReservations}
+            quoteCompanyIds={quoteCompanyIds}
+            reservationCompanyIds={reservationCompanyIds}
+            initialDemandId={demandaVinculadaId || undefined}
+            canQuoteHotels={canOperateQuotes}
+            canOperateReservations={canOperateReservations}
+            onCompleted={refresh}
+          />
+        </div>
+      )}
 
-      <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+      <section className="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="bbt-card overflow-hidden">
           <div className="border-b border-bbt-gray-100 p-5 dark:border-slate-700">
             <div className="flex items-center gap-2">
@@ -894,7 +1110,7 @@ export default function ReservasPage() {
             </p>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="min-w-[760px] w-full text-sm">
               <thead className="bg-bbt-gray-50 dark:bg-slate-900/40">
                 <tr>
                   <Th>Operação</Th>
@@ -961,6 +1177,7 @@ export default function ReservasPage() {
 }
 
 function RelationalReservationRow({ item }: { item: GovernedTravelReservationSummary }) {
+  const reference = visibleProviderReference(item.providerReference)
   return (
     <tr className="border-t border-bbt-gray-100 hover:bg-bbt-gray-50 dark:border-slate-700 dark:hover:bg-slate-900/30">
       <td className="px-4 py-3">
@@ -968,12 +1185,11 @@ function RelationalReservationRow({ item }: { item: GovernedTravelReservationSum
           {serviceLabel(quoteService(item.service))} · Reserva
         </div>
         <div className="text-xs text-slate-500">
-          {item.provider} · {item.providerReference || item.id}
+          {providerDisplayName(item.provider)}{reference ? ` · Localizador ${reference}` : ''}
         </div>
       </td>
       <td className="px-4 py-3">
         <div className="font-medium">{item.companyName}</div>
-        <div className="text-xs text-slate-500">{item.companyId}</div>
       </td>
       <td className="px-4 py-3">
         <div className="font-medium">{item.passengerName}</div>
@@ -985,7 +1201,7 @@ function RelationalReservationRow({ item }: { item: GovernedTravelReservationSum
         </Link>
       </td>
       <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
-        {formatDate(item.startAt || undefined)} até {formatDate(item.endAt || undefined)}
+        {formatPeriod(item.startAt, item.endAt)}
       </td>
       <td className="px-4 py-3">
         {item.finalAmount.toLocaleString('pt-BR', {
@@ -1006,12 +1222,11 @@ function QuoteRow({ item }: { item: GovernedTravelQuoteSummary }) {
           {serviceLabel(quoteService(item.service))} · Cotação
         </div>
         <div className="text-xs text-slate-500">
-          {item.provider} · {item.optionCount} opção(ões)
+          {providerDisplayName(item.provider)} · {optionCountLabel(item.optionCount)}
         </div>
       </td>
       <td className="px-4 py-3">
         <div className="font-medium">{item.companyName}</div>
-        <div className="text-xs text-slate-500">{item.companyId}</div>
       </td>
       <td className="px-4 py-3">
         <div className="font-medium">{item.passengerName}</div>
@@ -1023,8 +1238,8 @@ function QuoteRow({ item }: { item: GovernedTravelQuoteSummary }) {
         </Link>
       </td>
       <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
-        {formatDate(item.travelStartDate || undefined)} até {formatDate(item.travelEndDate || undefined)}
-        <div className="mt-1 text-slate-500">{item.destination || '-'}</div>
+        {formatPeriod(item.travelStartDate, item.travelEndDate)}
+        <div className="mt-1 text-slate-500">{item.destination || 'Destino não informado'}</div>
       </td>
       <td className="px-4 py-3">
         {item.minimumAmount === null
@@ -1044,7 +1259,7 @@ function ReservaRow({ item }: { item: SupplierReservation }) {
     <tr className="border-t border-bbt-gray-100 hover:bg-bbt-gray-50 dark:border-slate-700 dark:hover:bg-slate-900/30">
       <td className="px-4 py-3">
         <div className="font-semibold text-bbt-primary dark:text-white">{serviceLabel(item.service)} · {capabilityLabel(item.action)}</div>
-        <div className="text-xs text-slate-500">{item.id} · histórico legado</div>
+        <div className="text-xs text-slate-500">Registro do histórico legado</div>
       </td>
       <td className="px-4 py-3">
         <div className="font-medium">{item.empresa_nome || '-'}</div>
@@ -1055,8 +1270,8 @@ function ReservaRow({ item }: { item: SupplierReservation }) {
         <div className="text-xs text-slate-500">{item.solicitante_nome || '-'}</div>
       </td>
       <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
-        {formatDate(item.data_inicio)} até {formatDate(item.data_fim)}
-        <div className="mt-1 text-slate-500">{[item.origem, item.destino].filter(Boolean).join(' → ') || '-'}</div>
+        {formatPeriod(item.data_inicio, item.data_fim)}
+        <div className="mt-1 text-slate-500">{[item.origem, item.destino].filter(Boolean).join(' → ') || 'Trajeto não informado'}</div>
       </td>
       <td className="px-4 py-3">{currency(item.valor_estimado || 0)}</td>
       <td className="px-4 py-3"><StatusBadge status={item.status} /></td>
@@ -1259,6 +1474,18 @@ function currency(value: number): string {
   return Number(value || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 }
 
+function demandSerialKey(value?: string): string {
+  return String(value || '').trim().toLocaleUpperCase('pt-BR')
+}
+
+function mergeDemand(current: Atendimento[], demand: Atendimento): Atendimento[] {
+  const index = current.findIndex((item) => item.id === demand.id)
+  if (index < 0) return [demand, ...current]
+  const next = current.slice()
+  next[index] = demand
+  return next
+}
+
 function today(): string {
   return todayISODate()
 }
@@ -1268,4 +1495,31 @@ function formatDate(value?: string): string {
   const [year, month, day] = value.slice(0, 10).split('-')
   if (!year || !month || !day) return value
   return `${day}/${month}/${year}`
+}
+
+function formatPeriod(start?: string | null, end?: string | null): string {
+  if (start && end) return `${formatDate(start)} até ${formatDate(end)}`
+  if (start) return `A partir de ${formatDate(start)}`
+  if (end) return `Até ${formatDate(end)}`
+  return 'Período não informado'
+}
+
+function optionCountLabel(count: number): string {
+  return `${count} ${count === 1 ? 'opção' : 'opções'}`
+}
+
+function providerDisplayName(provider: string): string {
+  const normalized = String(provider || '').trim().toLowerCase()
+  if (normalized === 'manual-offline') return 'Atendimento offline'
+  if (normalized === 'legacy_supplier') return 'Histórico legado'
+  if (normalized === 'tech_travel') return 'Tech Travel'
+  return String(provider || 'Fornecedor').replace(/[_-]+/g, ' ')
+}
+
+function visibleProviderReference(reference?: string | null): string | null {
+  const normalized = String(reference || '').trim()
+  if (!normalized) return null
+  if (/^[a-z0-9_-]+:[a-z0-9_-]+:[a-f0-9]{20,}$/i.test(normalized)) return null
+  if (/^offline-(?:emission|reservation):/i.test(normalized)) return null
+  return normalized
 }

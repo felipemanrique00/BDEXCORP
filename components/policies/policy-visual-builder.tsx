@@ -12,9 +12,10 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
+import { DateTimeInput } from '@/components/ui/date-input'
 import {
   policyDraftInputSchema,
   policyVersionInputSchema,
@@ -217,6 +218,8 @@ export function PolicyVisualBuilder({
   onSaved,
   onCancelEdit,
 }: PolicyVisualBuilderProps) {
+  const validFromInputId = useId()
+  const validUntilInputId = useId()
   const [state, setState] = useState<BuilderState>(() => stateFromPolicy(initialPolicy, scopeOptions))
   const [saving, setSaving] = useState(false)
   const [showExceptions, setShowExceptions] = useState(Boolean(initialPolicy?.current?.exceptions?.length))
@@ -395,22 +398,30 @@ export function PolicyVisualBuilder({
                   className="bbt-input"
                 />
               </Field>
-              <Field label="Inicio opcional">
-                <input
-                  type="datetime-local"
-                  value={state.validFrom}
-                  onChange={(event) => setState((current) => ({ ...current, validFrom: event.target.value }))}
-                  className="bbt-input"
-                />
-              </Field>
-              <Field label="Fim opcional">
-                <input
-                  type="datetime-local"
-                  value={state.validUntil}
-                  onChange={(event) => setState((current) => ({ ...current, validUntil: event.target.value }))}
-                  className="bbt-input"
-                />
-              </Field>
+              <div className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <label htmlFor={validFromInputId}>Inicio opcional</label>
+                <div className="mt-1">
+                  <DateTimeInput
+                    id={validFromInputId}
+                    value={state.validFrom}
+                    onChange={(event) => setState((current) => ({ ...current, validFrom: event.target.value }))}
+                    className="bbt-input"
+                    pickerLabel="Abrir calendario de inicio da vigencia"
+                  />
+                </div>
+              </div>
+              <div className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <label htmlFor={validUntilInputId}>Fim opcional</label>
+                <div className="mt-1">
+                  <DateTimeInput
+                    id={validUntilInputId}
+                    value={state.validUntil}
+                    onChange={(event) => setState((current) => ({ ...current, validUntil: event.target.value }))}
+                    className="bbt-input"
+                    pickerLabel="Abrir calendario de fim da vigencia"
+                  />
+                </div>
+              </div>
             </div>
           </BuilderSection>
 

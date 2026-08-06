@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   canAssignRequesterMembership,
+  isRequesterUser,
   isRequesterLinkableMembershipRole,
   userAccessKind,
 } from '@/lib/user-access-kind'
@@ -26,6 +27,23 @@ describe('userAccessKind', () => {
   it('supports legacy users without role_key', () => {
     expect(userAccessKind({ role: 'master' })).toBe('internal')
     expect(userAccessKind({ role: 'colaborador', corporate_profile: 'requester' })).toBe('corporate')
+  })
+
+  it('uses an explicit role key before a stale requester corporate profile', () => {
+    expect(isRequesterUser({
+      role: 'company_admin',
+      role_key: 'company_admin',
+      corporate_profile: 'requester',
+    })).toBe(false)
+    expect(isRequesterUser({
+      role: 'colaborador',
+      role_key: 'requester',
+      corporate_profile: 'viewer',
+    })).toBe(true)
+    expect(isRequesterUser({
+      role: 'colaborador',
+      corporate_profile: 'requester',
+    })).toBe(true)
   })
 
   it('allows requester links only to explicitly corporate memberships', () => {

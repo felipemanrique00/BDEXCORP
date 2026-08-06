@@ -28,6 +28,7 @@ import {
 import { canEditGlobal, getCurrentUser, getEmpresasPermitidas, hasPermission } from '@/lib/auth'
 import { getAllAtendimentos } from '@/lib/atendimentos-storage'
 import { persistNewDemandWithCompatibility } from '@/lib/demand-persistence-client'
+import { listDemandsFromServer } from '@/lib/demands-client'
 import {
   atualizarCarteiraEmpresa,
   criarCartaoCorporativo,
@@ -51,6 +52,7 @@ import { formatCurrency, formatDate } from '@/lib/utils'
 import { getOperationalAlerts } from '@/lib/operational-alerts'
 import { useStore } from '@/lib/store'
 import { getAllVouchersEmitidos } from '@/lib/vouchers-emitidos-storage'
+import { listVouchersFromServer } from '@/lib/voucher-persistence-client'
 import { getEmpresasDoGrupo } from '@/lib/grupos'
 import { encontrarFuncionarioPorCodigo, resolverFuncionarioAtendimento } from '@/lib/funcionario-identidade'
 import {
@@ -59,11 +61,39 @@ import {
 import { listarViajantes } from '@/lib/duty-of-care'
 import { AI_SHORT_NAME } from '@/lib/branding'
 import { AIAssistantFab, AI_CONTEXT_EVENTS } from '@/components/ai/ai-assistant-fab'
-import type { Atendimento, CartaoCorporativo, Empresa, Prioridade, TipoServico } from '@/types'
+import { HotelDemandConfigurator } from '@/components/travel/hotel-demand-configurator'
+import { OfflineQuoteChoicePanel } from '@/components/travel/offline-quote-choice-panel'
+import { DateInput } from '@/components/ui/date-input'
+import {
+  HotelDemandGuestsAdmin,
+  type HotelDemandCostCenterOption,
+  type HotelDemandRequesterOption,
+} from '@/components/travel/hotel-demand-guests-admin'
+import { hotelDemandAdministrativeSchema } from '@/lib/hotel-demand/form'
+import { hotelDemandDetailsSchema } from '@/lib/hotel-demand/model'
+import type {
+  Atendimento,
+  CartaoCorporativo,
+  DetalhesHotel,
+  Empresa,
+  FormaPagamento,
+  Prioridade,
+  TipoServico,
+  VoucherEmitido,
+} from '@/types'
 import { filtrarPeriodo, montarMetricasRelatorio, montarRelatorioOperacional } from '@/lib/relatorios'
 import { createEntityId } from '@/lib/ids'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { isRequesterUser } from '@/lib/user-access-kind'
 import { useCorporateCompanyScope, useCorporateContext } from '@/components/corporate-context-provider'
+import {
+  collectVisiblePortalDemandIds,
+  mergePortalDemands,
+  mergePortalVouchers,
+  parsePortalNavigation,
+  PORTAL_REQUESTS_CHOICE_PANEL_ID,
+  type PortalRecordScope,
+} from '@/lib/portal-relational-sync'
 
 type Aba = 'home' | 'empresa' | 'viagens' | 'pedidos' | 'vouchers' | 'financeiro' | 'carteira' | 'relatorios' | 'pegada'
 type EscopoPortal = 'empresa' | 'grupo'
@@ -116,6 +146,12 @@ export default function PortalEmpresaPage() {
   const { empresas, funcionarios, politicas, gruposEmpresariais } = useStore()
   const [reload, setReload] = useState(0)
   const [aba, setAba] = useState<Aba>('home')
+  const [navigationPanel, setNavigationPanel] = useState<string | null>(null)
+  const navigationAppliedRef = useRef(false)
+  const [serverDemands, setServerDemands] = useState<Atendimento[]>([])
+  const [serverVouchers, setServerVouchers] = useState<VoucherEmitido[]>([])
+  const [demandSyncError, setDemandSyncError] = useState('')
+  const [voucherSyncError, setVoucherSyncError] = useState('')
   const [escopo, setEscopo] = useState<EscopoPortal>(user?.grupo_ids?.length ? 'grupo' : 'empresa')
   const [empresaId, setEmpresaId] = useState(user?.company_id || user?.empresa_ids?.[0] || '')
   const [grupoId, setGrupoId] = useState(user?.grupo_ids?.[0] || '')
@@ -202,12 +238,29 @@ export default function PortalEmpresaPage() {
       ? getSolicitantePorEmail(user.company_id, user.email)
       : null
   const solicitanteBloqueado = solicitanteAtual?.status === 'bloqueado'
+  const podeLerDemandasGlobalmente = hasPermission(user, 'ver_demandas')
+  const podeLerVouchersGlobalmente = hasPermission(user, 'ver_vouchers') &&
+    (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_ver_vouchers)
+  const empresaIdsDemandas = useMemo(
+    () => new Set(podeLerDemandasGlobalmente
+      ? empresasEscopo
+        .filter((empresa) => includesCompany(empresa.id, 'ver_demandas'))
+        .map((empresa) => empresa.id)
+      : []),
+    [empresasEscopo, includesCompany, podeLerDemandasGlobalmente],
+  )
+  const empresaIdsVouchers = useMemo(
+    () => new Set(podeLerVouchersGlobalmente
+      ? empresasEscopo
+        .filter((empresa) => includesCompany(empresa.id, 'ver_vouchers'))
+        .map((empresa) => empresa.id)
+      : []),
+    [empresasEscopo, includesCompany, podeLerVouchersGlobalmente],
+  )
+  const podeVerPedidos = empresaIdsDemandas.size > 0
   const podeCriarPedido = hasPermission(user, 'criar_demandas') && includesCompany(empresaId, 'criar_demandas') &&
     (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_criar_demanda) && escopo === 'empresa'
-  const podeVerVouchers = hasPermission(user, 'ver_vouchers') && empresasEscopo.some((empresa) => (
-    includesCompany(empresa.id, 'ver_vouchers')
-  )) &&
-    (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_ver_vouchers)
+  const podeVerVouchers = empresaIdsVouchers.size > 0
   const podeVerFinanceiro = hasPermission(user, 'ver_financeiro') && empresasEscopo.some((empresa) => (
     includesCompany(empresa.id, 'ver_financeiro')
   )) &&
@@ -219,6 +272,60 @@ export default function PortalEmpresaPage() {
     [empresasEscopo, includesCompany],
   )
   const empresaIdsFinanceiroKey = [...empresaIdsFinanceiro].sort().join('|')
+  const empresaIdsDemandasKey = [...empresaIdsDemandas].sort().join('|')
+  const empresaIdsVouchersKey = [...empresaIdsVouchers].sort().join('|')
+  const requesterRestricted = isRequesterUser(user)
+  const trustedServerDemandIds = useMemo(
+    () => new Set(serverDemands.map((demand) => demand.id)),
+    [serverDemands],
+  )
+  const trustedServerVoucherIds = useMemo(
+    () => new Set(serverVouchers.map((voucher) => voucher.id)),
+    [serverVouchers],
+  )
+  const employeeIdsUsuario = useMemo(() => {
+    const userEmail = String(user?.email || '').trim().toLowerCase()
+    const ids = new Set<string>()
+    if (solicitanteAtual?.funcionario_id) ids.add(solicitanteAtual.funcionario_id)
+    if (userEmail) {
+      funcionariosEmpresa.forEach((funcionario) => {
+        if (String(funcionario.email || '').trim().toLowerCase() === userEmail) ids.add(funcionario.id)
+      })
+    }
+    return ids
+  }, [funcionariosEmpresa, solicitanteAtual?.funcionario_id, user?.email])
+  const demandRecordScope = useMemo<PortalRecordScope>(() => ({
+    allowedCompanyIds: empresaIdsDemandas,
+    requesterRestricted,
+    requesterId: solicitanteAtual?.id || null,
+    requesterEmail: user?.email || solicitanteAtual?.email || null,
+    employeeIds: employeeIdsUsuario,
+    trustedServerDemandIds,
+  }), [
+    employeeIdsUsuario,
+    empresaIdsDemandas,
+    requesterRestricted,
+    solicitanteAtual?.email,
+    solicitanteAtual?.id,
+    trustedServerDemandIds,
+    user?.email,
+  ])
+  const voucherRecordScope = useMemo<PortalRecordScope>(() => ({
+    allowedCompanyIds: empresaIdsVouchers,
+    requesterRestricted,
+    requesterId: solicitanteAtual?.id || null,
+    requesterEmail: user?.email || solicitanteAtual?.email || null,
+    employeeIds: employeeIdsUsuario,
+    trustedServerVoucherIds,
+  }), [
+    employeeIdsUsuario,
+    empresaIdsVouchers,
+    requesterRestricted,
+    solicitanteAtual?.email,
+    solicitanteAtual?.id,
+    trustedServerVoucherIds,
+    user?.email,
+  ])
 
   useEffect(() => {
     if (!podeVerFinanceiro || !empresaIdsFinanceiroKey) return
@@ -245,15 +352,101 @@ export default function PortalEmpresaPage() {
     }
   }, [empresaIdsFinanceiroKey, podeVerFinanceiro])
 
+  useEffect(() => {
+    if (navigationAppliedRef.current || typeof window === 'undefined') return
+    if (!user || empresasEscopo.length === 0) return
+    const target = parsePortalNavigation(window.location.search)
+    const allowed = target.tab === 'pedidos'
+      ? podeVerPedidos
+      : target.tab === 'vouchers'
+        ? podeVerVouchers
+        : target.tab === 'financeiro' || target.tab === 'carteira' || target.tab === 'relatorios'
+          ? podeVerFinanceiro
+          : Boolean(target.tab)
+    if (target.tab && allowed) setAba(target.tab)
+    setNavigationPanel(target.panel)
+    navigationAppliedRef.current = true
+  }, [empresasEscopo.length, podeVerFinanceiro, podeVerPedidos, podeVerVouchers, user])
+
+  useEffect(() => {
+    if (aba !== 'pedidos' || navigationPanel !== PORTAL_REQUESTS_CHOICE_PANEL_ID) return
+    const timeout = window.setTimeout(() => {
+      document.getElementById(PORTAL_REQUESTS_CHOICE_PANEL_ID)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    }, 0)
+    return () => window.clearTimeout(timeout)
+  }, [aba, navigationPanel])
+
+  useEffect(() => {
+    if (!podeVerPedidos || !empresaIdsDemandasKey) {
+      setServerDemands([])
+      setDemandSyncError('')
+      return
+    }
+    let active = true
+    setServerDemands([])
+    setDemandSyncError('')
+    void listDemandsFromServer({ limit: 200 })
+      .then((result) => {
+        if (active) setServerDemands(result.items.map((item) => item.demand))
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        setDemandSyncError(error instanceof Error
+          ? error.message
+          : 'Nao foi possivel carregar os pedidos do servidor.')
+      })
+    return () => { active = false }
+  }, [empresaIdsDemandasKey, podeVerPedidos, reload])
+
+  useEffect(() => {
+    if (!podeVerVouchers || !empresaIdsVouchersKey) {
+      setServerVouchers([])
+      setVoucherSyncError('')
+      return
+    }
+    const controller = new AbortController()
+    setServerVouchers([])
+    setVoucherSyncError('')
+    void listVouchersFromServer({ limit: 500, offset: 0 }, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setServerVouchers(result.items)
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        setVoucherSyncError(error instanceof Error
+          ? error.message
+          : 'Nao foi possivel carregar os vouchers do servidor.')
+      })
+    return () => controller.abort()
+  }, [empresaIdsVouchersKey, podeVerVouchers, reload])
+
+  const legacyDemands = useMemo(() => {
+    void reload
+    return getAllAtendimentos()
+  }, [reload])
+  const legacyVouchers = useMemo(() => {
+    void reload
+    return getAllVouchersEmitidos()
+  }, [reload])
   const atendimentos = useMemo(
-    () => getAllAtendimentos().filter((a) => empresaIdsEscopo.has(a.empresa_id)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [empresaIdsEscopo, reload],
+    () => mergePortalDemands(legacyDemands, serverDemands, demandRecordScope),
+    [demandRecordScope, legacyDemands, serverDemands],
+  )
+  const ownedDemandIds = useMemo(
+    () => collectVisiblePortalDemandIds(legacyDemands, serverDemands, demandRecordScope),
+    [demandRecordScope, legacyDemands, serverDemands],
   )
   const vouchers = useMemo(
-    () => getAllVouchersEmitidos().filter((v) => empresaIdsEscopo.has((v as any).empresa_id)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [empresaIdsEscopo, reload],
+    () => mergePortalVouchers(
+      legacyVouchers,
+      serverVouchers,
+      voucherRecordScope,
+      ownedDemandIds,
+    ),
+    [legacyVouchers, ownedDemandIds, serverVouchers, voucherRecordScope],
   )
   const lancamentos = useMemo(
     () => getAllLancamentos().filter((l) => Boolean(l.empresa_id) && empresaIdsFinanceiro.has(l.empresa_id!)),
@@ -508,12 +701,18 @@ export default function PortalEmpresaPage() {
         </div>
       )}
 
+      {(demandSyncError || voucherSyncError) && (
+        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-200">
+          Alguns dados do servidor estao temporariamente indisponiveis. O portal manteve os registros locais autorizados como contingencia.
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2 border-b border-bbt-gray-100 dark:border-slate-700 -mt-1">
         {([
           { id: 'home', label: 'Home', icon: Activity, count: undefined as any, hidden: false },
           { id: 'empresa', label: 'Empresa', icon: Building2, count: undefined as any, hidden: false },
           { id: 'viagens', label: 'Minhas viagens', icon: Plane, count: stats.em_campo + stats.proximas7d, hidden: false },
-          { id: 'pedidos', label: 'Pedidos', icon: Briefcase, count: stats.pendentes, hidden: !podeCriarPedido },
+          { id: 'pedidos', label: 'Pedidos', icon: Briefcase, count: stats.pendentes, hidden: !podeVerPedidos },
           { id: 'vouchers', label: 'Vouchers', icon: FileText, count: stats.vouchers_emitidos, hidden: !podeVerVouchers },
           { id: 'financeiro', label: 'Financeiro', icon: Wallet, count: undefined as any, hidden: !podeVerFinanceiro },
           { id: 'carteira', label: 'Carteira digital', icon: CreditCard, count: carteira?.cartoes?.length || undefined, hidden: !podeVerFinanceiro || escopo === 'grupo' },
@@ -594,11 +793,16 @@ export default function PortalEmpresaPage() {
         )
       )}
       {aba === 'viagens' && <ViagensTab viajantes={viajantes} />}
-      {aba === 'pedidos' && podeCriarPedido && (
+      {aba === 'pedidos' && podeVerPedidos && (
         <PedidosTab
+          authenticatedUser={user}
+          empresa={empresaSel}
           empresaId={empresaId}
           atendimentos={atendimentos}
           funcionariosEmpresa={funcionariosEmpresa}
+          solicitanteAtual={solicitanteAtual}
+          solicitantes={solicitantesEmpresa}
+          isInternalUser={isInternalUser}
           onSaved={refresh}
           podeCriar={podeCriarPedido && !solicitanteBloqueado}
         />
@@ -1164,7 +1368,18 @@ function ViagensTab({ viajantes }: any) {
   )
 }
 
-function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, podeCriar }: any) {
+function PedidosTab({
+  authenticatedUser,
+  empresa,
+  empresaId,
+  atendimentos,
+  funcionariosEmpresa,
+  solicitanteAtual,
+  solicitantes,
+  isInternalUser,
+  onSaved,
+  podeCriar,
+}: any) {
   const [tipo, setTipo] = useState<TipoServico>('Hotel')
   const [funcId, setFuncId] = useState('')
   const [funcCodigo, setFuncCodigo] = useState('')
@@ -1173,10 +1388,100 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
   const [destino, setDestino] = useState('')
   const [dataInicio, setDataInicio] = useState('')
   const [dataFim, setDataFim] = useState('')
+  const [detHotel, setDetHotel] = useState<DetalhesHotel>({})
   const [observacoes, setObservacoes] = useState('')
+  const [requesterId, setRequesterId] = useState('')
+  const [requesterName, setRequesterName] = useState(String(
+    solicitanteAtual?.nome
+      || (!isInternalUser ? authenticatedUser?.nome || authenticatedUser?.name || authenticatedUser?.email : '')
+      || '',
+  ))
+  const [costCenterId, setCostCenterId] = useState<string | null>(empresa?.centro_custo_padrao_id || null)
+  const [costCenterCode, setCostCenterCode] = useState(String(empresa?.centro_custo_padrao || ''))
+  const [costCenters, setCostCenters] = useState<HotelDemandCostCenterOption[]>([])
+  const [costCentersLoading, setCostCentersLoading] = useState(false)
+  const [costCentersUnavailable, setCostCentersUnavailable] = useState(false)
+  const [paymentMethod, setPaymentMethod] = useState<FormaPagamento | ''>('IV')
   const [prioridade, setPrioridade] = useState<Prioridade>('media')
   const [enviando, setEnviando] = useState(false)
   const [pedidosVisiveis, setPedidosVisiveis] = useState(50)
+
+  const requesterOptions = useMemo<HotelDemandRequesterOption[]>(() => {
+    const byId = new Map<string, HotelDemandRequesterOption>()
+    for (const requester of Array.isArray(solicitantes) ? solicitantes : []) {
+      const id = String(requester?.id || '')
+      if (!id) continue
+      byId.set(id, {
+        id,
+        name: String(requester?.nome || requester?.name || id),
+        email: requester?.email ? String(requester.email) : null,
+      })
+    }
+    if (solicitanteAtual?.id) {
+      byId.set(String(solicitanteAtual.id), {
+        id: String(solicitanteAtual.id),
+        name: String(solicitanteAtual.nome || solicitanteAtual.id),
+        email: solicitanteAtual.email ? String(solicitanteAtual.email) : null,
+      })
+    }
+    return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'))
+  }, [solicitanteAtual, solicitantes])
+
+  useEffect(() => {
+    if (isInternalUser) return
+    setRequesterId('')
+    setRequesterName(String(
+      solicitanteAtual?.nome
+        || authenticatedUser?.nome
+        || authenticatedUser?.name
+        || authenticatedUser?.email
+        || '',
+    ))
+  }, [authenticatedUser, isInternalUser, solicitanteAtual?.id, solicitanteAtual?.nome])
+
+  useEffect(() => {
+    setCostCenterId(empresa?.centro_custo_padrao_id || null)
+    setCostCenterCode(String(empresa?.centro_custo_padrao || ''))
+    if (!empresaId) {
+      setCostCenters([])
+      setCostCentersLoading(false)
+      setCostCentersUnavailable(false)
+      return
+    }
+    const controller = new AbortController()
+    setCostCenters([])
+    setCostCentersLoading(true)
+    setCostCentersUnavailable(false)
+    void fetch(`/api/cost-centers?companyId=${encodeURIComponent(empresaId)}`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}))
+        if (!response.ok || payload?.ok !== true) {
+          throw new Error(String(payload?.error || 'Falha ao carregar centros de custo.'))
+        }
+        const items = Array.isArray(payload.items) ? payload.items : []
+        setCostCenters(items.flatMap((item: any): HotelDemandCostCenterOption[] => {
+          const id = String(item?.projectionId || item?.projection_id || item?.companyCostCenterId || '')
+          const code = String(item?.code || '').trim()
+          if (!id || !code || item?.isActive === false) return []
+          return [{
+            id,
+            code,
+            name: String(item?.name || code),
+            hierarchyLevel: Number(item?.hierarchyLevel || item?.hierarchy_level || 1),
+          }]
+        }))
+      })
+      .catch((error) => {
+        if (error?.name !== 'AbortError') setCostCentersUnavailable(true)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCostCentersLoading(false)
+      })
+    return () => controller.abort()
+  }, [empresa?.centro_custo_padrao, empresa?.centro_custo_padrao_id, empresaId])
 
   function preencherFunc(id: string) {
     setFuncId(id)
@@ -1199,18 +1504,60 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
   async function enviarPedido(e: React.FormEvent) {
     e.preventDefault()
     if (!podeCriar) return
-    if (!passageiro.trim()) return toast.error('Informe o passageiro.')
+    const parsedHotel = tipo === 'Hotel' ? hotelDemandDetailsSchema.safeParse(detHotel) : null
+    if (parsedHotel && !parsedHotel.success) {
+      return toast.error(parsedHotel.error.issues[0]?.message || 'Revise destino, datas, quartos e hospedes.')
+    }
+    const hotelPrimaryGuest = parsedHotel?.success
+      ? parsedHotel.data.rooms.flatMap((room) => room.guests).find((guest) => guest.role === 'responsible')
+      : null
+    const effectivePassengerName = tipo === 'Hotel' ? hotelPrimaryGuest?.name || '' : passageiro.trim()
+    const effectiveEmployeeId = tipo === 'Hotel' ? hotelPrimaryGuest?.employee_id || null : funcId || null
+    if (!effectivePassengerName) return toast.error(tipo === 'Hotel' ? 'Selecione o hospede responsavel.' : 'Informe o passageiro.')
+    if (tipo === 'Hotel') {
+      const parsedAdministrative = hotelDemandAdministrativeSchema.safeParse({
+        company_id: empresaId,
+        requester_id: requesterId,
+        requester_name: requesterName,
+        cost_center_id: costCenterId,
+        cost_center_code: costCenterCode,
+        payment_method: paymentMethod,
+        observations: observacoes,
+      })
+      if (!parsedAdministrative.success) {
+        return toast.error(parsedAdministrative.error.issues[0]?.message || 'Revise os dados administrativos do pedido.')
+      }
+      if (isInternalUser && !requesterId) return toast.error('Selecione o solicitante.')
+      if (costCentersLoading) return toast.error('Aguarde o carregamento dos centros de custo.')
+      if (costCenterId && !costCentersUnavailable && !costCenters.some((item) => item.id === costCenterId)) {
+        return toast.error('O centro de custo selecionado esta inativo ou indisponivel para a empresa.')
+      }
+    }
     setEnviando(true)
     try {
       const user = getCurrentUser()
       const novo: Atendimento = {
         id: createEntityId('at'),
         empresa_id: empresaId,
-        funcionario_id: funcId || null,
-        passageiro_nome: passageiro.trim(),
+        funcionario_id: effectiveEmployeeId,
+        passageiro_nome: effectivePassengerName,
         tipo_servico: tipo,
         valor_cotacao: 0,
         agente_user_id: user?.id || '',
+        ...(tipo === 'Hotel'
+          ? {
+              ...(requesterId ? { solicitante_id: requesterId } : {}),
+              solicitante_nome: requesterName,
+              cost_center_id: costCenterId,
+              centro_custo: costCenterCode.trim() || undefined,
+              forma_pagamento: paymentMethod || undefined,
+            }
+          : !isInternalUser ? {
+              solicitante_nome: requesterName,
+            } : solicitanteAtual ? {
+              solicitante_id: solicitanteAtual.id,
+              solicitante_nome: solicitanteAtual.nome,
+            } : {}),
         status: 'pendente',
         prioridade,
         origem: 'Portal',
@@ -1219,15 +1566,31 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
         ...(tipo === 'Aéreo'
           ? { detalhes_aereo: { origem: origem.trim(), destino: destino.trim(), data_ida: dataInicio, data_volta: dataFim } }
           : tipo === 'Hotel'
-          ? { detalhes_hotel: { cidade: destino.trim(), data_checkin: dataInicio, data_checkout: dataFim } }
+          ? { detalhes_hotel: parsedHotel?.success ? parsedHotel.data : detHotel }
           : tipo === 'Carro'
           ? { detalhes_carro: { cidade_retirada: destino.trim(), data_retirada: dataInicio, data_devolucao: dataFim } }
           : { detalhes_pacote: { destino: destino.trim(), data_ida: dataInicio, data_volta: dataFim, descricao: observacoes } }),
         created_at: new Date().toISOString(),
       }
-      const atendimento = (await persistNewDemandWithCompatibility(novo)).demand
-      toast.success('Pedido enviado! A BBT já recebeu.')
-      setPassageiro(''); setOrigem(''); setDestino(''); setDataInicio(''); setDataFim(''); setObservacoes(''); setFuncId(''); setFuncCodigo('')
+      const persistida = await persistNewDemandWithCompatibility(novo, tipo !== 'Hotel')
+      const atendimento = persistida.demand
+      if (tipo === 'Hotel') {
+        toast.success(`Pedido ${atendimento.serial_os || atendimento.id} enviado para cotacao do consultor.`)
+      } else if (persistida.governance?.policy.blocked) {
+        toast.warning(`Pedido ${atendimento.serial_os || atendimento.id} bloqueado pela política corporativa.`)
+      } else if (persistida.governance?.policy.requiresAction) {
+        toast.warning(`Pedido ${atendimento.serial_os || atendimento.id} aguarda requisitos obrigatórios da política.`)
+      } else if (persistida.governance?.approval.required) {
+        toast.info(persistida.governance.approval.configured
+          ? `Pedido ${atendimento.serial_os || atendimento.id} enviado para aprovação.`
+          : `Pedido ${atendimento.serial_os || atendimento.id} criado, mas o workflow de aprovação não está configurado.`)
+      } else {
+        toast.success('Pedido enviado! A BBT já recebeu.')
+      }
+      setPassageiro(''); setOrigem(''); setDestino(''); setDataInicio(''); setDataFim(''); setDetHotel({}); setObservacoes(''); setFuncId(''); setFuncCodigo('')
+      setCostCenterId(empresa?.centro_custo_padrao_id || null)
+      setCostCenterCode(String(empresa?.centro_custo_padrao || ''))
+      setPaymentMethod('IV')
       onSaved()
     } catch (e: any) {
       toast.error(e?.message || 'Erro ao enviar pedido.')
@@ -1237,7 +1600,18 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[420px_1fr]">
+    <div className="space-y-4">
+      {isRequesterUser(authenticatedUser) && (
+        <div id={PORTAL_REQUESTS_CHOICE_PANEL_ID} tabIndex={-1} className="scroll-mt-24 outline-none">
+          <OfflineQuoteChoicePanel
+            demands={atendimentos}
+            requesterId={solicitanteAtual?.id || null}
+            onCompleted={onSaved}
+          />
+        </div>
+      )}
+
+      <div className={`grid gap-4 ${tipo === 'Hotel' ? 'xl:grid-cols-[minmax(0,760px)_1fr]' : 'lg:grid-cols-[420px_1fr]'}`}>
       {podeCriar && (
         <form onSubmit={enviarPedido} className="bbt-card p-5 space-y-3">
           <h3 className="font-bold text-bbt-primary dark:text-white flex items-center gap-2">
@@ -1254,41 +1628,88 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
               ))}
             </div>
           </Field>
-          <Field label="Funcionário (opcional)">
-            <input
-              value={funcCodigo}
-              onChange={(e) => preencherFuncPorCodigo(e.target.value)}
-              className="bbt-input mb-2"
-              placeholder="ID do funcionário"
-              inputMode="numeric"
-            />
-            <select value={funcId} onChange={(e) => preencherFunc(e.target.value)} className="bbt-input">
-              <option value="">Sem vínculo</option>
-              {funcionariosEmpresa.map((f: any) => <option key={f.id} value={f.id}>{f.codigo_identificacao ? `${f.codigo_identificacao} - ` : ''}{f.nome}</option>)}
-            </select>
-          </Field>
-          <Field label="Passageiro *">
-            <input value={passageiro} onChange={(e) => setPassageiro(e.target.value)} className="bbt-input" required />
-          </Field>
+          {tipo !== 'Hotel' && (
+            <>
+              <Field label="Funcionário (opcional)">
+                <input
+                  value={funcCodigo}
+                  onChange={(e) => preencherFuncPorCodigo(e.target.value)}
+                  className="bbt-input mb-2"
+                  placeholder="ID do funcionário"
+                  inputMode="numeric"
+                />
+                <select value={funcId} onChange={(e) => preencherFunc(e.target.value)} className="bbt-input">
+                  <option value="">Sem vínculo</option>
+                  {funcionariosEmpresa.map((f: any) => <option key={f.id} value={f.id}>{f.codigo_identificacao ? `${f.codigo_identificacao} - ` : ''}{f.nome}</option>)}
+                </select>
+              </Field>
+              <Field label="Passageiro *">
+                <input value={passageiro} onChange={(e) => setPassageiro(e.target.value)} className="bbt-input" required />
+              </Field>
+            </>
+          )}
+          {tipo === 'Hotel' && (
+            <div className="space-y-5">
+              <HotelDemandConfigurator
+                companyId={empresaId}
+                value={detHotel}
+                onChange={setDetHotel}
+                disabled={enviando}
+                showGuests={false}
+              />
+              <HotelDemandGuestsAdmin
+                details={detHotel}
+                onDetailsChange={setDetHotel}
+                companyId={empresaId}
+                companies={empresa ? [empresa] : []}
+                onCompanyChange={() => undefined}
+                requesterId={requesterId}
+                requesters={requesterOptions}
+                requesterFallbackLabel={!isInternalUser
+                  ? requesterName || authenticatedUser?.email || 'Solicitante autenticado'
+                  : undefined}
+                onRequesterChange={(requester) => {
+                  setRequesterId(requester?.id || '')
+                  setRequesterName(requester?.name || '')
+                }}
+                costCenterId={costCenterId}
+                costCenterCode={costCenterCode}
+                costCenters={costCenters}
+                onCostCenterChange={(id, code) => {
+                  setCostCenterId(id)
+                  setCostCenterCode(code)
+                }}
+                paymentMethod={paymentMethod}
+                onPaymentMethodChange={setPaymentMethod}
+                observations={observacoes}
+                onObservationsChange={setObservacoes}
+                costCentersLoading={costCentersLoading}
+                costCentersUnavailable={costCentersUnavailable}
+                companyLocked
+                requesterLocked={!isInternalUser}
+                disabled={enviando}
+              />
+            </div>
+          )}
           {tipo === 'Aéreo' && (
             <div className="grid grid-cols-2 gap-2">
               <Field label="Origem"><input value={origem} onChange={(e) => setOrigem(e.target.value)} className="bbt-input" /></Field>
               <Field label="Destino"><input value={destino} onChange={(e) => setDestino(e.target.value)} className="bbt-input" /></Field>
             </div>
           )}
-          {tipo !== 'Aéreo' && (
+          {tipo !== 'Aéreo' && tipo !== 'Hotel' && (
             <Field label="Cidade / Destino">
               <input value={destino} onChange={(e) => setDestino(e.target.value)} className="bbt-input" />
             </Field>
           )}
-          <div className="grid grid-cols-2 gap-2">
-            <Field label={tipo === 'Hotel' ? 'Check-in' : 'Data inicial'}>
-              <input type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} className="bbt-input" />
+          {tipo !== 'Hotel' && <div className="grid grid-cols-2 gap-2">
+            <Field label="Data inicial" htmlFor="nova-demanda-data-inicio">
+              <DateInput id="nova-demanda-data-inicio" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} />
             </Field>
-            <Field label={tipo === 'Hotel' ? 'Check-out' : 'Data final'}>
-              <input type="date" value={dataFim} onChange={(e) => setDataFim(e.target.value)} className="bbt-input" />
+            <Field label="Data final" htmlFor="nova-demanda-data-fim">
+              <DateInput id="nova-demanda-data-fim" value={dataFim} onChange={(e) => setDataFim(e.target.value)} />
             </Field>
-          </div>
+          </div>}
           <Field label="Prioridade">
             <select value={prioridade} onChange={(e) => setPrioridade(e.target.value as Prioridade)} className="bbt-input">
               <option value="baixa">Baixa</option>
@@ -1297,12 +1718,14 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
               <option value="urgente">Urgente</option>
             </select>
           </Field>
-          <Field label="Observações">
-            <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} rows={3} className="bbt-input" placeholder="Detalhes adicionais, preferências, etc." />
-          </Field>
+          {tipo !== 'Hotel' && (
+            <Field label="Observações">
+              <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} rows={3} className="bbt-input" placeholder="Detalhes adicionais, preferências, etc." />
+            </Field>
+          )}
           <button type="submit" disabled={enviando} className="bbt-button-primary w-full">
             <Send className="w-4 h-4" />
-            {enviando ? 'Enviando...' : 'Enviar pedido'}
+            {enviando ? 'Enviando...' : tipo === 'Hotel' ? 'Enviar para cotação' : 'Enviar pedido'}
           </button>
         </form>
       )}
@@ -1355,6 +1778,7 @@ function PedidosTab({ empresaId, atendimentos, funcionariosEmpresa, onSaved, pod
             )}
           </div>
         )}
+      </div>
       </div>
     </div>
   )
@@ -1604,9 +2028,9 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <input type="date" value={inicio} onChange={(e) => setInicio(e.target.value)} className="bbt-input w-auto" />
+            <DateInput aria-label="Data inicial dos relatórios corporativos" value={inicio} onChange={(e) => setInicio(e.target.value)} className="w-auto" containerClassName="w-auto" />
             <span className="text-xs text-slate-400">até</span>
-            <input type="date" value={fim} onChange={(e) => setFim(e.target.value)} className="bbt-input w-auto" />
+            <DateInput aria-label="Data final dos relatórios corporativos" value={fim} onChange={(e) => setFim(e.target.value)} className="w-auto" containerClassName="w-auto" />
           </div>
         </div>
       </div>
@@ -2387,10 +2811,10 @@ function PermissionLine({ label, enabled, text }: { label: string; enabled: bool
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, htmlFor }: { label: string; children: React.ReactNode; htmlFor?: string }) {
   return (
     <div>
-      <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+      <label htmlFor={htmlFor} className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
         {label}
       </label>
       {children}

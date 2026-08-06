@@ -9,8 +9,9 @@ const transfersSource = readFileSync(
 )
 
 describe('header hydration', () => {
-  it('uses the server-provided user for the pending-transfers trigger', () => {
-    expect(headerSource).toContain('<TransferenciasPendentesPainel userId={user.id} />')
+  it('uses the server-provided user and avoids polling transfers for unsupported roles', () => {
+    expect(headerSource).toContain("['tenant_admin', 'agent', 'supervisor', 'operator'].includes(user.role_key || '')")
+    expect(headerSource).toContain('{canUseDemandTransfers && <TransferenciasPendentesPainel userId={user.id} />}')
     expect(transfersSource).toContain('userId: string')
     expect(transfersSource).not.toContain("typeof window !== 'undefined'")
     expect(transfersSource).not.toContain('getCurrentUser')

@@ -1,4 +1,4 @@
-export type IntegrationProvider = 'tech-ttravel'
+export type IntegrationProvider = 'tech-ttravel' | 'manual-offline'
 
 export type TravelService = 'aereo' | 'hotelaria' | 'locacao' | 'pacotes' | 'lazer' | 'transfer' | 'seguro' | 'rodoviario'
 

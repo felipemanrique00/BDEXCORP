@@ -22,10 +22,11 @@ import {
   Workflow,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import { useCorporateContext } from '@/components/corporate-context-provider'
+import { DateTimeInput } from '@/components/ui/date-input'
 import { WorkflowEdgeEditor } from '@/components/workflows/workflow-edge-editor'
 import { WorkflowExecutionPanel } from '@/components/workflows/workflow-execution-panel'
 import {
@@ -767,6 +768,9 @@ function DesignerPanel({
   onDeleteNode: () => void
   onPatch: (patch: Partial<WorkflowEditorModel>) => void
 }) {
+  const validFromInputId = useId()
+  const validUntilInputId = useId()
+
   return (
     <div className="space-y-4">
       <section className="bbt-card grid gap-4 p-4 lg:grid-cols-2">
@@ -803,26 +807,28 @@ function DesignerPanel({
             placeholder="viagem, aprovação, financeiro"
           />
         </label>
-        <label className="text-xs font-semibold uppercase text-slate-500">
-          Início da vigência
-          <input
-            type="datetime-local"
+        <div className="text-xs font-semibold uppercase text-slate-500">
+          <label htmlFor={validFromInputId}>Início da vigência</label>
+          <DateTimeInput
+            id={validFromInputId}
             value={toLocalInput(editor.validFrom)}
             onChange={(event) => onPatch({ validFrom: inputToIso(event.target.value) })}
             className="bbt-input mt-1 w-full normal-case"
             disabled={!canManage}
+            pickerLabel="Abrir calendário de início da vigência"
           />
-        </label>
-        <label className="text-xs font-semibold uppercase text-slate-500">
-          Fim da vigência
-          <input
-            type="datetime-local"
+        </div>
+        <div className="text-xs font-semibold uppercase text-slate-500">
+          <label htmlFor={validUntilInputId}>Fim da vigência</label>
+          <DateTimeInput
+            id={validUntilInputId}
             value={toLocalInput(editor.validUntil)}
             onChange={(event) => onPatch({ validUntil: inputToIso(event.target.value) })}
             className="bbt-input mt-1 w-full normal-case"
             disabled={!canManage}
+            pickerLabel="Abrir calendário de fim da vigência"
           />
-        </label>
+        </div>
         <ScopeEditor
           scopes={editor.scopes}
           access={access}

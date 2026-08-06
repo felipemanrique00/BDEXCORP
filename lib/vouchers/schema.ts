@@ -28,8 +28,42 @@ const optionalPositiveInteger = z.preprocess(
   z.coerce.number().int().min(0).max(1_000_000).optional(),
 )
 
+const voucherGuestSchema = z.object({
+  nome: z.string().trim().min(1).max(300),
+  papel: optionalText(80),
+  principal: z.boolean().optional(),
+  codigo: optionalText(120),
+  documento: optionalText(80),
+  email: z.preprocess(
+    (value) => String(value ?? '').trim().toLowerCase() || undefined,
+    z.string().email().max(320).optional(),
+  ),
+  telefone: optionalText(80),
+  quarto: optionalPositiveInteger,
+}).strict()
+
+const voucherRoomSchema = z.object({
+  numero: z.coerce.number().int().positive().max(99),
+  acomodacao: optionalText(160),
+  categoria: optionalText(160),
+  regime: optionalText(200),
+  hospedes: z.array(z.string().trim().min(1).max(300)).max(12).optional(),
+}).strict()
+
 export const voucherIdentifierSchema = z.string().trim().min(1).max(160)
-export const voucherTypeSchema = z.enum(['Hotel', 'Aéreo', 'Carro', 'Pacote'])
+export const voucherTypeSchema = z.enum([
+  'Hotel',
+  'Aéreo',
+  'Carro',
+  'Pacote',
+  'Rodoviário',
+  'Ferroviário',
+  'Transfer',
+  'Seguro',
+  'Lazer',
+  'Marítimo',
+  'Serviço',
+])
 export const voucherStatusSchema = z.enum(['rascunho', 'emitido', 'confirmado', 'cancelado'])
 
 export const voucherSchema = z.object({
@@ -43,7 +77,23 @@ export const voucherSchema = z.object({
   passageiro_nome: z.string().trim().min(2).max(300),
   passageiros: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
   cpf: optionalText(40),
+  hospedes_detalhes: z.array(voucherGuestSchema).max(100).optional(),
+  empresa_nome: optionalText(300),
+  empresa_documento: optionalText(80),
+  unidade_negocio: optionalText(160),
+  departamento: optionalText(160),
+  solicitante_nome: optionalText(300),
+  solicitante_email: z.preprocess(
+    (value) => String(value ?? '').trim().toLowerCase() || undefined,
+    z.string().email().max(320).optional(),
+  ),
+  autorizadores: z.array(z.string().trim().min(1).max(300)).max(50).optional(),
+  autorizado_em: optionalText(64),
+  data_solicitacao: optionalText(64),
+  reserva_id: optionalText(160),
+  data_reserva: optionalText(64),
   fornecedor_nome: z.string().trim().min(1).max(300),
+  fornecedor_codigo: optionalText(160),
   fornecedor_endereco: optionalText(500),
   fornecedor_cidade: optionalText(200),
   fornecedor_telefone: optionalText(80),
@@ -51,15 +101,33 @@ export const voucherSchema = z.object({
     (value) => String(value ?? '').trim().toLowerCase() || undefined,
     z.string().email().max(320).optional(),
   ),
+  canal_reserva: optionalText(80),
+  hotel_nome: optionalText(300),
+  hotel_endereco: optionalText(500),
+  hotel_cidade: optionalText(200),
+  hotel_telefone: optionalText(80),
+  hotel_email: z.preprocess(
+    (value) => String(value ?? '').trim().toLowerCase() || undefined,
+    z.string().email().max(320).optional(),
+  ),
   hotel_categoria: optionalText(120),
   tipo_apartamento: optionalText(120),
+  quartos: z.array(voucherRoomSchema).max(99).optional(),
   num_apartamentos: optionalPositiveInteger,
   num_hospedes: optionalPositiveInteger,
   data_checkin: optionalText(64),
   data_checkout: optionalText(64),
+  checkin_em: optionalText(64),
+  checkout_em: optionalText(64),
   noites: optionalPositiveInteger,
   regime: optionalText(200),
   forma_pagamento_voucher: optionalText(300),
+  referencia_pagamento: optionalText(200),
+  condicoes_pagamento: optionalText(1_000),
+  prazo_cancelamento: optionalText(64),
+  politica_cancelamento: optionalText(4_000),
+  politica_no_show: optionalText(4_000),
+  reembolsavel: z.boolean().optional(),
   cia_aerea: optionalText(200),
   numero_voo: optionalText(120),
   origem: optionalText(200),
@@ -78,9 +146,15 @@ export const voucherSchema = z.object({
   data_confirmacao: optionalText(64),
   confirmado_por: optionalText(200),
   valor_diaria: optionalNonNegativeNumber,
+  taxas_diaria: optionalNonNegativeNumber,
+  taxa_servico: optionalNonNegativeNumber,
   tarifa_total: optionalNonNegativeNumber,
   taxas: optionalNonNegativeNumber,
   total: z.coerce.number().finite().min(0).max(999_999_999_999.99),
+  moeda: z.preprocess(
+    (value) => String(value ?? '').trim().toUpperCase() || undefined,
+    z.string().regex(/^[A-Z]{3}$/).optional(),
+  ),
   centro_custo: optionalText(160),
   numero_solicitacao: optionalText(160),
   observacoes: optionalText(8_000),

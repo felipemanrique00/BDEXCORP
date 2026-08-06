@@ -4,6 +4,7 @@ import type { PoolClient } from 'pg'
 
 import { getRequestContext, type RequestPrincipal } from '@/lib/server/request-context'
 import { nextTravelRecord, planTravelTransition, TravelLifecycleError } from '@/lib/travel-lifecycle/machine'
+import { operationalStatusFromLifecycle } from '@/lib/travel-lifecycle/operational-status'
 import type {
   TravelLifecycleCommand,
   TravelLifecycleRecord,
@@ -51,6 +52,7 @@ export async function persistTravelTransitionInTransaction(
     metadata: input.metadata,
   })
   const updated = nextTravelRecord(current, plan)
+  const operationalStatus = operationalStatusFromLifecycle(updated.status)
   const clearActiveApproval = ['approve_merit', 'approve_cost', 'reject', 'cancel', 'expire', 'fail'].includes(command)
   await client.query(
     `select
@@ -61,17 +63,32 @@ export async function persistTravelTransitionInTransaction(
   const result = await client.query(
     `update demands set
        lifecycle_status = $4, lifecycle_version = $5, last_transition_at = $6,
+       status = $11,
+       metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+         'legacySnapshot',
+         case
+           when $11 = 'finalizado' then
+             coalesce(metadata -> 'legacySnapshot', '{}'::jsonb)
+             || jsonb_build_object('status', $11, 'finalizado_em', $6::timestamptz)
+           else
+             (coalesce(metadata -> 'legacySnapshot', '{}'::jsonb) - 'finalizado_em')
+             || jsonb_build_object('status', $11)
+         end
+       ),
        last_policy_evaluation_id = coalesce($7, last_policy_evaluation_id),
        active_approval_instance_id = case
          when $10 then null
          else coalesce($8, active_approval_instance_id)
        end,
-       updated_by = $9
+       version = version + 1,
+       updated_by = $9,
+       updated_at = $6
      where tenant_id = $1 and id = $2 and lifecycle_version = $3`,
     [
       principal.tenantId, current.demandId, plan.previousVersion, updated.status, updated.version,
       plan.occurredAt, plan.policyEvaluationId, plan.approvalInstanceId, principal.user.id,
       clearActiveApproval,
+      operationalStatus,
     ],
   )
   if (result.rowCount !== 1) {

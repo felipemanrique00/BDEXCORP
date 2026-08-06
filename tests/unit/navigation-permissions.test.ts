@@ -51,6 +51,28 @@ function internalUser(profile: PerfilBBT, overrides: Partial<Permissoes> = {}): 
   }
 }
 
+function requesterUser(): User {
+  const user = corporateUser({
+    ver_empresas: true,
+    criar_demandas: true,
+    ver_demandas: true,
+    ver_reservas: true,
+    operar_reservas: true,
+    ver_emissoes: true,
+    operar_emissoes: true,
+    ver_vouchers: true,
+    cadastrar_hoteis: true,
+    gerenciar_integracoes: true,
+    acessar_portal_viajante: true,
+  })
+  return {
+    ...user,
+    role: 'colaborador',
+    role_key: 'requester',
+    corporate_profile: 'requester',
+  }
+}
+
 function visibleRoutes(user: User): string[] {
   return buildSidebarMenu({ user, naoLidas: 0, novasDemandas: 0, alertasHoje: 0 })
     .flatMap((group) => group.itens)
@@ -96,6 +118,46 @@ describe('menu por permissao efetiva', () => {
       .toContain('/dashboard/minha-viagem')
     expect(visibleRoutes(corporateUser({ acessar_portal_viajante: false })))
       .not.toContain('/dashboard/minha-viagem')
+  })
+
+  it('mantem o requester nos portais e oculta ferramentas operacionais internas', () => {
+    const routes = visibleRoutes(requesterUser())
+
+    expect(routes).toEqual(expect.arrayContaining([
+      '/dashboard/portal-empresa',
+      '/dashboard/minha-viagem',
+    ]))
+    for (const hiddenRoute of [
+      '/dashboard/caixa-entrada',
+      '/dashboard/demandas',
+      '/dashboard/reservas',
+      '/dashboard/emissoes',
+      '/dashboard/vouchers',
+      '/dashboard/risco',
+      '/dashboard/fornecedores',
+      '/dashboard/hoteis/catalogo',
+    ]) {
+      expect(routes).not.toContain(hiddenRoute)
+    }
+  })
+
+  it('nao aplica o bloqueio pessoal do requester ao administrador corporativo', () => {
+    const routes = visibleRoutes(corporateUser({
+      ver_demandas: true,
+      criar_demandas: true,
+      ver_reservas: true,
+      ver_vouchers: true,
+      cadastrar_hoteis: true,
+    }))
+
+    expect(routes).toEqual(expect.arrayContaining([
+      '/dashboard/caixa-entrada',
+      '/dashboard/demandas',
+      '/dashboard/reservas',
+      '/dashboard/vouchers',
+      '/dashboard/fornecedores',
+      '/dashboard/hoteis/catalogo',
+    ]))
   })
 
   it.each([

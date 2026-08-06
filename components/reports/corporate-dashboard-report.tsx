@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 
 import { CorporateMapLeaflet } from '@/components/reports/corporate-map-leaflet'
+import { DateInput } from '@/components/ui/date-input'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { canAccessCompanyPermission, getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
@@ -299,11 +300,11 @@ export function CorporateDashboardReport({
       <section className="bbt-card p-4">
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1.1fr_1.3fr_1.3fr_auto]">
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Início">
-              <input type="date" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} className="bbt-input" />
+            <Field label="Início" htmlFor="corporate-dashboard-data-inicio">
+              <DateInput id="corporate-dashboard-data-inicio" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} />
             </Field>
-            <Field label="Fim">
-              <input type="date" value={dataFim} onChange={(event) => setDataFim(event.target.value)} className="bbt-input" />
+            <Field label="Fim" htmlFor="corporate-dashboard-data-fim">
+              <DateInput id="corporate-dashboard-data-fim" value={dataFim} onChange={(event) => setDataFim(event.target.value)} />
             </Field>
           </div>
 
@@ -496,7 +497,16 @@ export function CorporateDashboardReport({
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, htmlFor }: { label: string; children: React.ReactNode; htmlFor?: string }) {
+  if (htmlFor) {
+    return (
+      <div className="block">
+        <label htmlFor={htmlFor} className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</label>
+        {children}
+      </div>
+    )
+  }
+
   return (
     <label className="block">
       <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</span>

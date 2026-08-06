@@ -4,7 +4,11 @@ import type { PoolClient } from 'pg'
 
 import { getAccessibleCompanyIds } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
+import { enrichVouchersFromDatabase } from '@/lib/server/voucher-enrichment-service'
+import { resolveVoucherPresentationSettingsForCompanies } from '@/lib/server/voucher-presentation-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import { voucherSchema, voucherStatusFromDatabase } from '@/lib/vouchers/schema'
+import type { VoucherEmitido, VoucherPresentationSettings } from '@/types'
 import type {
   TravelerPortalOverview,
   TravelerProfile,
@@ -68,6 +72,27 @@ interface VoucherRow {
   status: string
   file_id: string | null
   issued_at: Date | null
+}
+
+interface TravelerVoucherDownloadRow {
+  id: string
+  voucher_code: string
+  company_id: string
+  employee_id: string | null
+  demand_id: string | null
+  status: string
+  file_id: string | null
+  metadata: Record<string, unknown> | null
+  fingerprint: string | null
+  created_at: Date
+  updated_at: Date
+  version: string | number
+}
+
+export interface TravelerVoucherDownloadDescriptor {
+  fileId: string | null
+  voucher: VoucherEmitido | null
+  presentationSettings: VoucherPresentationSettings
 }
 
 interface EventRow {
@@ -175,6 +200,90 @@ export async function getTravelerVoucherFileId(
       ],
     )
     return result.rows[0]?.file_id || null
+  })
+}
+
+/**
+ * Resolve o artefato do voucher junto da regra de apresentacao vigente.
+ * O PDF persistido so pode ser entregue diretamente quando nenhum campo esta
+ * oculto; caso contrario a rota gera uma representacao sanitizada sob demanda.
+ */
+export async function getTravelerVoucherDownloadDescriptor(
+  principal: RequestPrincipal,
+  voucherId: string,
+): Promise<TravelerVoucherDownloadDescriptor | null> {
+  const companyIds = getAccessibleCompanyIds(principal)
+  if (!companyIds.length) return null
+
+  return withTenantTransaction(principal.tenantId, async (client) => {
+    const employees = await loadTravelerEmployees(client, principal, companyIds)
+    if (!employees.length) return null
+    const result = await client.query<TravelerVoucherDownloadRow>(
+      `select
+         v.id, v.voucher_code, v.company_id, v.employee_id, v.demand_id,
+         v.status, v.file_id, v.metadata, v.fingerprint,
+         v.created_at, v.updated_at, v.version
+       from vouchers v
+       left join reservations r
+         on r.tenant_id = v.tenant_id and r.id = v.reservation_id
+       left join demands d
+         on d.tenant_id = v.tenant_id and d.id = v.demand_id
+       where v.tenant_id = $1
+         and v.id = $2
+         and v.company_id = any($3::text[])
+         and v.deleted_at is null
+         and coalesce(v.employee_id, r.employee_id, d.employee_id) = any($4::text[])
+       limit 1`,
+      [
+        principal.tenantId,
+        voucherId,
+        companyIds,
+        employees.map((employee) => employee.id),
+      ],
+    )
+    const row = result.rows[0]
+    if (!row) return null
+
+    const settingsByCompany = await resolveVoucherPresentationSettingsForCompanies(
+      client,
+      principal.tenantId,
+      [row.company_id],
+    )
+    const presentationSettings = settingsByCompany.get(row.company_id)
+    if (!presentationSettings) return null
+
+    const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {}
+    const parsed = voucherSchema.safeParse({
+      ...metadata,
+      id: row.id,
+      numero: String(metadata.numero || numericVoucherNumber(row.voucher_code)),
+      empresa_id: row.company_id,
+      funcionario_id: row.employee_id,
+      atendimento_id: row.demand_id || undefined,
+      status: voucherStatusFromDatabase(row.status),
+      fingerprint: row.fingerprint || metadata.fingerprint || undefined,
+      created_at: row.created_at.toISOString(),
+      updated_at: row.updated_at.toISOString(),
+      version: Number(row.version),
+    })
+    let voucher = parsed.success ? parsed.data as VoucherEmitido : null
+    if (voucher) {
+      const [enriched] = await enrichVouchersFromDatabase(
+        client,
+        principal.tenantId,
+        [voucher],
+      )
+      voucher = {
+        ...(enriched || voucher),
+        presentation_settings: presentationSettings,
+      }
+    }
+
+    return {
+      fileId: row.file_id,
+      voucher,
+      presentationSettings,
+    }
   })
 }
 
@@ -634,6 +743,12 @@ function safeHttpsUrl(value: string | null): string | null {
   } catch {
     return null
   }
+}
+
+function numericVoucherNumber(value: unknown): number {
+  const digits = String(value || '').replace(/\D/g, '')
+  const number = Number(digits)
+  return Number.isSafeInteger(number) ? number : 0
 }
 
 function emptyOverview(): TravelerPortalOverview {

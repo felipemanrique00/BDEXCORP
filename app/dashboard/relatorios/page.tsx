@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { getAgentesBBT, getCurrentUser, getEmpresasPermitidas, perfilBBTLabel, getUserById } from '@/lib/auth'
 import { SearchInput } from '@/components/ui/search-input'
+import { DateInput } from '@/components/ui/date-input'
 import { getEstatisticas, getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { formatCurrency } from '@/lib/utils'
 import { calcularFinanceiro, type Atendimento, type TipoServico } from '@/types'
@@ -403,18 +404,20 @@ export default function RelatoriosPage() {
         </div>
 
         <div className="flex flex-wrap gap-3 items-center mb-3">
-          <input
-            type="date"
+          <DateInput
+            aria-label="Data inicial dos relatórios"
             value={dataInicio}
             onChange={(e) => setDataInicio(e.target.value)}
-            className="bbt-input w-auto"
+            className="w-auto"
+            containerClassName="w-auto"
           />
           <span className="text-slate-400 text-sm">até</span>
-          <input
-            type="date"
+          <DateInput
+            aria-label="Data final dos relatórios"
             value={dataFim}
             onChange={(e) => setDataFim(e.target.value)}
-            className="bbt-input w-auto"
+            className="w-auto"
+            containerClassName="w-auto"
           />
         </div>
 

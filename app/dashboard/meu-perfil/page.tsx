@@ -7,19 +7,17 @@ import {
   getAtendimentosFiltro, getEstatisticas,
   type FiltroAtendimento,
 } from '@/lib/atendimentos-storage'
-import { persistDemandStatusWithCompatibility } from '@/lib/demand-persistence-client'
 import {
   BarChart3, Clock, CheckCircle2, AlertTriangle, XCircle, AlertCircle,
   Plus, Plane, Hotel as HotelIcon, Car, Package, Zap, Edit2, FileText,
   Download, Calendar, Paperclip, DollarSign, TrendingUp, Percent, Wand2,
 } from 'lucide-react'
-import { toast } from 'sonner'
 import { formatCurrency, formatDate } from '@/lib/utils'
-import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { NovaDemandaModal } from '@/components/ui/nova-demanda-modal'
 import { ImportarVoucherModal } from '@/components/ui/importar-voucher-modal'
 import { AnexarVoucherModal } from '@/components/ui/anexar-voucher-modal'
 import { SearchInput } from '@/components/ui/search-input'
+import { DateInput } from '@/components/ui/date-input'
 import type { Atendimento, StatusAtendimento, Prioridade, TipoServico } from '@/types'
 import { STATUS_LABEL, PRIORIDADE_LABEL, calcularFinanceiro } from '@/types'
 
@@ -58,7 +56,6 @@ export default function MeuPerfilPage() {
   const [novaOpen, setNovaOpen] = useState(false)
   const [importarVoucherOpen, setImportarVoucherOpen] = useState(false)
   const [editando, setEditando] = useState<Atendimento | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState<Atendimento | null>(null)
   const [anexarAtendimento, setAnexarAtendimento] = useState<Atendimento | null>(null)
   const [reload, setReload] = useState(0)
 
@@ -94,22 +91,6 @@ export default function MeuPerfilPage() {
     void reload
     return getEstatisticas(filtro)
   }, [filtro, reload])
-
-  async function handleDelete() {
-    if (!confirmDelete) return
-    try {
-      await persistDemandStatusWithCompatibility(
-        confirmDelete,
-        'cancelado',
-        'Cancelamento solicitado pelo usuario no perfil.',
-      )
-      toast.success('Demanda cancelada.')
-      setConfirmDelete(null)
-      setReload((n) => n + 1)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Não foi possível cancelar a demanda.')
-    }
-  }
 
   function handleEdit(a: Atendimento) { setEditando(a); setNovaOpen(true) }
 
@@ -195,9 +176,9 @@ export default function MeuPerfilPage() {
         <div className="flex flex-wrap gap-3 items-center border-t border-bbt-gray-100 dark:border-slate-700 pt-3">
           <Calendar className="w-4 h-4 text-slate-500" />
           <span className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Período:</span>
-          <input type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} className="bbt-input w-auto" />
+          <DateInput aria-label="Data inicial do período" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} className="w-auto" containerClassName="w-auto" />
           <span className="text-slate-400">até</span>
-          <input type="date" value={dataFim} onChange={(e) => setDataFim(e.target.value)} className="bbt-input w-auto" />
+          <DateInput aria-label="Data final do período" value={dataFim} onChange={(e) => setDataFim(e.target.value)} className="w-auto" containerClassName="w-auto" />
           <button onClick={limparFiltros} className="text-xs text-bbt-accent hover:underline ml-auto">Limpar filtros</button>
         </div>
       </div>
@@ -224,7 +205,6 @@ export default function MeuPerfilPage() {
                 <div key={a.id}>
                   <DemandaItem atendimento={a} empresaNome={empresaNome}
                     onEdit={() => handleEdit(a)}
-                    onDelete={() => { setConfirmDelete(a) }}
                     onAnexar={() => { setAnexarAtendimento(a) }} />
                 </div>
               )
@@ -241,10 +221,6 @@ export default function MeuPerfilPage() {
         onClose={() => { setImportarVoucherOpen(false); setReload((n) => n + 1) }}
         onSaved={() => setReload((n) => n + 1)}
       />
-      <ConfirmDialog open={!!confirmDelete} onClose={() => setConfirmDelete(null)} onConfirm={handleDelete}
-        title="Cancelar demanda"
-        message={`Confirma o cancelamento da demanda de "${confirmDelete?.passageiro_nome}"? O histórico será preservado.`}
-        confirmLabel="Cancelar demanda" danger />
       <AnexarVoucherModal open={!!anexarAtendimento}
         onClose={() => { setAnexarAtendimento(null); setReload((n) => n + 1) }}
         atendimento={anexarAtendimento} />
@@ -292,9 +268,9 @@ function FinanceiroCard({ label, value, color, icon: Icon, subtitle, big = false
   )
 }
 
-function DemandaItem({ atendimento, empresaNome, onEdit, onDelete, onAnexar }: {
+function DemandaItem({ atendimento, empresaNome, onEdit, onAnexar }: {
   atendimento: Atendimento; empresaNome: string
-  onEdit: () => void; onDelete: () => void; onAnexar: () => void
+  onEdit: () => void; onAnexar: () => void
 }) {
   const Icon = TIPO_ICON[atendimento.tipo_servico] || FileText
   const prio: Prioridade = atendimento.prioridade || 'media'
@@ -355,7 +331,6 @@ function DemandaItem({ atendimento, empresaNome, onEdit, onDelete, onAnexar }: {
           <div className="flex gap-1">
             <button onClick={onAnexar} className="p-1.5 rounded hover:bg-bbt-accent/10 text-slate-400 hover:text-bbt-accent transition" title="Anexar voucher"><Paperclip className="w-4 h-4" /></button>
             <button onClick={onEdit} className="p-1.5 rounded hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-400 hover:text-blue-600 transition" title="Editar"><Edit2 className="w-4 h-4" /></button>
-            <button onClick={onDelete} className="p-1.5 rounded hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-400 hover:text-red-600 transition" title="Cancelar demanda"><XCircle className="w-4 h-4" /></button>
           </div>
         </div>
       </div>

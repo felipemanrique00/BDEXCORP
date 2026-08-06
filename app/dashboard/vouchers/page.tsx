@@ -10,7 +10,6 @@ import { getCurrentUser, hasPermission } from '@/lib/auth'
 import {
   aplicarVouchersEmitidosDoServidor,
   getAllVouchersEmitidos,
-  getEstatisticasVouchers,
 } from '@/lib/vouchers-emitidos-storage'
 import { removeVoucherOnServer } from '@/lib/voucher-persistence-client'
 import type { VoucherEmitido, VoucherTipo, VoucherStatus } from '@/types'
@@ -27,7 +26,7 @@ const VOUCHERS_PER_PAGE = 50
 
 export default function VouchersPage() {
   const { empresas } = useStore()
-  const { companyIds, includesCompany } = useCorporateCompanyScope()
+  const { includesCompany } = useCorporateCompanyScope()
   const empresasNoContexto = useMemo(
     () => empresas.filter((empresa) => includesCompany(empresa.id, 'ver_vouchers')),
     [empresas, includesCompany],
@@ -44,6 +43,7 @@ export default function VouchersPage() {
   const [filtroStatus, setFiltroStatus] = useState<'todos' | VoucherStatus>('todos')
   const [filtroEmpresa, setFiltroEmpresa] = useState('')
   const [pagina, setPagina] = useState(1)
+  const [serverVouchers, setServerVouchers] = useState<VoucherEmitido[]>([])
   const empresasNoContextoKey = empresasNoContexto.map((empresa) => empresa.id).sort().join('|')
 
   useEffect(() => {
@@ -61,6 +61,7 @@ export default function VouchersPage() {
           throw new Error(result?.error || 'Falha ao carregar vouchers.')
         }
         if (active) {
+          setServerVouchers(result.items as VoucherEmitido[])
           aplicarVouchersEmitidosDoServidor(result.items)
           setReload((value) => value + 1)
         }
@@ -71,19 +72,31 @@ export default function VouchersPage() {
     return () => { active = false }
   }, [])
 
-  const stats = useMemo(() => {
+  const vouchersNoContexto = useMemo(() => {
     void reload
-    if (typeof window === 'undefined') return null
-    const voucherCompanyIds = companyIds
-      ? new Set([...companyIds].filter((companyId) => includesCompany(companyId, 'ver_vouchers')))
-      : null
-    return getEstatisticasVouchers(voucherCompanyIds)
-  }, [companyIds, includesCompany, reload])
+    const byId = new Map<string, VoucherEmitido>()
+    if (typeof window !== 'undefined') {
+      for (const voucher of getAllVouchersEmitidos()) byId.set(voucher.id, voucher)
+    }
+    for (const voucher of serverVouchers) byId.set(voucher.id, voucher)
+    return [...byId.values()]
+      .filter((voucher) => includesCompany(voucher.empresa_id, 'ver_vouchers'))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+  }, [includesCompany, reload, serverVouchers])
+
+  const stats = useMemo(() => ({
+    total: vouchersNoContexto.length,
+    rascunhos: vouchersNoContexto.filter((voucher) => voucher.status === 'rascunho').length,
+    emitidos: vouchersNoContexto.filter((voucher) => voucher.status === 'emitido').length,
+    confirmados: vouchersNoContexto.filter((voucher) => voucher.status === 'confirmado').length,
+    cancelados: vouchersNoContexto.filter((voucher) => voucher.status === 'cancelado').length,
+    importados: vouchersNoContexto.filter((voucher) => voucher.origem_voucher === 'importado' || voucher.origem_voucher === 'pdf').length,
+    valor_total: vouchersNoContexto.reduce((sum, voucher) => sum + (voucher.total || 0), 0),
+  }), [vouchersNoContexto])
 
   const vouchers = useMemo(() => {
     void reload
-    if (typeof window === 'undefined') return []
-    let v = getAllVouchersEmitidos().filter((voucher) => includesCompany(voucher.empresa_id, 'ver_vouchers'))
+    let v = [...vouchersNoContexto]
     if (filtroTipo !== 'todos') v = v.filter((x) => x.tipo === filtroTipo)
     if (filtroStatus !== 'todos') v = v.filter((x) => x.status === filtroStatus)
     if (filtroEmpresa) v = v.filter((x) => x.empresa_id === filtroEmpresa)
@@ -97,7 +110,7 @@ export default function VouchersPage() {
       )
     }
     return v
-  }, [reload, busca, filtroTipo, filtroStatus, filtroEmpresa, includesCompany])
+  }, [busca, filtroTipo, filtroStatus, filtroEmpresa, vouchersNoContexto])
 
   const totalPaginas = Math.max(1, Math.ceil(vouchers.length / VOUCHERS_PER_PAGE))
   const vouchersPagina = useMemo(() => {
@@ -121,6 +134,7 @@ export default function VouchersPage() {
     if (!confirm(`Excluir voucher ${v.id}? Esta ação não pode ser desfeita.`)) return
     try {
       await removeVoucherOnServer(v.id)
+      setServerVouchers((current) => current.filter((item) => item.id !== v.id))
       toast.success('Voucher excluído.')
       setReload((n) => n + 1)
     } catch (error) {
@@ -198,6 +212,13 @@ export default function VouchersPage() {
             <option value="Aéreo">Aéreo</option>
             <option value="Carro">Carro</option>
             <option value="Pacote">Pacote</option>
+            <option value="Rodoviário">Rodoviário</option>
+            <option value="Ferroviário">Ferroviário</option>
+            <option value="Transfer">Transfer</option>
+            <option value="Seguro">Seguro</option>
+            <option value="Lazer">Lazer</option>
+            <option value="Marítimo">Marítimo</option>
+            <option value="Serviço">Outro serviço</option>
           </select>
           <select value={filtroStatus} onChange={(e) => setFiltroStatus(e.target.value as 'todos' | VoucherStatus)} aria-label="Filtrar vouchers por status" className="bbt-input">
             <option value="todos">Todos os status</option>

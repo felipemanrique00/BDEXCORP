@@ -23,10 +23,11 @@ import {
   Zap,
 } from 'lucide-react'
 import Link from 'next/link'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import { useCorporateContext } from '@/components/corporate-context-provider'
+import { DateTimeInput } from '@/components/ui/date-input'
 import type {
   AutomationDetail,
   AutomationListItem,
@@ -582,6 +583,8 @@ function AutomationEditor(props: {
   onSimulationAggregateId: (value: string) => void
   onSimulate: () => void
 }) {
+  const validFromInputId = useId()
+  const validUntilInputId = useId()
   const { editor } = props
   const transitions = TRANSITIONS[editor.status] || []
   const editable = props.canManage && editor.status === 'draft'
@@ -693,24 +696,28 @@ function AutomationEditor(props: {
               <input value={editor.subjectIdPath} onChange={(event) => props.onPatch({ subjectIdPath: event.target.value })} disabled={!editable} className="bbt-input" />
             </Field>
           </div>
-          <Field label="Início da vigência">
-            <input
-              type="datetime-local"
+          <div className="block text-xs font-semibold uppercase text-slate-500">
+            <label className="mb-1 block" htmlFor={validFromInputId}>Início da vigência</label>
+            <DateTimeInput
+              id={validFromInputId}
               value={editor.validFrom}
               onChange={(event) => props.onPatch({ validFrom: event.target.value })}
               disabled={!editable}
               className="bbt-input"
+              pickerLabel="Abrir calendário de início da vigência"
             />
-          </Field>
-          <Field label="Fim da vigência">
-            <input
-              type="datetime-local"
+          </div>
+          <div className="block text-xs font-semibold uppercase text-slate-500">
+            <label className="mb-1 block" htmlFor={validUntilInputId}>Fim da vigência</label>
+            <DateTimeInput
+              id={validUntilInputId}
               value={editor.validUntil}
               onChange={(event) => props.onPatch({ validUntil: event.target.value })}
               disabled={!editable}
               className="bbt-input"
+              pickerLabel="Abrir calendário de fim da vigência"
             />
-          </Field>
+          </div>
         </div>
       </section>
 

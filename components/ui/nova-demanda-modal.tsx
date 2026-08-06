@@ -2,6 +2,7 @@
 import { todayISODate } from '@/lib/date'
 import { useState, useEffect, useMemo } from 'react'
 import { Modal } from '@/components/ui/modal'
+import { DateInput } from '@/components/ui/date-input'
 import { useStore } from '@/lib/store'
 import { useCorporateContext, useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import {
@@ -19,6 +20,10 @@ import {
 } from '@/lib/demands-client'
 import { dispararAlertaNovaDemanda } from '@/lib/notificacoes'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
+import { getAllSolicitantesEmpresa } from '@/lib/solicitantes-storage'
+import { requesterOwnsDemand } from '@/lib/demands/requester-ownership'
+import { isRequesterUser } from '@/lib/user-access-kind'
+import { travelLifecycleStatusLabel } from '@/lib/travel-lifecycle/presentation'
 import { toast } from 'sonner'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import {
@@ -28,6 +33,9 @@ import {
 } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import { PassageiroAutocomplete } from '@/components/ui/passageiro-autocomplete'
+import { HotelDemandConfigurator } from '@/components/travel/hotel-demand-configurator'
+import { hotelDemandDetailsSchema } from '@/lib/hotel-demand/model'
+import { isHotelDemandLockedForNormalEdit } from '@/lib/offline-travel/hotel-guests'
 import { PolicyValidator } from '@/components/ui/policy-validator'
 import {
   buscarHoteisComIA,
@@ -36,7 +44,7 @@ import {
   type HotelAISuggestion,
 } from '@/lib/ia-hotel-search'
 import type {
-  Atendimento, TipoServico, StatusAtendimento, Prioridade, OrigemAtendimento,
+  Atendimento, TipoServico, Prioridade, OrigemAtendimento,
   DetalhesAereo, DetalhesHotel, DetalhesCarro, DetalhesPacote, ClasseAerea,
   FormaPagamento,
   FonteReferenciaEconomiaAtendimento,
@@ -52,6 +60,9 @@ interface Props {
   /** Pré-preenche empresa/funcionário (ex: vindo da tela da empresa) */
   prefilledEmpresaId?: string
   prefilledFuncionarioId?: string
+  /** Confirmação da lista relacional já filtrada pelo backend para o requester. */
+  requesterOwnershipVerified?: boolean
+  readOnly?: boolean
 }
 
 interface CostCenterOption {
@@ -75,14 +86,6 @@ const PRIORIDADES: { value: Prioridade; label: string; color: string; icon: any 
   { value: 'urgente', label: 'Urgente', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300', icon: Zap },
 ]
 
-const STATUSES: { value: StatusAtendimento; label: string }[] = [
-  { value: 'em_andamento', label: 'Em Andamento' },
-  { value: 'aguardando_cliente', label: 'Aguardando Cliente' },
-  { value: 'pendente', label: 'Pendente' },
-  { value: 'finalizado', label: 'Finalizado' },
-  { value: 'cancelado', label: 'Cancelado' },
-]
-
 function diffDays(d1: string, d2: string): number {
   if (!d1 || !d2) return 0
   const a = new Date(d1 + 'T00:00:00')
@@ -91,7 +94,16 @@ function diffDays(d1: string, d2: string): number {
   return diff > 0 ? diff : 0
 }
 
-export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmpresaId, prefilledFuncionarioId }: Props) {
+export function NovaDemandaModal({
+  open,
+  onClose,
+  editing,
+  onSaved,
+  prefilledEmpresaId,
+  prefilledFuncionarioId,
+  requesterOwnershipVerified = false,
+  readOnly = false,
+}: Props) {
   const { empresas, funcionarios, hoteis, addHotel } = useStore()
   const { context } = useCorporateContext()
   const { includesCompany, isConsolidated } = useCorporateCompanyScope()
@@ -100,19 +112,31 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
     [empresas, includesCompany],
   )
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const requesterView = isRequesterUser(user)
+  const requesterOwnershipFromDirectory = Boolean(editing && requesterOwnsDemand({
+    user,
+    demand: editing,
+    requesters: typeof window !== 'undefined' ? getAllSolicitantesEmpresa() : [],
+  }))
+  const requesterOwnsEditing = !requesterView || Boolean(
+    editing && (requesterOwnershipVerified || requesterOwnershipFromDirectory),
+  )
+  const requesterAccessDenied = requesterView && (!editing || !requesterOwnsEditing)
+  const hotelDemandLocked = isHotelDemandLockedForNormalEdit(editing)
+  const formReadOnly = readOnly || hotelDemandLocked || Boolean(
+    editing && requesterView && !hasPermission(user, 'criar_demandas'),
+  )
 
   const [empresaId, setEmpresaId] = useState('')
-  const podeVerFinanceiro = hasPermission(user, 'ver_financeiro')
+  const podeVerFinanceiro = !requesterView && hasPermission(user, 'ver_financeiro')
     && includesCompany(empresaId, 'ver_financeiro')
   const [funcionarioId, setFuncionarioId] = useState<string | null>(null)
   const [passageiroNome, setPassageiroNome] = useState('')
   const [tipoServico, setTipoServico] = useState<TipoServico>('Hotel')
-  const [status, setStatus] = useState<StatusAtendimento>('em_andamento')
   const [prioridade, setPrioridade] = useState<Prioridade>('media')
   const [origem, setOrigem] = useState<OrigemAtendimento>('WhatsApp')
   const [observacoes, setObservacoes] = useState('')
   const [dataAtendimento, setDataAtendimento] = useState(todayISODate())
-  const [motivo, setMotivo] = useState('')
 
   // V8: novos campos
   const [formaPagamento, setFormaPagamento] = useState<FormaPagamento | ''>('')
@@ -159,12 +183,10 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       setFuncionarioId(editing.funcionario_id || null)
       setPassageiroNome(editing.passageiro_nome)
       setTipoServico(editing.tipo_servico)
-      setStatus(editing.status)
       setPrioridade(editing.prioridade || 'media')
       setOrigem(editing.origem || 'WhatsApp')
       setObservacoes(editing.observacoes || '')
       setDataAtendimento(editing.data_atendimento)
-      setMotivo(editing.motivo || '')
       setValorCusto(editing.valor_custo || 0)
       setValorVenda(editing.valor_venda ?? editing.valor_final ?? editing.valor_cotacao ?? 0)
       setValorReferenciaEconomia(editing.valor_referencia_economia || 0)
@@ -192,10 +214,10 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
         : context?.type === 'company' ? context.id : ''
       setEmpresaId(explicitCompanyId)
       setFuncionarioId(prefilledFuncionarioId || null)
-      setPassageiroNome(''); setTipoServico('Hotel'); setStatus('em_andamento')
+      setPassageiroNome(''); setTipoServico('Hotel')
       setPrioridade('media'); setOrigem('WhatsApp'); setObservacoes('')
       setDataAtendimento(todayISODate())
-      setMotivo(''); setValorCusto(0); setValorVenda(0); setValorReferenciaEconomia(0)
+      setValorCusto(0); setValorVenda(0); setValorReferenciaEconomia(0)
       setFonteReferenciaEconomia('preco_sem_agencia')
       setTaxaAtiva(true); setTaxaPercentual(10); setTaxaValorFixo(0); setUsarTaxaFixa(false)
       setMarkupDesabilitado(false)
@@ -388,9 +410,33 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    const hotelPrimaryGuest = detHotel.rooms
+      ?.flatMap((room) => room.guests)
+      .find((guest) => guest.role === 'responsible')
+    const effectivePassengerName = tipoServico === 'Hotel'
+      ? hotelPrimaryGuest?.name || ''
+      : passageiroNome.trim()
+    const effectiveEmployeeId = tipoServico === 'Hotel'
+      ? hotelPrimaryGuest?.employee_id || null
+      : funcionarioId
     if (!user) { toast.error('Faça login.'); return }
-    if (!empresaId || !passageiroNome.trim()) {
+    if (requesterAccessDenied) {
+      toast.error('Você só pode abrir e editar demandas vinculadas ao seu cadastro de solicitante.')
+      return
+    }
+    if (formReadOnly) {
+      toast.error('Seu acesso permite consultar esta demanda, mas não alterá-la.')
+      return
+    }
+    if (!empresaId || !effectivePassengerName) {
       toast.error('Preencha empresa e ' + ocupanteLabel.toLowerCase() + '.'); return
+    }
+    if (tipoServico === 'Hotel') {
+      const hotelDemand = hotelDemandDetailsSchema.safeParse(detHotel)
+      if (!hotelDemand.success) {
+        toast.error(hotelDemand.error.issues[0]?.message || 'Revise destino, datas, quartos e hospedes.')
+        return
+      }
     }
     if (costCentersLoading) {
       toast.error('Aguarde o carregamento dos centros de custo.')
@@ -401,40 +447,31 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       return
     }
 
-    const hotelCriado = await garantirHotelCadastrado()
-    const detalhesHotelFinal =
-      tipoServico === 'Hotel' && hotelCriado
-        ? {
-            ...detHotel,
-            hotel_id: hotelCriado.id,
-            hotel_nome: hotelCriado.nome,
-            cidade: hotelCriado.cidade,
-            tarifa_unitaria: detHotel.tarifa_unitaria || hotelCriado.tarifa_sgl || hotelCriado.tarifa_dbl || hotelCriado.tarifa_tpl || undefined,
-          }
-        : detHotel
+    const detalhesHotelFinal = detHotel
+    const demandAmount = tipoServico === 'Hotel' ? 0 : valorVenda || 0
 
     const payload: Omit<Atendimento, 'id' | 'created_at' | 'updated_at'> = {
       empresa_id: empresaId,
-      funcionario_id: funcionarioId,
-      passageiro_nome: passageiroNome.trim(),
+      funcionario_id: effectiveEmployeeId,
+      passageiro_nome: effectivePassengerName,
       tipo_servico: tipoServico,
-      valor_cotacao: valorVenda || 0,
-      valor_final: valorVenda || undefined,
-      valor_custo: valorCusto || 0,
-      valor_venda: valorVenda || 0,
+      valor_cotacao: demandAmount,
+      valor_final: demandAmount || undefined,
+      valor_custo: tipoServico === 'Hotel' ? 0 : valorCusto || 0,
+      valor_venda: demandAmount,
       valor_referencia_economia: valorReferenciaEconomia > 0 ? valorReferenciaEconomia : undefined,
       fonte_referencia_economia: valorReferenciaEconomia > 0 ? fonteReferenciaEconomia : undefined,
       taxa_ativa: taxaAtiva,
       taxa_percentual: usarTaxaFixa ? undefined : taxaPercentual,
       taxa_valor_fixo: usarTaxaFixa ? taxaValorFixo : undefined,
       markup_desabilitado: markupDesabilitado,
-      agente_user_id: editing?.agente_user_id || user.id,
-      status,
+      agente_user_id: editing ? editing.agente_user_id : user.id,
+      status: editing?.status || 'pendente',
       prioridade,
       origem,
       observacoes: observacoes.trim(),
       data_atendimento: dataAtendimento,
-      motivo: (status === 'pendente' || status === 'cancelado') ? motivo : undefined,
+      motivo: editing?.motivo,
       detalhes_aereo: tipoServico === 'Aéreo' ? detAereo : undefined,
       detalhes_hotel: tipoServico === 'Hotel' ? detalhesHotelFinal : undefined,
       detalhes_carro: tipoServico === 'Carro' ? detCarro : undefined,
@@ -482,7 +519,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
           acao: 'editar',
           entidade: 'Atendimento',
           entidade_id: editing.id,
-          descricao: `Editou demanda de ${passageiroNome}`,
+          descricao: `Editou demanda de ${effectivePassengerName}`,
         })
         if (resultado.approval.required) {
           toast.info(resultado.approval.configured
@@ -522,7 +559,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
             acao: 'editar',
             entidade: 'Atendimento',
             entidade_id: editing.id,
-            descricao: `Editou demanda de ${passageiroNome}`,
+            descricao: `Editou demanda de ${effectivePassengerName}`,
           })
           toast.success('Demanda atualizada!')
           onSaved?.(atualizada)
@@ -535,7 +572,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       const preparada = criarAtendimentoParaLista(payload, getAllAtendimentos())
       let resultado
       try {
-        resultado = await createDemandOnServer(preparada, true)
+        resultado = await createDemandOnServer(preparada, tipoServico !== 'Hotel')
       } catch (error) {
         if (error instanceof DemandClientError && error.code === 'DEMAND_RELATIONAL_WRITE_DISABLED') {
           const atuais = getAllAtendimentos()
@@ -555,10 +592,10 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
             acao: 'criar',
             entidade: 'Atendimento',
             entidade_id: preparada.id,
-            descricao: `Criou demanda ${tipoServico} para ${passageiroNome}`,
+            descricao: `Criou demanda ${tipoServico} para ${effectivePassengerName}`,
           })
           dispararAlertaNovaDemanda(
-            passageiroNome,
+            effectivePassengerName,
             empresaSelecionada?.nome || '',
             preparada.id,
             preparada.serial_os,
@@ -582,10 +619,10 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'criar',
         entidade: 'Atendimento', entidade_id: nova.id,
-        descricao: `Criou demanda ${tipoServico} para ${passageiroNome}`,
+        descricao: `Criou demanda ${tipoServico} para ${effectivePassengerName}`,
       })
       // V9: Alerta sonoro + notificação
-      dispararAlertaNovaDemanda(passageiroNome, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
+      dispararAlertaNovaDemanda(effectivePassengerName, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
       if (resultado.policy.blocked) {
         toast.warning(`Demanda ${nova.serial_os || nova.id} salva como pendente por politica corporativa.`)
       } else if (resultado.policy.requiresAction) {
@@ -602,9 +639,32 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
     onClose()
   }
 
+  if (requesterAccessDenied) {
+    return (
+      <Modal open={open} onClose={onClose} title="Acesso restrito" size="md">
+        <div className="space-y-4">
+          <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+            Você só pode abrir demandas vinculadas ao seu cadastro de solicitante. Para criar uma nova solicitação, use o Portal empresas/Grupos.
+          </div>
+          <div className="flex justify-end">
+            <button type="button" onClick={onClose} className="bbt-button-primary">Fechar</button>
+          </div>
+        </div>
+      </Modal>
+    )
+  }
+
   return (
     <Modal open={open} onClose={onClose} title={editing ? 'Editar Demanda' : 'Nova Demanda'} size="xl">
       <form onSubmit={handleSubmit} className="space-y-5">
+        {formReadOnly && (
+          <div role="status" className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
+            {hotelDemandLocked
+              ? 'Esta demanda hoteleira já entrou em cotação. Hóspedes e dados comerciais não podem mais ser alterados nesta edição. Se já houver reserva, use Corrigir reserva, que exige motivo e registra auditoria.'
+              : 'Consulta somente leitura. As alterações desta demanda estão restritas pelas suas permissões.'}
+          </div>
+        )}
+        <fieldset disabled={formReadOnly} className="contents">
         {/* TIPO */}
         <div>
           <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-2 tracking-wider">Tipo de Serviço *</label>
@@ -654,9 +714,14 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               const nextCompany = empresasNoContexto.find((empresa) => empresa.id === nextCompanyId)
               setEmpresaId(nextCompanyId)
               setFuncionarioId(null)
+              setDetHotel((current) => ({
+                ...current,
+                rooms: current.rooms?.map((room) => ({ ...room, guests: [] })),
+                needs_review: true,
+              }))
               setCostCenterId(nextCompany?.centro_custo_padrao_id || null)
               setCentroCusto(nextCompany?.centro_custo_padrao || '')
-            }} className="bbt-input" required>
+            }} className="bbt-input" required disabled={requesterView && Boolean(editing)}>
               <option value="">Selecione...</option>
               {isConsolidated && <option value="">Selecione a empresa</option>}
               {empresasNoContexto.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
@@ -681,7 +746,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               </div>
             )}
           </div>
-          <div>
+          {tipoServico !== 'Hotel' && <div>
             <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">
               {ocupanteLabel} *
             </label>
@@ -705,10 +770,10 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               placeholder={`Digite o nome do ${ocupanteLabel.toLowerCase()}...`}
               required
             />
-          </div>
+          </div>}
           <div>
             <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Data do Atendimento</label>
-            <input type="date" value={dataAtendimento} onChange={(e) => setDataAtendimento(e.target.value)} className="bbt-input" />
+            <DateInput aria-label="Data do atendimento" value={dataAtendimento} onChange={(e) => setDataAtendimento(e.target.value)} className="bbt-input" />
           </div>
           <div>
             <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Origem</label>
@@ -720,6 +785,15 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
 
         {/* ===== DETALHES POR TIPO ===== */}
         {tipoServico === 'Hotel' && (
+          <CampoBox titulo="Necessidade de hospedagem" icon={HotelIcon}>
+            <HotelDemandConfigurator
+              companyId={empresaId}
+              value={detHotel}
+              onChange={setDetHotel}
+            />
+          </CampoBox>
+        )}
+        {false && tipoServico === 'Hotel' && (
           <CampoBox titulo="Detalhes do Hotel" icon={HotelIcon}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
@@ -760,11 +834,11 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               </div>
               <div>
                 <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Check-in</label>
-                <input type="date" value={detHotel.data_checkin || ''} onChange={(e) => setDetHotel({ ...detHotel, data_checkin: e.target.value })} className="bbt-input" />
+                <DateInput aria-label="Check-in" value={detHotel.data_checkin || ''} onChange={(e) => setDetHotel({ ...detHotel, data_checkin: e.target.value })} className="bbt-input" />
               </div>
               <div>
                 <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Check-out</label>
-                <input type="date" value={detHotel.data_checkout || ''} onChange={(e) => setDetHotel({ ...detHotel, data_checkout: e.target.value })} className="bbt-input" />
+                <DateInput aria-label="Check-out" value={detHotel.data_checkout || ''} onChange={(e) => setDetHotel({ ...detHotel, data_checkout: e.target.value })} className="bbt-input" />
               </div>
               <div>
                 <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Nº Hóspedes</label>
@@ -779,7 +853,7 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
               <div className="mt-3 p-2 bg-bbt-accent/10 border border-bbt-accent/30 rounded text-xs flex items-center gap-2">
                 <Info className="w-3 h-3 text-bbt-accent" />
                 <span>
-                  Tarifa auto: <strong>{formatCurrency(detHotel.tarifa_unitaria)}</strong> × <strong>{detHotel.noites} noite{detHotel.noites > 1 ? 's' : ''}</strong> = <strong>{formatCurrency(detHotel.tarifa_unitaria * detHotel.noites)}</strong>
+                  Tarifa auto: <strong>{formatCurrency(Number(detHotel.tarifa_unitaria))}</strong> × <strong>{detHotel.noites} noite{Number(detHotel.noites) > 1 ? 's' : ''}</strong> = <strong>{formatCurrency(Number(detHotel.tarifa_unitaria) * Number(detHotel.noites))}</strong>
                 </span>
               </div>
             )}
@@ -812,8 +886,8 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label="Origem"><input value={detAereo.origem || ''} onChange={(e) => setDetAereo({ ...detAereo, origem: e.target.value })} className="bbt-input" placeholder="GRU, GYN" /></Field>
               <Field label="Destino"><input value={detAereo.destino || ''} onChange={(e) => setDetAereo({ ...detAereo, destino: e.target.value })} className="bbt-input" placeholder="MIA, CGH" /></Field>
-              <Field label="Data Ida"><input type="date" value={detAereo.data_ida || ''} onChange={(e) => setDetAereo({ ...detAereo, data_ida: e.target.value })} className="bbt-input" /></Field>
-              <Field label="Data Volta"><input type="date" value={detAereo.data_volta || ''} onChange={(e) => setDetAereo({ ...detAereo, data_volta: e.target.value })} className="bbt-input" /></Field>
+              <Field label="Data Ida"><DateInput aria-label="Data de ida do voo" value={detAereo.data_ida || ''} onChange={(e) => setDetAereo({ ...detAereo, data_ida: e.target.value })} className="bbt-input" /></Field>
+              <Field label="Data Volta"><DateInput aria-label="Data de volta do voo" value={detAereo.data_volta || ''} onChange={(e) => setDetAereo({ ...detAereo, data_volta: e.target.value })} className="bbt-input" /></Field>
               <Field label="Cia Aérea"><input value={detAereo.cia_aerea || ''} onChange={(e) => setDetAereo({ ...detAereo, cia_aerea: e.target.value })} className="bbt-input" placeholder="LATAM, Azul" /></Field>
               <Field label="Classe">
                 <select value={detAereo.classe || 'Econômica'} onChange={(e) => setDetAereo({ ...detAereo, classe: e.target.value as ClasseAerea })} className="bbt-input">
@@ -835,8 +909,8 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label="Locadora"><input value={detCarro.locadora || ''} onChange={(e) => setDetCarro({ ...detCarro, locadora: e.target.value })} className="bbt-input" /></Field>
               <Field label="Cidade Retirada"><input value={detCarro.cidade_retirada || ''} onChange={(e) => setDetCarro({ ...detCarro, cidade_retirada: e.target.value })} className="bbt-input" /></Field>
-              <Field label="Data Retirada"><input type="date" value={detCarro.data_retirada || ''} onChange={(e) => setDetCarro({ ...detCarro, data_retirada: e.target.value })} className="bbt-input" /></Field>
-              <Field label="Data Devolução"><input type="date" value={detCarro.data_devolucao || ''} onChange={(e) => setDetCarro({ ...detCarro, data_devolucao: e.target.value })} className="bbt-input" /></Field>
+              <Field label="Data Retirada"><DateInput aria-label="Data de retirada do carro" value={detCarro.data_retirada || ''} onChange={(e) => setDetCarro({ ...detCarro, data_retirada: e.target.value })} className="bbt-input" /></Field>
+              <Field label="Data Devolução"><DateInput aria-label="Data de devolução do carro" value={detCarro.data_devolucao || ''} onChange={(e) => setDetCarro({ ...detCarro, data_devolucao: e.target.value })} className="bbt-input" /></Field>
               <Field label="Categoria"><input value={detCarro.categoria || ''} onChange={(e) => setDetCarro({ ...detCarro, categoria: e.target.value })} className="bbt-input" /></Field>
               <Field label="Localizador"><input value={detCarro.localizador || ''} onChange={(e) => setDetCarro({ ...detCarro, localizador: e.target.value })} className="bbt-input uppercase" /></Field>
             </div>
@@ -848,8 +922,8 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label="Destino"><input value={detPacote.destino || ''} onChange={(e) => setDetPacote({ ...detPacote, destino: e.target.value })} className="bbt-input" /></Field>
               <Field label="Localizador"><input value={detPacote.localizador || ''} onChange={(e) => setDetPacote({ ...detPacote, localizador: e.target.value })} className="bbt-input uppercase" /></Field>
-              <Field label="Data Ida"><input type="date" value={detPacote.data_ida || ''} onChange={(e) => setDetPacote({ ...detPacote, data_ida: e.target.value })} className="bbt-input" /></Field>
-              <Field label="Data Volta"><input type="date" value={detPacote.data_volta || ''} onChange={(e) => setDetPacote({ ...detPacote, data_volta: e.target.value })} className="bbt-input" /></Field>
+              <Field label="Data Ida"><DateInput aria-label="Data de ida do pacote" value={detPacote.data_ida || ''} onChange={(e) => setDetPacote({ ...detPacote, data_ida: e.target.value })} className="bbt-input" /></Field>
+              <Field label="Data Volta"><DateInput aria-label="Data de volta do pacote" value={detPacote.data_volta || ''} onChange={(e) => setDetPacote({ ...detPacote, data_volta: e.target.value })} className="bbt-input" /></Field>
             </div>
             <Field label="Descrição"><textarea value={detPacote.descricao || ''} onChange={(e) => setDetPacote({ ...detPacote, descricao: e.target.value })} rows={2} className="bbt-input" /></Field>
           </CampoBox>
@@ -1019,42 +1093,45 @@ export function NovaDemandaModal({ open, onClose, editing, onSaved, prefilledEmp
           </div>
         </div>
 
-        {/* STATUS */}
+        {/* O status é uma projeção somente leitura do ciclo oficial da viagem. */}
         <div>
-          <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Status</label>
-          <select value={status} onChange={(e) => setStatus(e.target.value as StatusAtendimento)} className="bbt-input">
-            {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-          </select>
+          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+            Status do ciclo
+          </label>
+          <div className="bbt-input flex items-center justify-between gap-3 bg-slate-50 dark:bg-slate-900/60" aria-readonly="true">
+            <span className="font-semibold">
+              {travelLifecycleStatusLabel(
+                editing?.relational_lifecycle_status || editing?.status || 'draft',
+              )}
+            </span>
+            <span className="text-xs text-slate-500 dark:text-slate-400">Atualizado automaticamente</span>
+          </div>
         </div>
-
-        {(status === 'pendente' || status === 'cancelado') && (
-          <Field label={`Motivo (${status === 'pendente' ? 'pendência' : 'cancelamento'})`}>
-            <input value={motivo} onChange={(e) => setMotivo(e.target.value)} className="bbt-input" placeholder="Descreva o motivo" />
-          </Field>
-        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <Field label="Observações (visíveis ao cliente)">
             <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} rows={3} className="bbt-input" placeholder="Observações que vão no voucher/relatório" />
           </Field>
-          <Field label="Observações INTERNAS (só BBT)">
+          {!requesterView && <Field label="Observações INTERNAS (só BBT)">
             <textarea value={observacoesInternas} onChange={(e) => setObservacoesInternas(e.target.value)} rows={3} className="bbt-input" placeholder="Anotações internas não vão pro cliente" />
-          </Field>
+          </Field>}
         </div>
+
+        </fieldset>
 
         <div className="flex justify-between items-center gap-2 pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
           {/* Gerar voucher emitido pré-preenchido a partir da demanda */}
           {editing ? (
             <div className="flex flex-col gap-3 w-full">
-              <PolicyValidator atendimento={editing} />
-              <div className="flex gap-2 items-center justify-between">
-                <a href={`/dashboard/vouchers/novo?atendimento=${editing.id}`} target="_blank" rel="noopener noreferrer"
+              {!requesterView && <PolicyValidator atendimento={editing} />}
+              <div className={`flex gap-2 items-center ${requesterView ? 'justify-end' : 'justify-between'}`}>
+                {!requesterView && <a href={`/dashboard/vouchers/novo?atendimento=${editing.id}`} target="_blank" rel="noopener noreferrer"
                   className="bbt-button-primary flex items-center gap-2 text-sm">
                   <FileText className="w-4 h-4" /> Gerar Voucher
-                </a>
+                </a>}
                 <div className="flex gap-2">
-                  <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
-                  <button type="submit" className="bbt-button-primary">Salvar</button>
+                  <button type="button" onClick={onClose} className="bbt-button-ghost">{formReadOnly ? 'Fechar' : 'Cancelar'}</button>
+                  {!formReadOnly && <button type="submit" className="bbt-button-primary">Salvar</button>}
                 </div>
               </div>
             </div>

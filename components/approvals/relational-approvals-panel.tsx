@@ -17,6 +17,7 @@ import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
+import { ApprovalSubjectSummary } from '@/components/approvals/approval-subject-summary'
 import {
   decideApproval,
   fetchApprovalInstance,
@@ -25,9 +26,13 @@ import {
   type ApprovalInstanceDetail,
   type ApprovalInstanceSummary,
 } from '@/lib/approvals/client'
+import {
+  extractApprovalBusinessSummary,
+  extractHotelQuoteApprovalSummary,
+} from '@/lib/approvals/subject-presentation'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { GovernanceClientError } from '@/lib/governance-client'
-import { formatCurrency } from '@/lib/utils'
+import { demandFocusHref } from '@/lib/demands/focus-query'
 import type { User } from '@/types'
 
 type QueueFilter = 'pending' | 'mine' | 'overdue' | 'all'
@@ -87,7 +92,7 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
       if (filter === 'mine' && (!item.assignedToMe || !['pending', 'in_progress'].includes(item.status))) return false
       if (filter === 'overdue' && item.overdueSteps < 1) return false
       if (!query) return true
-      return `${item.workflowName} ${item.companyName} ${item.demandId || ''} ${item.reservationId || ''}`
+      return `${item.workflowName} ${item.companyName} ${item.demandNumber || ''} ${item.requesterName || ''} ${item.travelerName || ''} ${item.destination || ''}`
         .toLocaleLowerCase('pt-BR')
         .includes(query)
     })
@@ -116,6 +121,14 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
   const pendingAssignment = useMemo(
     () => findPendingAssignment(selected, user?.id || null),
     [selected, user?.id],
+  )
+  const selectedHotelQuote = useMemo(
+    () => selected ? extractHotelQuoteApprovalSummary(selected.subject) : null,
+    [selected],
+  )
+  const selectedBusiness = useMemo(
+    () => selected ? extractApprovalBusinessSummary(selected.subject, approvalPresentationContext(selected)) : null,
+    [selected],
   )
 
   async function submitDecision() {
@@ -235,8 +248,9 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
                   </div>
                   <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-slate-500">
                     <span>{formatDateTime(item.startedAt)}</span>
-                    {item.demandId && <span>Demanda {item.demandId.slice(-10)}</span>}
-                    {item.reservationId && <span>Reserva {item.reservationId.slice(-10)}</span>}
+                    {item.demandNumber && <span>{item.demandNumber}</span>}
+                    {item.serviceType && <span>{instanceServiceLabel(item.serviceType)}</span>}
+                    {item.travelerName && <span>{item.travelerName}</span>}
                     <span>{item.pendingSteps} etapa(s) pendente(s)</span>
                   </div>
                 </div>
@@ -276,15 +290,16 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
 
                 <dl className="grid gap-3 border-y border-bbt-gray-100 py-4 text-sm dark:border-slate-800 sm:grid-cols-2">
                   <Detail label="Iniciada em" value={formatDateTime(selected.startedAt)} />
-                  <Detail label="Tipo" value={selected.type} />
-                  <Detail label="Demanda" value={selected.demandId || '—'} />
-                  <Detail label="Reserva" value={selected.reservationId || '—'} />
-                  <Detail label="Viajante" value={selected.employeeId || '—'} />
-                  <Detail label="Versão da instância" value={String(selected.version)} />
+                  <Detail label="Tipo" value={instanceTypeLabel(selected.type)} />
+                  <Detail label="Pedido / OS" value={selectedHotelQuote?.demandNumber || selected.demandNumber || 'Não informado'} />
+                  <Detail label="Solicitante" value={selected.requesterName || 'Não informado'} />
+                  <Detail label="Viajante" value={selectedHotelQuote?.passengerName || selected.travelerName || 'Não informado'} />
+                  <Detail label="Serviço" value={selectedBusiness?.service || 'Não informado'} />
+                  <Detail label="Destino" value={selectedBusiness?.destination || 'Não informado'} />
                 </dl>
 
                 {selected.demandId && (
-                  <Link href={`/dashboard/demandas?focus=${encodeURIComponent(selected.demandId)}`} className="bbt-button-ghost w-fit">
+                  <Link href={demandFocusHref(selected.demandId)} className="bbt-button-ghost w-fit">
                     <FileText className="h-4 w-4" />
                     Abrir demanda
                   </Link>
@@ -292,19 +307,23 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
 
                 <div>
                   <h3 className="text-sm font-semibold text-bbt-primary dark:text-white">Dados avaliados</h3>
-                  <SubjectSummary subject={selected.subject} />
+                  <ApprovalSubjectSummary
+                    subject={selected.subject}
+                    context={approvalPresentationContext(selected)}
+                    presentation={selected.presentation}
+                  />
                 </div>
 
                 <div>
                   <h3 className="text-sm font-semibold text-bbt-primary dark:text-white">Etapas do workflow</h3>
                   <ol className="mt-3 space-y-2">
                     {selected.steps.map((step) => (
-                      <li key={step.id} className={`rounded-md border p-3 ${step.status === 'pending' ? 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20' : 'border-bbt-gray-100 dark:border-slate-800'}`}>
+                      <li key={step.id || `${step.stepNumber}:${step.nodeName}`} className={`rounded-md border p-3 ${step.status === 'pending' ? 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20' : 'border-bbt-gray-100 dark:border-slate-800'}`}>
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <div className="font-semibold text-bbt-primary dark:text-white">{step.stepNumber}. {step.nodeName}</div>
                             <div className="mt-0.5 text-xs text-slate-500">
-                              {step.approvalKind || 'etapa automática'} · {step.completionMode}
+                              {approvalKindLabel(step.approvalKind)} · {completionModeLabel(step.completionMode)}
                               {step.dueAt ? ` · vence ${formatDateTime(step.dueAt)}` : ''}
                             </div>
                           </div>
@@ -312,8 +331,8 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
                         </div>
                         {step.assignments.length > 0 && (
                           <ul className="mt-3 divide-y divide-bbt-gray-100 border-t border-bbt-gray-100 text-xs dark:divide-slate-800 dark:border-slate-800">
-                            {step.assignments.map((assignment) => (
-                              <li key={assignment.id} className="flex items-center justify-between gap-3 py-2">
+                            {step.assignments.map((assignment, assignmentIndex) => (
+                              <li key={assignment.id || `${step.stepNumber}:${assignment.userName || 'aprovador'}:${assignmentIndex}`} className="flex items-center justify-between gap-3 py-2">
                                 <span className="truncate">
                                   {assignment.userName || assignment.userEmail || 'Aprovador não resolvido'}
                                   {assignment.delegatedFromUserId && <span className="ml-1 text-slate-400">(delegado)</span>}
@@ -395,12 +414,14 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
 function findPendingAssignment(
   detail: ApprovalInstanceDetail | null,
   userId: string | null,
-): { assignment: ApprovalAssignmentDetail; stepVersion: number } | null {
+): { assignment: ApprovalAssignmentDetail & { id: string }; stepVersion: number } | null {
   if (!detail || !userId) return null
   for (const step of detail.steps) {
-    if (step.status !== 'pending') continue
-    const assignment = step.assignments.find((candidate) => candidate.status === 'pending' && candidate.userId === userId)
-    if (assignment) return { assignment, stepVersion: step.version }
+    if (step.status !== 'pending' || typeof step.version !== 'number') continue
+    const assignment = step.assignments.find((candidate) => (
+      candidate.status === 'pending' && candidate.userId === userId && typeof candidate.id === 'string'
+    ))
+    if (assignment?.id) return { assignment: { ...assignment, id: assignment.id }, stepVersion: step.version }
   }
   return null
 }
@@ -417,34 +438,6 @@ function decisionKey(
     hash = Math.imul(hash, 16777619)
   }
   return `approval:${assignmentId}:${version}:${decision}:${(hash >>> 0).toString(16)}`
-}
-
-function SubjectSummary({ subject }: { subject: Record<string, unknown> }) {
-  const visible = Object.entries(subject).filter(([, value]) => (
-    value !== null
-    && value !== undefined
-    && value !== ''
-    && (!Array.isArray(value) || value.length > 0)
-  ))
-  if (visible.length === 0) return <p className="mt-2 text-sm text-slate-500">Sem dados adicionais.</p>
-  return (
-    <dl className="mt-2 grid gap-x-5 gap-y-2 rounded-md bg-bbt-gray-50 p-3 text-xs dark:bg-slate-900 sm:grid-cols-2">
-      {visible.slice(0, 16).map(([key, value]) => (
-        <div key={key} className="min-w-0">
-          <dt className="truncate font-semibold text-slate-500">{key}</dt>
-          <dd className="mt-0.5 break-words text-bbt-primary dark:text-white">{displayValue(value)}</dd>
-        </div>
-      ))}
-    </dl>
-  )
-}
-
-function displayValue(value: unknown): string {
-  if (typeof value === 'number') return formatCurrency(value)
-  if (typeof value === 'boolean') return value ? 'Sim' : 'Não'
-  if (Array.isArray(value)) return value.map(String).join(', ')
-  if (typeof value === 'object' && value) return JSON.stringify(value)
-  return String(value)
 }
 
 function Metric({
@@ -495,6 +488,60 @@ function Detail({ label, value }: { label: string; value: string }) {
       <dd className="mt-1 break-words text-bbt-primary dark:text-white">{value}</dd>
     </div>
   )
+}
+
+function instanceTypeLabel(value: string): string {
+  const labels: Record<string, string> = {
+    cost: 'Aprovação de custo',
+    merit: 'Aprovação de mérito',
+    issuance: 'Aprovação de emissão',
+    cancellation: 'Aprovação de cancelamento',
+    operational: 'Aprovação operacional',
+    security: 'Aprovação de segurança',
+  }
+  return labels[value] || 'Aprovação'
+}
+
+function approvalKindLabel(value: string | null): string {
+  if (!value) return 'Etapa automática'
+  const labels: Record<string, string> = {
+    merit: 'Mérito',
+    cost: 'Custo',
+    budget: 'Orçamento',
+    operational: 'Operacional',
+    security: 'Segurança',
+    international: 'Viagem internacional',
+    national: 'Viagem nacional',
+  }
+  return labels[value] || 'Aprovação'
+}
+
+function completionModeLabel(value: string): string {
+  const labels: Record<string, string> = {
+    any: 'decisão de um aprovador',
+    all: 'decisão de todos os aprovadores',
+    quorum: 'decisão por quórum',
+    first: 'primeira decisão válida',
+  }
+  return labels[value] || 'regra configurada'
+}
+
+function instanceServiceLabel(value: string): string {
+  return extractApprovalBusinessSummary({ product: value }).service || 'Serviço'
+}
+
+function approvalPresentationContext(selected: ApprovalInstanceDetail) {
+  return {
+    instanceType: selected.type,
+    demandNumber: selected.demandNumber,
+    companyName: selected.companyName,
+    requesterName: selected.requesterName,
+    travelerName: selected.travelerName,
+    serviceType: selected.serviceType,
+    destination: selected.destination,
+    travelStartDate: selected.travelStartDate,
+    travelEndDate: selected.travelEndDate,
+  }
 }
 
 function LoadingState({ label }: { label: string }) {

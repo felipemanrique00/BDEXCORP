@@ -15,6 +15,12 @@ import {
 } from '@/lib/server/domain-rollout-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import {
+  isRequesterReadPrincipal,
+  requesterOwnVoucherExistsSql,
+} from '@/lib/server/requester-read-scope'
+import { enrichVouchersFromDatabase } from '@/lib/server/voucher-enrichment-service'
+import { attachVoucherPresentationSettings } from '@/lib/server/voucher-presentation-service'
+import {
   assertVoucherStatusTransition,
   normalizeLegacyVoucher,
   voucherBatchSchema,
@@ -81,29 +87,55 @@ export async function listVouchers(
 
   return withTenantTransaction(principal.tenantId, async (client) => {
     const bootstrap = await bootstrapLegacyVouchers(client, principal)
+    const parameters: unknown[] = [principal.tenantId, companyIds]
+    const clauses = [
+      'voucher.tenant_id = $1',
+      'voucher.company_id = any($2::text[])',
+      'voucher.deleted_at is null',
+    ]
+    if (isRequesterReadPrincipal(principal)) {
+      parameters.push(principal.user.id, principal.user.email)
+      clauses.push(requesterOwnVoucherExistsSql(
+        'voucher',
+        `$${parameters.length - 1}`,
+        `$${parameters.length}`,
+      ))
+    }
+    if (search) {
+      parameters.push(search)
+      const searchParameter = `$${parameters.length}`
+      clauses.push(`(
+        voucher.id ilike ${searchParameter}
+        or voucher.voucher_code ilike ${searchParameter}
+        or coalesce(voucher.metadata->>'numero', '') ilike ${searchParameter}
+        or coalesce(voucher.metadata->>'localizador', '') ilike ${searchParameter}
+        or coalesce(voucher.metadata->>'numero_confirmacao', '') ilike ${searchParameter}
+        or coalesce(voucher.metadata->>'passageiro_nome', '') ilike ${searchParameter}
+        or coalesce(voucher.metadata->>'cpf', '') ilike ${searchParameter}
+      )`)
+    }
+    parameters.push(limit, offset)
     const result = await client.query<VoucherRow & { total_count: string }>(
       `select voucher.*, count(*) over()::text as total_count
        from vouchers voucher
-       where voucher.tenant_id = $1
-         and voucher.company_id = any($2::text[])
-         and voucher.deleted_at is null
-         and (
-           $3::text is null
-           or voucher.id ilike $3
-           or voucher.voucher_code ilike $3
-           or coalesce(voucher.metadata->>'numero', '') ilike $3
-           or coalesce(voucher.metadata->>'localizador', '') ilike $3
-           or coalesce(voucher.metadata->>'numero_confirmacao', '') ilike $3
-           or coalesce(voucher.metadata->>'passageiro_nome', '') ilike $3
-           or coalesce(voucher.metadata->>'cpf', '') ilike $3
-         )
+       where ${clauses.join(' and ')}
        order by voucher.created_at desc, voucher.id desc
-       limit $4 offset $5`,
-      [principal.tenantId, companyIds, search, limit, offset],
+       limit $${parameters.length - 1} offset $${parameters.length}`,
+      parameters,
     )
     await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
+    const enrichedItems = await enrichVouchersFromDatabase(
+      client,
+      principal.tenantId,
+      result.rows.map(mapVoucherRow),
+    )
+    const presentedItems = await attachVoucherPresentationSettings(
+      client,
+      principal.tenantId,
+      enrichedItems,
+    )
     return {
-      items: result.rows.map(mapVoucherRow),
+      items: presentedItems.map(withExternalReservationConfirmation),
       total: Number(result.rows[0]?.total_count || 0),
     }
   })
@@ -118,9 +150,44 @@ export async function getVoucher(
     const bootstrap = await bootstrapLegacyVouchers(client, principal)
     const row = await loadVoucherForUpdate(client, principal.tenantId, voucherId, false)
     await requireCompanyAccess(principal, row.company_id, 'ver_vouchers')
+    await requireRequesterVoucherReadAccess(client, principal, row.id)
     await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
-    return mapVoucherRow(row)
+    const voucher = mapVoucherRow(row)
+    const [enriched] = await enrichVouchersFromDatabase(client, principal.tenantId, [voucher])
+    const [presented] = await attachVoucherPresentationSettings(
+      client,
+      principal.tenantId,
+      [enriched || voucher],
+    )
+    return withExternalReservationConfirmation(presented || enriched || voucher)
   })
+}
+
+async function requireRequesterVoucherReadAccess(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  voucherId: string,
+): Promise<void> {
+  if (!isRequesterReadPrincipal(principal)) return
+  const parameters = [
+    principal.tenantId,
+    voucherId,
+    principal.user.id,
+    principal.user.email,
+  ]
+  const result = await client.query(
+    `select 1
+     from vouchers voucher
+     where voucher.tenant_id = $1
+       and voucher.id = $2
+       and voucher.deleted_at is null
+       and ${requesterOwnVoucherExistsSql('voucher', '$3', '$4')}`,
+    parameters,
+  )
+  if (!result.rowCount) {
+    // A 404 avoids confirming the existence of another requester's voucher.
+    throw new VoucherServiceError('VOUCHER_NOT_FOUND', 'Voucher nao encontrado.', 404)
+  }
 }
 
 export async function createVoucher(
@@ -148,7 +215,13 @@ export async function createVoucher(
     })
     const row = await insertVoucher(client, principal, complete)
     await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
-    return mapVoucherRow(row)
+    const mapped = mapVoucherRow(row)
+    const [presented] = await attachVoucherPresentationSettings(
+      client,
+      principal.tenantId,
+      [mapped],
+    )
+    return presented || mapped
   })
 
   await writeAuditEvent({
@@ -212,7 +285,11 @@ export async function upsertVoucherBatch(
             )
           : { rows: [] as VoucherRow[] }
         return {
-          vouchers: reusedRows.rows.map(mapVoucherRow),
+          vouchers: await attachVoucherPresentationSettings(
+            client,
+            principal.tenantId,
+            reusedRows.rows.map(mapVoucherRow),
+          ),
           reused: true,
           jobId: existingJob.rows[0].id,
         }
@@ -258,7 +335,15 @@ export async function upsertVoucherBatch(
         JSON.stringify({ inputHash, voucherIds: saved.map((voucher) => voucher.id) }),
       ],
     )
-    return { vouchers: saved, reused: false, jobId }
+    return {
+      vouchers: await attachVoucherPresentationSettings(
+        client,
+        principal.tenantId,
+        saved,
+      ),
+      reused: false,
+      jobId,
+    }
   })
 
   await writeAuditEvent({
@@ -351,7 +436,13 @@ export async function updateVoucher(
       )
     }
     await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
-    return mapVoucherRow(result.rows[0])
+    const mapped = mapVoucherRow(result.rows[0])
+    const [presented] = await attachVoucherPresentationSettings(
+      client,
+      principal.tenantId,
+      [mapped],
+    )
+    return presented || mapped
   })
 
   await writeAuditEvent({
@@ -876,6 +967,13 @@ function mapVoucherRow(row: VoucherRow): VoucherEmitido {
     updated_at: toIso(row.updated_at),
     version: Number(row.version),
   }) as VoucherEmitido
+}
+
+function withExternalReservationConfirmation(voucher: VoucherEmitido): VoucherEmitido {
+  if (!voucher.reserva_id || !voucher.localizador) return voucher
+  return voucher.numero_confirmacao === voucher.localizador
+    ? voucher
+    : { ...voucher, numero_confirmacao: voucher.localizador }
 }
 
 function voucherCompanyIds(principal: RequestPrincipal): string[] {

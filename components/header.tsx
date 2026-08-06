@@ -43,6 +43,8 @@ export function Header({ user, onOpenNavigation }: HeaderProps) {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const profileRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLDivElement>(null)
+  const canUseDemandTransfers = hasPermission(user, 'ver_demandas')
+    && ['tenant_admin', 'agent', 'supervisor', 'operator'].includes(user.role_key || '')
 
   useEffect(() => {
     const saved = localStorage.getItem('bbt-theme')
@@ -304,7 +306,7 @@ export function Header({ user, onOpenNavigation }: HeaderProps) {
 
         {/* DIREITA — Ações rápidas */}
         <div className="flex shrink-0 items-center gap-1">
-          <TransferenciasPendentesPainel userId={user.id} />
+          {canUseDemandTransfers && <TransferenciasPendentesPainel userId={user.id} />}
           {installPrompt && (
             <button onClick={installPWA}
               className="p-2.5 rounded-lg hover:bg-bbt-gray-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition"

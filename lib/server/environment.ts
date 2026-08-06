@@ -33,6 +33,7 @@ const environmentSchema = z.object({
   AUTOMATION_WORKER_ENABLED: optionalBooleanValue.default(true),
   AUTOMATION_WORKER_INTERVAL_MS: positiveInteger.min(1_000).max(300_000).default(5_000),
   AUTOMATION_WORKER_BATCH_SIZE: positiveInteger.max(100).default(25),
+  OFFLINE_TRAVEL_ENABLED: optionalBooleanValue.default(false),
   AUTH_SECRET: optionalString,
   AUTH_SESSION_HOURS: positiveInteger.max(24 * 30).default(12),
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('bbt_session'),

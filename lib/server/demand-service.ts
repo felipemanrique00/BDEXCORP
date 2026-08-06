@@ -6,16 +6,20 @@ import { z } from 'zod'
 
 import type { PolicyEvaluationResult, PolicyScopeContext } from '@/lib/policy'
 import { sha256 } from '@/lib/policy'
-import {
-  applyLegacyDemandAssignment,
-  applyLegacyDemandStatus,
-} from '@/lib/demands/operational-mutations'
+import { applyLegacyDemandAssignment } from '@/lib/demands/operational-mutations'
 import {
   assessDemandUpdate,
+  lifecycleAllowsNormalHotelDemandEdit,
   lifecycleAllowsMaterialDemandEdit,
   type DemandUpdateSnapshot,
 } from '@/lib/demands/update-governance'
 import { normalizarNomePessoa } from '@/lib/funcionario-identidade'
+import {
+  hasNormalizedHotelDemandDetails,
+  hotelDemandDetailsSchema,
+  hotelDemandPrimaryGuest,
+  type HotelDemandDetailsInput,
+} from '@/lib/hotel-demand/model'
 import { mergeStorageValues } from '@/lib/storage-merge'
 import {
   parseLegacyDemands,
@@ -39,10 +43,20 @@ import {
   resolveEmployeeIdentityForDemandInTransaction,
   type ResolvedEmployeeIdentityProfile,
 } from '@/lib/server/employee-identity-service'
+import {
+  hasPersistedHotelDemandDetailsInTransaction,
+  HotelDemandServiceError,
+  persistHotelDemandDetailsInTransaction,
+} from '@/lib/server/hotel-demand-service'
 import { evaluateAndPersistPoliciesInTransaction } from '@/lib/server/policy-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import {
+  isRequesterReadPrincipal,
+  requesterOwnDemandExistsSql,
+} from '@/lib/server/requester-read-scope'
 import { persistTravelTransitionInTransaction } from '@/lib/server/travel-lifecycle-persistence'
 import type { TravelLifecycleRecord } from '@/lib/travel-lifecycle'
+import { operationalStatusFromLifecycle } from '@/lib/travel-lifecycle/operational-status'
 
 const demandCreateBodySchema = z.object({
   demand: z.record(z.unknown()),
@@ -90,6 +104,14 @@ const COMPLETION_REQUIRED_ACTIONS = new Set([
   'prevent_issuance',
 ])
 
+const INTERNAL_AGENCY_ROLE_KEYS = new Set([
+  'tenant_admin',
+  'financial_manager',
+  'supervisor',
+  'agent',
+  'operator',
+])
+
 interface CompanyRow extends QueryResultRow {
   id: string
   group_id: string | null
@@ -135,6 +157,7 @@ interface DemandListRow extends QueryResultRow {
   id: string
   company_id: string
   company_name: string
+  requester_id: string | null
   employee_id: string | null
   employee_match_status: string | null
   employee_match_confidence: string | number | null
@@ -326,6 +349,10 @@ export async function listRelationalDemands(
       'demand.deleted_at is null',
       'demand.company_id = any($2::text[])',
     ]
+    if (isRequesterReadPrincipal(principal)) {
+      values.push(principal.user.id)
+      clauses.push(requesterOwnDemandExistsSql('demand', `$${values.length}`))
+    }
     if (filters.companyId) {
       values.push(filters.companyId)
       clauses.push(`demand.company_id = $${values.length}`)
@@ -410,8 +437,30 @@ export async function getRelationalDemandById(
   return withTenantTransaction(principal.tenantId, async (client) => {
     const demand = await loadDemandForMutation(client, principal.tenantId, demandId, false)
     await requireCompanyAccess(principal, demand.company_id, 'ver_demandas')
+    await requireRequesterDemandReadAccess(client, principal, demandId)
     return mapDemandListItem(demand)
   })
+}
+
+async function requireRequesterDemandReadAccess(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demandId: string,
+): Promise<void> {
+  if (!isRequesterReadPrincipal(principal)) return
+  const result = await client.query(
+    `select 1
+     from demands demand
+     where demand.tenant_id = $1
+       and demand.id = $2
+       and demand.deleted_at is null
+       and ${requesterOwnDemandExistsSql('demand', '$3')}`,
+    [principal.tenantId, demandId, principal.user.id],
+  )
+  if (!result.rowCount) {
+    // Do not reveal that another requester's demand exists.
+    throw new DemandServiceError('DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
+  }
 }
 
 export async function updateDemandDetails(
@@ -422,8 +471,8 @@ export async function updateDemandDetails(
   const demandId = normalizeDemandId(rawDemandId)
   const input = demandDetailsUpdateSchema.parse(rawInput)
   const parsed = parseLegacyDemands([input.demand])
-  const snapshot = parsed.demands[0]
-  if (!snapshot || parsed.failures.length) {
+  const parsedSnapshot = parsed.demands[0]
+  if (!parsedSnapshot || parsed.failures.length) {
     throw new DemandServiceError(
       'DEMAND_INPUT_INVALID',
       'Os dados atualizados da demanda sao invalidos.',
@@ -431,6 +480,10 @@ export async function updateDemandDetails(
       { failures: parsed.failures },
     )
   }
+  const hotelDetails = normalizedHotelDetails(parsedSnapshot)
+  const snapshot = hotelDetails
+    ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
+    : parsedSnapshot
   if (snapshot.id !== demandId) {
     throw new DemandServiceError(
       'DEMAND_ID_MISMATCH',
@@ -438,7 +491,6 @@ export async function updateDemandDetails(
       400,
     )
   }
-  const requestedOperationalStatus = demandStatusSchema.parse(input.demand.status)
   const inputHash = sha256({
     operation: 'demand_details_update',
     demandId,
@@ -451,6 +503,17 @@ export async function updateDemandDetails(
     const current = await loadDemandForMutation(client, principal.tenantId, demandId)
     await requireCompanyAccess(principal, current.company_id, 'criar_demandas')
     await requireRelationalDemandWrite(client, principal.tenantId, current.company_id)
+    if (
+      (current.service_type === 'hotel' || snapshot.serviceType === 'hotel')
+      && !hotelDetails
+      && await hasPersistedHotelDemandDetailsInTransaction(client, principal.tenantId, demandId)
+    ) {
+      throw new DemandServiceError(
+        'HOTEL_DEMAND_DETAILS_REQUIRED',
+        'Uma demanda hoteleira normalizada nao pode voltar ao formato legado nem trocar de servico por esta edicao.',
+        422,
+      )
+    }
     if (snapshot.companyId !== current.company_id) {
       await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
       await requireRelationalDemandWrite(client, principal.tenantId, snapshot.companyId)
@@ -473,8 +536,25 @@ export async function updateDemandDetails(
     }
 
     assertDemandVersion(current, input.expectedVersion)
+    if (
+      (current.service_type === 'hotel' || snapshot.serviceType === 'hotel')
+      && !lifecycleAllowsNormalHotelDemandEdit(current.lifecycle_status)
+    ) {
+      throw new DemandServiceError(
+        'HOTEL_DEMAND_NORMAL_EDIT_LOCKED',
+        'A hospedagem ja entrou em cotacao e nao pode ser alterada por este formulario. Use o fluxo auditado de correcao da reserva.',
+        409,
+        { lifecycleStatus: current.lifecycle_status },
+      )
+    }
     const company = await loadCompany(client, principal.tenantId, snapshot.companyId)
-    const requester = await loadRequester(client, principal.tenantId, snapshot.companyId, snapshot.requesterId)
+    const requester = await loadRequesterForUpdate(
+      client,
+      principal,
+      snapshot.companyId,
+      snapshot.requesterId,
+      current.requester_id,
+    )
     const identityHints = recordValue(snapshot.metadata.identityHints)
     const identity = await resolveEmployeeIdentityForDemandInTransaction(
       client,
@@ -528,6 +608,7 @@ export async function updateDemandDetails(
       demandId,
       current.demand_number,
       now,
+      null,
     )
     const scopes = demandPolicyScopes(principal, snapshot, company, identity, requester, references)
     const checkpoints = current.lifecycle_status === 'draft'
@@ -605,7 +686,7 @@ export async function updateDemandDetails(
     const nextLifecycleVersion = governanceReset
       ? Number(current.lifecycle_version) + 1
       : Number(current.lifecycle_version)
-    const nextOperationalStatus = governanceReset ? 'pendente' : requestedOperationalStatus
+    const nextOperationalStatus = operationalStatusFromLifecycle(nextLifecycleStatus)
     const currentLegacy = recordValue(recordValue(current.metadata).legacySnapshot)
     const nextLegacy = legacyDemandSnapshot(
       {
@@ -614,6 +695,7 @@ export async function updateDemandDetails(
         empresa_id: snapshot.companyId,
         passageiro_nome: snapshot.passengerName,
         tipo_servico: input.demand.tipo_servico,
+        ...(hotelDetails ? { detalhes_hotel: hotelDetails } : {}),
         cost_center_id: references.costCenterId,
         centro_custo: references.costCenterCode,
       },
@@ -628,7 +710,7 @@ export async function updateDemandDetails(
       },
     )
     const approvalSubject = {
-      requesterUserId: requester?.user_id || principal.user.id,
+      requesterUserId: requester?.user_id || null,
       amount: snapshot.estimatedAmount,
       currency: 'BRL',
       urgent: snapshot.priority === 'urgent',
@@ -734,6 +816,15 @@ export async function updateDemandDetails(
     )
     if (updated.rowCount !== 1) {
       throw staleDemandVersion(input.expectedVersion, current.version)
+    }
+    if (hotelDetails) {
+      await persistNormalizedHotelDemand(
+        client,
+        principal,
+        demandId,
+        snapshot.companyId,
+        hotelDetails,
+      )
     }
     await persistIdentityDecision(
       client,
@@ -977,120 +1068,21 @@ export async function updateDemandOperationalStatus(
 ): Promise<DemandMutationResult> {
   const demandId = normalizeDemandId(rawDemandId)
   const input = demandOperationalStatusSchema.parse(rawInput)
-  const inputHash = sha256({
-    operation: 'demand_operational_status',
-    demandId,
-    status: input.status,
-    expectedVersion: input.expectedVersion,
-    reason: input.reason,
-  })
-
-  const result = await withTenantTransaction(principal.tenantId, async (client) => {
+  return withTenantTransaction(principal.tenantId, async (client) => {
     const current = await loadDemandForMutation(client, principal.tenantId, demandId)
     await requireCompanyAccess(principal, current.company_id, 'criar_demandas')
     await requireRelationalDemandWrite(client, principal.tenantId, current.company_id)
-    const replay = await loadDemandOperationEvent(
-      client,
-      principal.tenantId,
-      demandId,
-      input.idempotencyKey,
-    )
-    if (replay) {
-      assertDemandOperationReplay(replay, inputHash)
-      return { item: mapDemandListItem(current), replayed: true }
-    }
-
     assertDemandVersion(current, input.expectedVersion)
-    if (current.status === input.status) {
-      throw new DemandServiceError(
-        'DEMAND_STATUS_UNCHANGED',
-        'A demanda ja esta com o status informado.',
-        409,
-      )
-    }
-    const now = new Date().toISOString()
-    const legacy = applyLegacyDemandStatus({
-      id: current.id,
-      demandNumber: current.demand_number,
-      companyId: current.company_id,
-      passengerName: current.passenger_name_snapshot,
-      legacySnapshot: recordValue(recordValue(current.metadata).legacySnapshot),
-      status: input.status,
-      changedAt: now,
-    })
-    const metadata = {
-      ...recordValue(current.metadata),
-      legacySnapshot: legacy,
-    }
-    const updated = await client.query(
-      `update demands set
-         status = $4,
-         metadata = $5::jsonb,
-         version = version + 1,
-         updated_by = $6,
-         updated_at = $7::timestamptz
-       where tenant_id = $1 and id = $2 and version = $3 and deleted_at is null`,
-      [
-        principal.tenantId,
-        demandId,
-        input.expectedVersion,
-        input.status,
-        JSON.stringify(metadata),
-        principal.user.id,
-        now,
-      ],
+    throw new DemandServiceError(
+      'DEMAND_STATUS_MANAGED_BY_LIFECYCLE',
+      'O status da demanda e atualizado automaticamente pelo ciclo da viagem.',
+      409,
+      {
+        lifecycleStatus: current.lifecycle_status,
+        operationalStatus: operationalStatusFromLifecycle(current.lifecycle_status),
+      },
     )
-    if (updated.rowCount !== 1) {
-      throw staleDemandVersion(input.expectedVersion, current.version)
-    }
-    await client.query(
-      `insert into demand_events (
-         tenant_id, demand_id, actor_user_id, event_type, from_status, to_status,
-         data, idempotency_key, input_hash
-       ) values ($1, $2, $3, 'operational_status_changed', $4, $5, $6::jsonb, $7, $8)`,
-      [
-        principal.tenantId,
-        demandId,
-        principal.user.id,
-        current.status,
-        input.status,
-        JSON.stringify({
-          reason: input.reason,
-          resultingVersion: input.expectedVersion + 1,
-        }),
-        input.idempotencyKey,
-        inputHash,
-      ],
-    )
-    await persistLegacyDemandCompatibility(client, principal, legacy)
-    return {
-      item: mapDemandListItem(await loadDemandForMutation(client, principal.tenantId, demandId, false)),
-      replayed: false,
-    }
-  }).catch((error) => {
-    if (isUniqueViolation(error)) {
-      throw new DemandServiceError(
-        'DEMAND_OPERATION_IDEMPOTENCY_CONFLICT',
-        'A chave de idempotencia ja foi utilizada por outra operacao.',
-        409,
-      )
-    }
-    throw error
   })
-
-  await writeAuditEvent({
-    action: 'travel.demand.status.update',
-    result: 'success',
-    entityType: 'demand',
-    entityId: demandId,
-    metadata: {
-      companyId: result.item.companyId,
-      status: result.item.operationalStatus,
-      version: result.item.version,
-      replayed: result.replayed,
-    },
-  })
-  return result
 }
 
 export async function createRelationalDemand(
@@ -1100,8 +1092,8 @@ export async function createRelationalDemand(
 ): Promise<RelationalDemandCreationResult> {
   const input = demandCreateBodySchema.parse(rawInput)
   const parsed = parseLegacyDemands([input.demand])
-  const snapshot = parsed.demands[0]
-  if (!snapshot || parsed.failures.length) {
+  const parsedSnapshot = parsed.demands[0]
+  if (!parsedSnapshot || parsed.failures.length) {
     throw new DemandServiceError(
       'DEMAND_INPUT_INVALID',
       'Os dados da demanda sao invalidos.',
@@ -1109,6 +1101,10 @@ export async function createRelationalDemand(
       { failures: parsed.failures },
     )
   }
+  const hotelDetails = normalizedHotelDetails(parsedSnapshot)
+  const snapshot = hotelDetails
+    ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
+    : parsedSnapshot
   const idempotencyKey = normalizeIdempotencyKey(rawIdempotencyKey)
   const inputHash = sha256({ tenantId: principal.tenantId, demand: input.demand, submit: input.submit })
   await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
@@ -1116,7 +1112,16 @@ export async function createRelationalDemand(
   const createAttempt = () => withTenantTransaction(principal.tenantId, async (client) => {
     const existing = await loadDemandByIdempotency(client, principal.tenantId, idempotencyKey)
     if (existing) return replayCreation(existing, inputHash)
-    return createDemandInTransaction(client, principal, snapshot, input.demand, input.submit, idempotencyKey, inputHash)
+    return createDemandInTransaction(
+      client,
+      principal,
+      snapshot,
+      input.demand,
+      input.submit,
+      idempotencyKey,
+      inputHash,
+      hotelDetails,
+    )
   })
   const replayConcurrentCreation = () => withTenantTransaction(principal.tenantId, async (client) => {
     const existing = await loadDemandByIdempotency(client, principal.tenantId, idempotencyKey)
@@ -1185,10 +1190,16 @@ async function createDemandInTransaction(
   submit: boolean,
   idempotencyKey: string,
   inputHash: string,
+  hotelDetails: HotelDemandDetailsInput | null,
 ): Promise<DemandCreationPreparation> {
   await requireRelationalDemandWrite(client, principal.tenantId, snapshot.companyId)
   const company = await loadCompany(client, principal.tenantId, snapshot.companyId)
-  const requester = await loadRequester(client, principal.tenantId, snapshot.companyId, snapshot.requesterId)
+  const requester = await loadRequesterForCreate(
+    client,
+    principal,
+    snapshot.companyId,
+    snapshot.requesterId,
+  )
   const identityHints = recordValue(snapshot.metadata.identityHints)
   const identity = await resolveEmployeeIdentityForDemandInTransaction(
     client,
@@ -1214,9 +1225,12 @@ async function createDemandInTransaction(
   const demandNumber = await nextDemandNumber(client, principal.tenantId)
   const now = new Date().toISOString()
   const demandId = snapshot.id || `atd-${randomUUID()}`
-  const assignedTo = principal.user.id
+  const assignedTo = resolveInitialDemandAssignee(principal)
   const initialLegacy = legacyDemandSnapshot({
     ...rawDemand,
+    ...(requester ? { solicitante_id: requester.id } : {}),
+    passageiro_nome: snapshot.passengerName,
+    ...(hotelDetails ? { detalhes_hotel: hotelDetails } : {}),
     cost_center_id: references.costCenterId,
     centro_custo: references.costCenterCode,
   }, {
@@ -1282,6 +1296,16 @@ async function createDemandInTransaction(
     ],
   )
 
+  if (hotelDetails) {
+    await persistNormalizedHotelDemand(
+      client,
+      principal,
+      demandId,
+      snapshot.companyId,
+      hotelDetails,
+    )
+  }
+
   await persistIdentityDecision(client, principal, demandId, snapshot, identity)
   await client.query(
     `insert into demand_events (
@@ -1295,7 +1319,18 @@ async function createDemandInTransaction(
     ],
   )
 
-  const facts = buildDemandPolicyFacts(principal, snapshot, company, identity, requester, references, demandId, demandNumber, now)
+  const facts = buildDemandPolicyFacts(
+    principal,
+    snapshot,
+    company,
+    identity,
+    requester,
+    references,
+    demandId,
+    demandNumber,
+    now,
+    principal.user.id,
+  )
   const scopes = demandPolicyScopes(principal, snapshot, company, identity, requester, references)
   const checkpoints = submit ? ['profile', 'request', 'submission'] : ['profile', 'request']
   const evaluations: DemandPolicyCheckpointSummary[] = []
@@ -1634,19 +1669,68 @@ async function loadCompany(client: PoolClient, tenantId: string, companyId: stri
   return result.rows[0]
 }
 
-async function loadRequester(
+async function loadRequesterForCreate(
   client: PoolClient,
-  tenantId: string,
+  principal: RequestPrincipal,
   companyId: string,
   requesterId: string | null,
 ): Promise<RequesterRow | null> {
-  if (!requesterId) return null
+  if (!requesterId) {
+    const linked = await client.query<RequesterRow>(
+      `select id, user_id
+       from requesters
+       where tenant_id = $1 and company_id = $2 and user_id = $3
+         and status = 'active' and deleted_at is null
+       order by updated_at desc, id
+       limit 1`,
+      [principal.tenantId, companyId, principal.user.id],
+    )
+    return linked.rows[0] || null
+  }
+
+  return loadExplicitRequester(client, principal, companyId, requesterId)
+}
+
+async function loadRequesterForUpdate(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  companyId: string,
+  requesterId: string | null,
+  currentRequesterId: string | null,
+): Promise<RequesterRow | null> {
+  if (requesterId) {
+    return loadExplicitRequester(client, principal, companyId, requesterId)
+  }
+  if (!currentRequesterId) return null
+
+  const current = await client.query<RequesterRow>(
+    `select id, user_id
+     from requesters
+     where tenant_id = $1 and company_id = $2 and id = $3`,
+    [principal.tenantId, companyId, currentRequesterId],
+  )
+  if (!current.rows[0]) {
+    throw new DemandServiceError(
+      'DEMAND_REQUESTER_SCOPE_MISMATCH',
+      'O solicitante atual nao pertence a empresa selecionada. Informe um solicitante valido para transferir a demanda.',
+      409,
+    )
+  }
+  return current.rows[0]
+}
+
+async function loadExplicitRequester(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  companyId: string,
+  requesterId: string,
+): Promise<RequesterRow> {
   const result = await client.query<RequesterRow>(
     `select id, user_id
      from requesters
      where tenant_id = $1 and company_id = $2 and id = $3
        and status = 'active' and deleted_at is null`,
-    [tenantId, companyId, requesterId],
+    [principal.tenantId, companyId, requesterId],
   )
   if (!result.rows[0]) {
     throw new DemandServiceError(
@@ -1655,7 +1739,89 @@ async function loadRequester(
       409,
     )
   }
-  return result.rows[0]
+  const requester = result.rows[0]
+  if (!canSelectExplicitDemandRequester(principal, requester.user_id)) {
+    throw new DemandServiceError(
+      'DEMAND_REQUESTER_SELECTION_DENIED',
+      'O perfil corporativo so pode criar ou alterar demandas em nome do proprio solicitante.',
+      403,
+    )
+  }
+  return requester
+}
+
+function normalizedHotelDetails(snapshot: RelationalDemandSnapshot): HotelDemandDetailsInput | null {
+  if (snapshot.serviceType !== 'hotel') return null
+  const serviceDetails = recordValue(snapshot.metadata.serviceDetails)
+  const rawHotelDetails = serviceDetails.hotel
+  if (!hasNormalizedHotelDemandDetails(rawHotelDetails)) return null
+  return hotelDemandDetailsSchema.parse(rawHotelDetails)
+}
+
+function demandSnapshotWithHotelPrimaryTraveler(
+  snapshot: RelationalDemandSnapshot,
+  details: HotelDemandDetailsInput,
+): RelationalDemandSnapshot {
+  const primaryGuest = hotelDemandPrimaryGuest(details)
+  if (!primaryGuest?.employee_id) {
+    throw new DemandServiceError(
+      'HOTEL_DEMAND_PRIMARY_TRAVELER_REQUIRED',
+      'O primeiro hospede responsavel deve ser selecionado na base de viajantes da empresa.',
+      422,
+    )
+  }
+  const serviceDetails = recordValue(snapshot.metadata.serviceDetails)
+  return {
+    ...snapshot,
+    employeeId: primaryGuest.employee_id,
+    passengerName: primaryGuest.name,
+    travelStartDate: details.data_checkin,
+    travelEndDate: details.data_checkout,
+    destination: details.cidade,
+    metadata: {
+      ...snapshot.metadata,
+      serviceDetails: { ...serviceDetails, hotel: details },
+    },
+  }
+}
+
+async function persistNormalizedHotelDemand(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demandId: string,
+  companyId: string,
+  details: HotelDemandDetailsInput,
+): Promise<void> {
+  try {
+    await persistHotelDemandDetailsInTransaction(client, {
+      tenantId: principal.tenantId,
+      demandId,
+      companyId,
+      actorUserId: principal.user.id,
+      details,
+    })
+  } catch (error) {
+    if (error instanceof HotelDemandServiceError) {
+      throw new DemandServiceError(error.code, error.message, error.status, error.details)
+    }
+    throw error
+  }
+}
+
+export function canSelectExplicitDemandRequester(
+  principal: Pick<RequestPrincipal, 'platformAdmin' | 'roleKey' | 'user'>,
+  requesterUserId: string | null,
+): boolean {
+  if (requesterUserId === principal.user.id) return true
+  return principal.platformAdmin || INTERNAL_AGENCY_ROLE_KEYS.has(principal.roleKey)
+}
+
+export function resolveInitialDemandAssignee(
+  principal: Pick<RequestPrincipal, 'platformAdmin' | 'roleKey' | 'user'>,
+): string | null {
+  return principal.platformAdmin || INTERNAL_AGENCY_ROLE_KEYS.has(principal.roleKey)
+    ? principal.user.id
+    : null
 }
 
 export async function nextDemandNumber(client: PoolClient, tenantId: string): Promise<string> {
@@ -1785,6 +1951,7 @@ function buildDemandPolicyFacts(
   demandId: string,
   demandNumber: string,
   now: string,
+  requesterUserIdFallback: string | null,
 ): Record<string, unknown> {
   const employee = identity.employee
   const employeeMetadata = recordValue(employee?.metadata)
@@ -1827,7 +1994,7 @@ function buildDemandPolicyFacts(
       profileComplete,
       passportValid: employeeMetadata.passportValid === true,
     },
-    requester: { id: requester?.id || null, userId: requester?.user_id || principal.user.id },
+    requester: { id: requester?.id || null, userId: requester?.user_id || requesterUserIdFallback },
     request: {
       id: demandId,
       number: demandNumber,
@@ -2476,7 +2643,7 @@ function legacyDemandSnapshot(
     id: string
     serial: string
     employeeId: string | null
-    assignedTo: string
+    assignedTo: string | null
     status: string
     createdAt: string
     updatedAt: string
@@ -2487,7 +2654,7 @@ function legacyDemandSnapshot(
     id: input.id,
     serial_os: input.serial,
     funcionario_id: input.employeeId,
-    agente_user_id: input.assignedTo,
+    agente_user_id: input.assignedTo || '',
     status: input.status,
     created_at: stringValue(raw.created_at, input.createdAt),
     updated_at: input.updatedAt,
@@ -2499,6 +2666,7 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
   const legacy = recordValue(metadata.legacySnapshot)
   const createdAt = isoDate(row.created_at)
   const updatedAt = isoDate(row.updated_at)
+  const operationalStatus = operationalStatusFromLifecycle(row.lifecycle_status)
   const demand = {
     ...legacy,
     id: row.id,
@@ -2513,7 +2681,7 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
     valor_cotacao: numeric(row.estimated_amount),
     valor_final: numeric(row.final_amount),
     agente_user_id: row.assigned_to_user_id || '',
-    status: row.status,
+    status: operationalStatus,
     prioridade: relationalPriorityToLegacy(row.priority),
     observacoes: row.observations || '',
     observacoes_internas: row.internal_notes || undefined,
@@ -2534,7 +2702,7 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
     assignedToName: row.assigned_to_name,
     serviceType: row.service_type,
     passengerName: row.passenger_name_snapshot,
-    operationalStatus: row.status,
+    operationalStatus,
     lifecycleStatus: row.lifecycle_status,
     lifecycleVersion: Number(row.lifecycle_version),
     priority: row.priority,

@@ -2,6 +2,7 @@
 
 import { Building2, Check, Network, ShieldCheck } from 'lucide-react'
 
+import { DateInput } from '@/components/ui/date-input'
 import {
   CORPORATE_PROFILE_LABELS,
   CORPORATE_PROFILES,
@@ -230,30 +231,26 @@ export function CorporateAccessEditor({
                           <option value="suspended">Suspenso</option>
                         </select>
                       </label>
-                      <label className="text-xs text-slate-600 dark:text-slate-300">
-                        Valido a partir de
-                        <span className="mt-1 block">
-                          <input
-                            type="date"
-                            value={grant.validFrom}
-                            disabled={disabled}
-                            onChange={(event) => patchGroup(group.id, { validFrom: event.target.value })}
-                            className="bbt-input h-9 text-xs"
-                          />
-                        </span>
-                      </label>
-                      <label className="text-xs text-slate-600 dark:text-slate-300">
-                        Expira em
-                        <span className="mt-1 block">
-                          <input
-                            type="date"
-                            value={grant.validUntil}
-                            disabled={disabled}
-                            onChange={(event) => patchGroup(group.id, { validUntil: event.target.value })}
-                            className="bbt-input h-9 text-xs"
-                          />
-                        </span>
-                      </label>
+                      <div className="text-xs text-slate-600 dark:text-slate-300">
+                        <span className="block">Valido a partir de</span>
+                        <DateInput
+                          aria-label="Valido a partir de"
+                          value={grant.validFrom}
+                          disabled={disabled}
+                          onChange={(event) => patchGroup(group.id, { validFrom: event.target.value })}
+                          className="mt-1 h-9 text-xs"
+                        />
+                      </div>
+                      <div className="text-xs text-slate-600 dark:text-slate-300">
+                        <span className="block">Expira em</span>
+                        <DateInput
+                          aria-label="Expira em"
+                          value={grant.validUntil}
+                          disabled={disabled}
+                          onChange={(event) => patchGroup(group.id, { validUntil: event.target.value })}
+                          className="mt-1 h-9 text-xs"
+                        />
+                      </div>
                     </div>
                     <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-700 dark:text-slate-300">
                       <input
@@ -339,30 +336,26 @@ export function CorporateAccessEditor({
                         <option value="suspended">Suspenso</option>
                       </select>
                     </label>
-                    <label className="text-[10px] uppercase text-slate-500">
-                      Valido a partir de
-                      <span className="mt-1 block">
-                        <input
-                          type="date"
-                          value={grant.validFrom}
-                          disabled={disabled}
-                          onChange={(event) => patchDirectCompany(grant.companyId, { validFrom: event.target.value })}
-                          className="bbt-input h-9 text-xs normal-case"
-                        />
-                      </span>
-                    </label>
-                    <label className="text-[10px] uppercase text-slate-500">
-                      Expira em
-                      <span className="mt-1 block">
-                        <input
-                          type="date"
-                          value={grant.validUntil}
-                          disabled={disabled}
-                          onChange={(event) => patchDirectCompany(grant.companyId, { validUntil: event.target.value })}
-                          className="bbt-input h-9 text-xs normal-case"
-                        />
-                      </span>
-                    </label>
+                    <div className="text-[10px] uppercase text-slate-500">
+                      <span className="block">Valido a partir de</span>
+                      <DateInput
+                        aria-label="Valido a partir de"
+                        value={grant.validFrom}
+                        disabled={disabled}
+                        onChange={(event) => patchDirectCompany(grant.companyId, { validFrom: event.target.value })}
+                        className="mt-1 h-9 text-xs normal-case"
+                      />
+                    </div>
+                    <div className="text-[10px] uppercase text-slate-500">
+                      <span className="block">Expira em</span>
+                      <DateInput
+                        aria-label="Expira em"
+                        value={grant.validUntil}
+                        disabled={disabled}
+                        onChange={(event) => patchDirectCompany(grant.companyId, { validUntil: event.target.value })}
+                        className="mt-1 h-9 text-xs normal-case"
+                      />
+                    </div>
                   </div>
                 )
               })}

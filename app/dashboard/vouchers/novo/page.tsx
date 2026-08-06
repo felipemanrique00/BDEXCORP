@@ -18,6 +18,7 @@ import {
   User as UserIcon, Building2, Calendar, MapPin, DollarSign, Tag,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { DateInput } from '@/components/ui/date-input'
 
 function NovoVoucherInner() {
   const router = useRouter()
@@ -342,8 +343,8 @@ function NovoVoucherInner() {
             </Field>
             <Field label="Nr. Apts"><input type="number" min={1} value={numApts} onChange={(e) => setNumApts(Number(e.target.value))} className="bbt-input" /></Field>
             <Field label="Hóspedes"><input type="number" min={1} value={numHospedes} onChange={(e) => setNumHospedes(Number(e.target.value))} className="bbt-input" /></Field>
-            <Field label="Check-in"><input type="date" value={checkin} onChange={(e) => setCheckin(e.target.value)} className="bbt-input" /></Field>
-            <Field label="Check-out"><input type="date" value={checkout} onChange={(e) => setCheckout(e.target.value)} className="bbt-input" /></Field>
+            <Field label="Check-in" htmlFor="voucher-new-checkin"><DateInput id="voucher-new-checkin" value={checkin} onChange={(e) => setCheckin(e.target.value)} className="bbt-input" /></Field>
+            <Field label="Check-out" htmlFor="voucher-new-checkout"><DateInput id="voucher-new-checkout" value={checkout} onChange={(e) => setCheckout(e.target.value)} className="bbt-input" /></Field>
             <Field label="Noites"><input value={noites} readOnly className="bbt-input bg-slate-50 dark:bg-slate-800" /></Field>
             <Field label="Valor Diária (R$)"><input type="number" step="0.01" value={valorDiaria} onChange={(e) => setValorDiaria(Number(e.target.value))} className="bbt-input" /></Field>
             <Field label="Regime de Alimentação">
@@ -381,8 +382,8 @@ function NovoVoucherInner() {
             </Field>
             <Field label="Origem"><input value={origem} onChange={(e) => setOrigem(e.target.value)} className="bbt-input" /></Field>
             <Field label="Destino"><input value={destino} onChange={(e) => setDestino(e.target.value)} className="bbt-input" /></Field>
-            <Field label="Data Ida"><input type="date" value={dataIda} onChange={(e) => setDataIda(e.target.value)} className="bbt-input" /></Field>
-            <Field label="Data Volta"><input type="date" value={dataVolta} onChange={(e) => setDataVolta(e.target.value)} className="bbt-input" /></Field>
+            <Field label="Data Ida" htmlFor="voucher-new-data-ida"><DateInput id="voucher-new-data-ida" value={dataIda} onChange={(e) => setDataIda(e.target.value)} className="bbt-input" /></Field>
+            <Field label="Data Volta" htmlFor="voucher-new-data-volta"><DateInput id="voucher-new-data-volta" value={dataVolta} onChange={(e) => setDataVolta(e.target.value)} className="bbt-input" /></Field>
           </div>
         </div>
       )}
@@ -395,10 +396,10 @@ function NovoVoucherInner() {
             <Field label="Categoria"><input value={categoriaCarro} onChange={(e) => setCategoriaCarro(e.target.value)} className="bbt-input" placeholder="Compacto, SUV..." /></Field>
             <Field label=""><div /></Field>
             <Field label="Local Retirada"><input value={retiradaLocal} onChange={(e) => setRetiradaLocal(e.target.value)} className="bbt-input" /></Field>
-            <Field label="Data Retirada"><input type="date" value={retiradaData} onChange={(e) => setRetiradaData(e.target.value)} className="bbt-input" /></Field>
+            <Field label="Data Retirada" htmlFor="voucher-new-data-retirada"><DateInput id="voucher-new-data-retirada" value={retiradaData} onChange={(e) => setRetiradaData(e.target.value)} className="bbt-input" /></Field>
             <Field label=""><div /></Field>
             <Field label="Local Devolução"><input value={devolucaoLocal} onChange={(e) => setDevolucaoLocal(e.target.value)} className="bbt-input" /></Field>
-            <Field label="Data Devolução"><input type="date" value={devolucaoData} onChange={(e) => setDevolucaoData(e.target.value)} className="bbt-input" /></Field>
+            <Field label="Data Devolução" htmlFor="voucher-new-data-devolucao"><DateInput id="voucher-new-data-devolucao" value={devolucaoData} onChange={(e) => setDevolucaoData(e.target.value)} className="bbt-input" /></Field>
           </div>
         </div>
       )}
@@ -408,7 +409,7 @@ function NovoVoucherInner() {
         <h2 className="font-semibold text-sm flex items-center gap-2"><Tag className="w-4 h-4 text-bbt-accent" /> Confirmação</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <Field label="Nº Confirmação"><input value={numConfirmacao} onChange={(e) => setNumConfirmacao(e.target.value)} className="bbt-input" /></Field>
-          <Field label="Data Confirmação"><input type="date" value={dataConfirmacao} onChange={(e) => setDataConfirmacao(e.target.value)} className="bbt-input" /></Field>
+          <Field label="Data Confirmação" htmlFor="voucher-new-data-confirmacao"><DateInput id="voucher-new-data-confirmacao" value={dataConfirmacao} onChange={(e) => setDataConfirmacao(e.target.value)} className="bbt-input" /></Field>
           <Field label="Confirmado Por"><input value={confirmadoPor} onChange={(e) => setConfirmadoPor(e.target.value)} className="bbt-input" /></Field>
         </div>
       </div>
@@ -452,10 +453,10 @@ function NovoVoucherInner() {
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1 tracking-wider">{label}</label>
+      <label htmlFor={htmlFor} className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1 tracking-wider">{label}</label>
       {children}
     </div>
   )

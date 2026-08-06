@@ -41,6 +41,12 @@ import {
   type DelegationMembership,
 } from '@/lib/approvals'
 import { sha256 } from '@/lib/policy'
+import { approvalVisibilityMode } from '@/lib/approvals/visibility'
+import {
+  buildApprovalSubjectPresentation,
+  type ApprovalPresentationContext,
+  type ApprovalSubjectPresentation,
+} from '@/lib/approvals/subject-presentation'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import {
   normalizeMembershipPermissions,
@@ -50,6 +56,8 @@ import {
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import { persistTravelTransitionInTransaction } from '@/lib/server/travel-lifecycle-persistence'
+import type { TravelLifecycleRecord, TravelLifecycleStatus } from '@/lib/travel-lifecycle'
 
 type GovernanceStatus = 'draft' | 'in_review' | 'approved' | 'published' | 'suspended' | 'archived'
 type WorkflowScope = { type: 'tenant' | 'group' | 'company'; id?: string | null; mode: 'include' | 'exclude'; specificity: number }
@@ -115,6 +123,13 @@ interface ApprovalInstanceRow extends QueryResultRow {
   updated_at: string | Date
   company_name?: string
   workflow_name?: string
+  demand_number?: string | null
+  demand_service_type?: string | null
+  demand_passenger_name?: string | null
+  demand_travel_start_date?: string | Date | null
+  demand_travel_end_date?: string | Date | null
+  demand_destination?: string | null
+  requester_name?: string | null
 }
 
 interface ApprovalStepRow extends QueryResultRow {
@@ -146,6 +161,20 @@ interface ApprovalAssignmentRow extends QueryResultRow {
   responded_at: string | Date | null
   assignee_name?: string | null
   assignee_email?: string | null
+}
+
+interface ApprovedQuoteSelectionProjectionRow extends QueryResultRow {
+  selection_id: string
+  selection_status: string
+  snapshot_hash: string
+  quote_id: string
+  option_id: string
+  demand_id: string
+  company_id: string
+  lifecycle_status: string
+  lifecycle_version: string | number
+  last_policy_evaluation_id: string | null
+  active_approval_instance_id: string | null
 }
 
 type ApprovalSlaExpirationAction = 'escalate' | 'reassign' | 'expire' | 'notify' | 'passive_approve'
@@ -241,6 +270,13 @@ export interface ApprovalInstanceSummary {
   companyId: string
   companyName: string
   employeeId: string | null
+  demandNumber: string | null
+  serviceType: string | null
+  travelerName: string | null
+  requesterName: string | null
+  travelStartDate: string | null
+  travelEndDate: string | null
+  destination: string | null
   type: string
   status: ApprovalInstanceRow['status']
   version: number
@@ -251,12 +287,22 @@ export interface ApprovalInstanceSummary {
   assignedToMe: boolean
 }
 
-export interface ApprovalInstanceDetail extends ApprovalInstanceSummary {
-  subject: ApprovalSubject & Record<string, unknown>
-  workflow: ApprovalWorkflowSnapshot
+export interface ApprovalInstanceDetail extends Omit<
+  ApprovalInstanceSummary,
+  'workflowId' | 'workflowVersionId' | 'reservationId' | 'companyId' | 'employeeId' | 'version'
+> {
+  workflowId?: string
+  workflowVersionId?: string
+  reservationId?: string | null
+  companyId?: string
+  employeeId?: string | null
+  version?: number
+  subject: Record<string, unknown>
+  presentation?: ApprovalSubjectPresentation
+  workflow: ApprovalWorkflowSnapshot | null
   steps: Array<{
-    id: string
-    nodeId: string
+    id?: string
+    nodeId?: string
     nodeName: string
     approvalKind: ApprovalKind | null
     stepNumber: number
@@ -264,15 +310,15 @@ export interface ApprovalInstanceDetail extends ApprovalInstanceSummary {
     completionMode: ApprovalStepRow['completion_mode']
     quorum: number | null
     dueAt: string | null
-    version: number
+    version?: number
     assignments: Array<{
-      id: string
-      userId: string | null
+      id?: string
+      userId?: string | null
       userName: string | null
-      userEmail: string | null
+      userEmail?: string | null
       status: ApprovalAssignmentRow['status']
-      source: string
-      delegatedFromUserId: string | null
+      source?: string
+      delegatedFromUserId?: string | null
       assignedAt: string
       respondedAt: string | null
     }>
@@ -548,6 +594,12 @@ export async function listApprovalInstances(
           and delegated_assignment.assignee_user_id = $3
       ))`,
     ]
+    if (approvalVisibilityMode({
+      roleKey: principal.roleKey,
+      corporateProfile: principal.user.corporate_profile,
+    }) === 'own_demands') {
+      clauses.push(requesterApprovalOwnershipSql('instance', '$3'))
+    }
     if (filters.companyId) {
       values.push(filters.companyId)
       clauses.push(`instance.company_id = $${values.length}`)
@@ -596,6 +648,13 @@ export async function listApprovalInstances(
     const rows = await client.query<ApprovalInstanceRow & { pending_steps: string; overdue_steps: string; assigned_to_me: boolean }>(
       `select instance.*, coalesce(company.trade_name, company.legal_name) as company_name,
               definition.name as workflow_name,
+              demand.demand_number,
+              demand.service_type as demand_service_type,
+              demand.passenger_name_snapshot as demand_passenger_name,
+              demand.travel_start_date as demand_travel_start_date,
+              demand.travel_end_date as demand_travel_end_date,
+              demand.destination as demand_destination,
+              requester.name as requester_name,
               (select count(*)::text from approval_steps step
                where step.tenant_id = instance.tenant_id and step.approval_instance_id = instance.id
                  and step.status = 'pending') as pending_steps,
@@ -616,6 +675,10 @@ export async function listApprovalInstances(
        join companies company on company.tenant_id = instance.tenant_id and company.id = instance.company_id
        join approval_workflow_definitions definition
          on definition.tenant_id = instance.tenant_id and definition.id = instance.workflow_definition_id
+       left join demands demand
+         on demand.tenant_id = instance.tenant_id and demand.id = instance.demand_id
+       left join requesters requester
+         on requester.tenant_id = demand.tenant_id and requester.id = demand.requester_id
        where ${clauses.join(' and ')}
        order by instance.created_at desc, instance.id
        limit $${values.length - 1} offset $${values.length}`,
@@ -650,6 +713,7 @@ export async function createApprovalInstance(
   let instanceId = ''
   try {
     instanceId = await withTenantTransaction(principal.tenantId, async (client) => {
+      await assertRequesterCanCreateApprovalInstance(client, principal, input)
       const existing = await client.query<ApprovalInstanceRow>(
         `select * from approval_instances
          where tenant_id = $1 and source_idempotency_key = $2 for update`,
@@ -2127,6 +2191,48 @@ function workflowScopesApply(scopes: WorkflowScope[], companyId: string, groupId
   return strongestInclude > strongestExclude
 }
 
+async function assertRequesterCanCreateApprovalInstance(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  input: CreateApprovalInstanceInput,
+): Promise<void> {
+  if (approvalVisibilityMode({
+    roleKey: principal.roleKey,
+    corporateProfile: principal.user.corporate_profile,
+  }) !== 'own_demands') return
+
+  if (!input.demandId) {
+    throw new ApprovalServiceError(
+      'APPROVAL_REQUESTER_DEMAND_REQUIRED',
+      'A aprovacao do solicitante precisa estar vinculada a uma demanda propria.',
+      403,
+    )
+  }
+  const ownership = await client.query(
+    `select 1
+     from demands requester_demand
+     join requesters requester_identity
+       on requester_identity.tenant_id = requester_demand.tenant_id
+       and requester_identity.id = requester_demand.requester_id
+     where requester_demand.tenant_id = $1
+       and requester_demand.id = $2
+       and requester_demand.company_id = $3
+       and requester_demand.deleted_at is null
+       and requester_identity.user_id = $4::uuid
+       and requester_identity.status = 'active'
+       and requester_identity.deleted_at is null
+     limit 1`,
+    [principal.tenantId, input.demandId, input.companyId, principal.user.id],
+  )
+  if (!ownership.rowCount) {
+    throw new ApprovalServiceError(
+      'APPROVAL_REQUESTER_DEMAND_ACCESS_DENIED',
+      'A demanda informada nao pertence ao solicitante autenticado.',
+      403,
+    )
+  }
+}
+
 async function validateApprovalEntityOwnership(
   client: PoolClient,
   tenantId: string,
@@ -2150,9 +2256,12 @@ async function assertEntityCompany(
   companyId: string,
   tenantId: string,
 ): Promise<void> {
+  // Reservations use terminal status/versioning and intentionally do not have
+  // the soft-delete column shared by the other approval-owned entities.
+  const activeEntityPredicate = table === 'reservations' ? '' : 'and deleted_at is null'
   const result = await client.query(
     `select 1 from ${table}
-     where tenant_id = $1 and id = $2 and company_id = $3 and deleted_at is null`,
+     where tenant_id = $1 and id = $2 and company_id = $3 ${activeEntityPredicate}`,
     [tenantId, id, companyId],
   )
   if (!result.rowCount) throw new ApprovalServiceError('APPROVAL_ENTITY_SCOPE_MISMATCH', 'Entidade nao pertence a empresa informada.', 409)
@@ -2304,12 +2413,156 @@ async function maybeCompleteApprovalInstance(
     [principal.tenantId, instance.id],
   )
   if (pending.rowCount) return
-  await client.query(
+  const completed = await client.query(
     `update approval_instances set status = 'approved', completed_at = now(), version = version + 1
      where tenant_id = $1 and id = $2 and status in ('pending', 'in_progress')`,
     [principal.tenantId, instance.id],
   )
+  if (!completed.rowCount) return
   await insertApprovalEvent(client, principal, instance.id, null, 'instance_approved', {})
+  await reconcileApprovedQuoteSelection(client, principal, instance)
+}
+
+async function reconcileApprovedQuoteSelection(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  instance: ApprovalInstanceRow,
+): Promise<void> {
+  if (instance.instance_type !== 'cost' || !instance.demand_id) return
+
+  const selectionResult = await client.query<ApprovedQuoteSelectionProjectionRow>(
+    `select selection.id as selection_id, selection.status as selection_status,
+            selection.snapshot_hash, selection.quote_id, selection.option_id,
+            demand.id as demand_id, demand.company_id, demand.lifecycle_status,
+            demand.lifecycle_version, demand.last_policy_evaluation_id,
+            demand.active_approval_instance_id
+     from travel_quote_selections selection
+     join demands demand
+       on demand.tenant_id = selection.tenant_id and demand.id = selection.demand_id
+     where selection.tenant_id = $1 and selection.approval_instance_id = $2
+       and selection.status in ('pending_approval', 'approved')
+     order by selection.chosen_at desc
+     limit 1
+     for update of selection, demand`,
+    [principal.tenantId, instance.id],
+  )
+  const projection = selectionResult.rows[0]
+  if (!projection) return
+  if (projection.demand_id !== instance.demand_id) {
+    throw new ApprovalServiceError(
+      'APPROVAL_QUOTE_SELECTION_SCOPE_MISMATCH',
+      'A escolha vinculada a aprovacao nao pertence a demanda aprovada.',
+      409,
+    )
+  }
+  if (
+    projection.active_approval_instance_id
+    && projection.active_approval_instance_id !== instance.id
+  ) {
+    throw new ApprovalServiceError(
+      'APPROVAL_QUOTE_SELECTION_SUPERSEDED',
+      'A demanda possui outra aprovacao ativa e nao pode concluir esta escolha.',
+      409,
+    )
+  }
+
+  if (projection.lifecycle_status === 'pending_cost_approval') {
+    if (!projection.last_policy_evaluation_id) {
+      throw new ApprovalServiceError(
+        'APPROVAL_QUOTE_SELECTION_POLICY_MISSING',
+        'A escolha aprovada nao possui a avaliacao de politica que originou a decisao.',
+        409,
+      )
+    }
+    const policyResult = await client.query<{
+      passed: boolean
+      has_blocks: boolean
+      result: Record<string, unknown>
+    }>(
+      `select passed, has_blocks, result
+       from policy_evaluations
+       where tenant_id = $1 and id = $2 and demand_id = $3`,
+      [principal.tenantId, projection.last_policy_evaluation_id, projection.demand_id],
+    )
+    const policy = policyResult.rows[0]
+    if (!policy || !policy.passed || policy.has_blocks) {
+      throw new ApprovalServiceError(
+        'APPROVAL_QUOTE_SELECTION_POLICY_INVALID',
+        'A avaliacao de politica da escolha aprovada nao esta valida.',
+        409,
+      )
+    }
+    const requiredActions = Array.isArray(asRecord(policy.result).requiredActions)
+      ? asRecord(policy.result).requiredActions as unknown[]
+      : []
+    const budgetSatisfied = !requiredActions.some((item) => (
+      asRecord(item).action === 'require_budget'
+    ))
+
+    // Quando a politica exige orcamento, a escolha fica aprovada, mas o
+    // lifecycle somente avanca durante a reserva, depois da validacao do saldo.
+    if (budgetSatisfied) {
+      const current: TravelLifecycleRecord = {
+        demandId: projection.demand_id,
+        companyId: projection.company_id,
+        status: projection.lifecycle_status as TravelLifecycleStatus,
+        version: Number(projection.lifecycle_version),
+        lastPolicyEvaluationId: projection.last_policy_evaluation_id,
+        activeApprovalInstanceId: projection.active_approval_instance_id,
+      }
+      await persistTravelTransitionInTransaction(client, principal, current, 'approve_cost', {
+        idempotencyKey: `approval:${instance.id}:quote-selection:approve-cost`,
+        requirements: {
+          policyEvaluationId: projection.last_policy_evaluation_id,
+          policyPassed: true,
+          policyHasBlocks: false,
+          approvalInstanceId: instance.id,
+          approvalsSatisfied: true,
+          budgetSatisfied: true,
+          offerSelected: true,
+        },
+        metadata: {
+          channel: 'offline',
+          source: 'approval_decision',
+          selectionId: projection.selection_id,
+          quoteId: projection.quote_id,
+          quoteOptionId: projection.option_id,
+          snapshotHash: projection.snapshot_hash,
+          approvalInstanceId: instance.id,
+        },
+      })
+    }
+  } else if (projection.lifecycle_status !== 'approved') {
+    throw new ApprovalServiceError(
+      'APPROVAL_QUOTE_SELECTION_STATE_CONFLICT',
+      `A demanda esta no estado ${projection.lifecycle_status} e nao pode concluir a escolha aprovada.`,
+      409,
+    )
+  }
+
+  await client.query(
+    `update travel_quote_selections
+     set status = 'approved', version = version + 1
+     where tenant_id = $1 and id = $2 and status = 'pending_approval'`,
+    [principal.tenantId, projection.selection_id],
+  )
+  await client.query(
+    `insert into audit_logs (
+       tenant_id, actor_user_id, action, entity_type, entity_id, result, metadata
+     ) values ($1, $2, 'travel.quote.selection.approved', 'travel_quote_selection', $3, 'success', $4::jsonb)`,
+    [
+      principal.tenantId,
+      principal.user.id,
+      projection.selection_id,
+      JSON.stringify({
+        demandId: projection.demand_id,
+        quoteId: projection.quote_id,
+        quoteOptionId: projection.option_id,
+        snapshotHash: projection.snapshot_hash,
+        approvalInstanceId: instance.id,
+      }),
+    ],
+  )
 }
 
 async function rejectApprovalInstance(
@@ -2596,11 +2849,22 @@ async function loadApprovalInstance(
 ): Promise<ApprovalInstanceRow> {
   const result = await client.query<ApprovalInstanceRow>(
     `select instance.*, coalesce(company.trade_name, company.legal_name) as company_name,
-            definition.name as workflow_name
+            definition.name as workflow_name,
+            demand.demand_number,
+            demand.service_type as demand_service_type,
+            demand.passenger_name_snapshot as demand_passenger_name,
+            demand.travel_start_date as demand_travel_start_date,
+            demand.travel_end_date as demand_travel_end_date,
+            demand.destination as demand_destination,
+            requester.name as requester_name
      from approval_instances instance
      join companies company on company.tenant_id = instance.tenant_id and company.id = instance.company_id
      join approval_workflow_definitions definition
        on definition.tenant_id = instance.tenant_id and definition.id = instance.workflow_definition_id
+     left join demands demand
+       on demand.tenant_id = instance.tenant_id and demand.id = instance.demand_id
+     left join requesters requester
+       on requester.tenant_id = demand.tenant_id and requester.id = demand.requester_id
      where instance.tenant_id = $1 and instance.id = $2${lock ? ' for update of instance' : ''}`,
     [tenantId, instanceId],
   )
@@ -2613,6 +2877,22 @@ async function assertCanViewApprovalInstance(
   principal: RequestPrincipal,
   instance: ApprovalInstanceRow,
 ): Promise<void> {
+  if (approvalVisibilityMode({
+    roleKey: principal.roleKey,
+    corporateProfile: principal.user.corporate_profile,
+  }) === 'own_demands') {
+    const ownership = await client.query(
+      `select 1
+       from approval_instances requester_instance
+       where requester_instance.tenant_id = $1
+         and requester_instance.id = $2
+         and ${requesterApprovalOwnershipSql('requester_instance', '$3')}
+       limit 1`,
+      [principal.tenantId, instance.id, principal.user.id],
+    )
+    if (ownership.rowCount) return
+    throw new ApprovalServiceError('APPROVAL_INSTANCE_ACCESS_DENIED', 'Instancia fora do escopo autorizado.', 403)
+  }
   const company = principal.corporateAccess?.companies.find((item) => item.companyId === instance.company_id)
   if (company?.permissions.ver_aprovacoes) return
   const assignment = await client.query(
@@ -2631,6 +2911,10 @@ async function hydrateApprovalInstanceDetail(
   principal: RequestPrincipal,
   instance: ApprovalInstanceRow,
 ): Promise<ApprovalInstanceDetail> {
+  const requesterDetail = approvalVisibilityMode({
+    roleKey: principal.roleKey,
+    corporateProfile: principal.user.corporate_profile,
+  }) === 'own_demands'
   const steps = await client.query<ApprovalStepRow>(
     `select step.*, node.name as node_name, node.approval_kind
      from approval_steps step
@@ -2650,27 +2934,41 @@ async function hydrateApprovalInstanceDetail(
         [principal.tenantId, stepIds],
       )
     : { rows: [] as ApprovalAssignmentRow[] }
-  const decisions = await client.query<QueryResultRow>(
-    `select id, approval_step_id as "stepId", assignment_id as "assignmentId",
-            decision, reason, decided_by_user_id as "decidedByUserId",
-            acting_for_user_id as "actingForUserId", decided_at as "decidedAt"
-     from approval_decisions where tenant_id = $1 and approval_instance_id = $2
-     order by decided_at, id`,
-    [principal.tenantId, instance.id],
-  )
-  const events = await client.query<QueryResultRow>(
-    `select id, approval_step_id as "stepId", event_type as "type",
-            actor_user_id as "actorUserId", payload, created_at as "createdAt"
-     from approval_events where tenant_id = $1 and approval_instance_id = $2
-     order by created_at, id`,
-    [principal.tenantId, instance.id],
-  )
+  const decisions = requesterDetail
+    ? { rows: [] as QueryResultRow[] }
+    : await client.query<QueryResultRow>(
+        `select id, approval_step_id as "stepId", assignment_id as "assignmentId",
+                decision, reason, decided_by_user_id as "decidedByUserId",
+                acting_for_user_id as "actingForUserId", decided_at as "decidedAt"
+         from approval_decisions where tenant_id = $1 and approval_instance_id = $2
+         order by decided_at, id`,
+        [principal.tenantId, instance.id],
+      )
+  const events = requesterDetail
+    ? { rows: [] as QueryResultRow[] }
+    : await client.query<QueryResultRow>(
+        `select id, approval_step_id as "stepId", event_type as "type",
+                actor_user_id as "actorUserId", payload, created_at as "createdAt"
+         from approval_events where tenant_id = $1 and approval_instance_id = $2
+         order by created_at, id`,
+        [principal.tenantId, instance.id],
+      )
   const pendingSteps = steps.rows.filter((step) => step.status === 'pending').length
   const overdueSteps = steps.rows.filter((step) => step.status === 'pending' && step.due_at && Date.parse(iso(step.due_at)) < Date.now()).length
   const assignedToMe = assignments.rows.some((assignment) => assignment.assignee_user_id === principal.user.id && assignment.status === 'pending')
+  const summary = mapApprovalInstanceSummary({
+    ...instance,
+    pending_steps: String(pendingSteps),
+    overdue_steps: String(overdueSteps),
+    assigned_to_me: assignedToMe,
+  })
+  const subject = asApprovalSubject(instance.subject_snapshot)
+  if (requesterDetail) {
+    return requesterApprovalInstanceDetail(summary, subject, steps.rows, assignments.rows)
+  }
   return {
-    ...mapApprovalInstanceSummary({ ...instance, pending_steps: String(pendingSteps), overdue_steps: String(overdueSteps), assigned_to_me: assignedToMe }),
-    subject: asApprovalSubject(instance.subject_snapshot),
+    ...summary,
+    subject,
     workflow: approvalWorkflowSnapshotSchema.parse(instance.workflow_snapshot),
     steps: steps.rows.map((step) => ({
       id: step.id,
@@ -2700,6 +2998,67 @@ async function hydrateApprovalInstanceDetail(
   }
 }
 
+function requesterApprovalInstanceDetail(
+  summary: ApprovalInstanceSummary,
+  subject: Record<string, unknown>,
+  steps: ApprovalStepRow[],
+  assignments: ApprovalAssignmentRow[],
+): ApprovalInstanceDetail {
+  const context: ApprovalPresentationContext = {
+    instanceType: summary.type,
+    demandNumber: summary.demandNumber,
+    companyName: summary.companyName,
+    requesterName: summary.requesterName,
+    travelerName: summary.travelerName,
+    serviceType: summary.serviceType,
+    destination: summary.destination,
+    travelStartDate: summary.travelStartDate,
+    travelEndDate: summary.travelEndDate,
+  }
+  return {
+    id: summary.id,
+    workflowName: summary.workflowName,
+    demandId: summary.demandId,
+    companyName: summary.companyName,
+    demandNumber: summary.demandNumber,
+    serviceType: summary.serviceType,
+    travelerName: summary.travelerName,
+    requesterName: summary.requesterName,
+    travelStartDate: summary.travelStartDate,
+    travelEndDate: summary.travelEndDate,
+    destination: summary.destination,
+    type: summary.type,
+    status: summary.status,
+    startedAt: summary.startedAt,
+    completedAt: summary.completedAt,
+    pendingSteps: summary.pendingSteps,
+    overdueSteps: summary.overdueSteps,
+    assignedToMe: summary.assignedToMe,
+    subject: {},
+    presentation: buildApprovalSubjectPresentation(subject, context),
+    workflow: null,
+    steps: steps.map((step) => ({
+      nodeName: step.node_name || 'Etapa',
+      approvalKind: step.approval_kind || null,
+      stepNumber: step.step_number,
+      status: step.status,
+      completionMode: step.completion_mode,
+      quorum: step.quorum,
+      dueAt: optionalIso(step.due_at),
+      assignments: assignments
+        .filter((assignment) => assignment.approval_step_id === step.id)
+        .map((assignment) => ({
+          userName: assignment.assignee_name || null,
+          status: assignment.status,
+          assignedAt: iso(assignment.assigned_at),
+          respondedAt: optionalIso(assignment.responded_at),
+        })),
+    })),
+    decisions: [],
+    events: [],
+  }
+}
+
 function mapApprovalInstanceSummary(
   row: ApprovalInstanceRow & { pending_steps?: string; overdue_steps?: string; assigned_to_me?: boolean },
 ): ApprovalInstanceSummary {
@@ -2713,6 +3072,13 @@ function mapApprovalInstanceSummary(
     companyId: row.company_id,
     companyName: row.company_name || row.company_id,
     employeeId: row.employee_id,
+    demandNumber: row.demand_number || null,
+    serviceType: row.demand_service_type || null,
+    travelerName: row.demand_passenger_name || null,
+    requesterName: row.requester_name || null,
+    travelStartDate: optionalDate(row.demand_travel_start_date),
+    travelEndDate: optionalDate(row.demand_travel_end_date),
+    destination: row.demand_destination || null,
     type: row.instance_type,
     status: row.status,
     version: Number(row.version),
@@ -2776,6 +3142,36 @@ async function insertApprovalNotification(
 
 function accessibleApprovalCompanyIds(principal: RequestPrincipal, permission: 'ver_aprovacoes' | 'decidir_aprovacoes'): string[] {
   return principal.corporateAccess?.companies.filter((company) => company.permissions[permission]).map((company) => company.companyId) || []
+}
+
+function requesterApprovalOwnershipSql(instanceAlias: 'instance' | 'requester_instance', userParameter: '$3'): string {
+  return `(
+    exists (
+      select 1
+      from demands requester_owned_demand
+      join requesters requester_owned_identity
+        on requester_owned_identity.tenant_id = requester_owned_demand.tenant_id
+        and requester_owned_identity.id = requester_owned_demand.requester_id
+      where requester_owned_demand.tenant_id = ${instanceAlias}.tenant_id
+        and requester_owned_demand.id = ${instanceAlias}.demand_id
+        and requester_owned_identity.user_id = ${userParameter}::uuid
+        and requester_owned_identity.status = 'active'
+        and requester_owned_identity.deleted_at is null
+    )
+    or (
+      ${instanceAlias}.subject_snapshot ->> 'requesterUserId' = (${userParameter}::uuid)::text
+      and not exists (
+        select 1
+        from demands requester_authoritative_demand
+        join requesters requester_authoritative_identity
+          on requester_authoritative_identity.tenant_id = requester_authoritative_demand.tenant_id
+          and requester_authoritative_identity.id = requester_authoritative_demand.requester_id
+        where requester_authoritative_demand.tenant_id = ${instanceAlias}.tenant_id
+          and requester_authoritative_demand.id = ${instanceAlias}.demand_id
+          and requester_authoritative_identity.user_id is not null
+      )
+    )
+  )`
 }
 
 function asApprovalSubject(value: unknown): ApprovalSubject & Record<string, unknown> {
@@ -3158,4 +3554,11 @@ function iso(value: string | Date): string {
 
 function optionalIso(value: string | Date | null | undefined): string | null {
   return value ? iso(value) : null
+}
+
+function optionalDate(value: string | Date | null | undefined): string | null {
+  if (!value) return null
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(value)
+  return match?.[1] || null
 }

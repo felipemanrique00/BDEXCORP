@@ -34,7 +34,6 @@ export async function GET(request: Request) {
       requiredPermission: 'ver_demandas',
       allowEmptyCompanyScope: true,
     },
-    roleKeys: [...InternalRoles],
     rateLimit: { key: 'demand-transfers:list', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

@@ -34,6 +34,7 @@ import {
   MonthlyEvolutionChart,
 } from '@/components/intelligence/intelligence-charts'
 import { Modal } from '@/components/ui/modal'
+import { DateInput } from '@/components/ui/date-input'
 import { getCurrentUser, hasPermission } from '@/lib/auth'
 import { GovernanceClientError } from '@/lib/governance-client'
 import type {
@@ -273,11 +274,13 @@ export function IntelligenceCenter() {
           </div>
         </div>
         <DateField
+          id="intelligence-start-date"
           label="Início"
           value={dateDraft.startDate}
           onChange={(startDate) => setDateDraft((current) => ({ ...current, startDate }))}
         />
         <DateField
+          id="intelligence-end-date"
           label="Fim"
           value={dateDraft.endDate}
           onChange={(endDate) => setDateDraft((current) => ({ ...current, endDate }))}
@@ -679,24 +682,26 @@ function StatusBadge({ status }: { status: IntelligenceInsightStatus }) {
 }
 
 function DateField({
+  id,
   label,
   value,
   onChange,
 }: {
+  id: string
   label: string
   value: string
   onChange: (value: string) => void
 }) {
   return (
-    <label className="text-xs font-semibold uppercase text-slate-500">
-      {label}
-      <input
-        type="date"
-        className="bbt-input mt-1 w-full"
+    <div className="text-xs font-semibold uppercase text-slate-500">
+      <label htmlFor={id}>{label}</label>
+      <DateInput
+        id={id}
+        className="mt-1 w-full"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
-    </label>
+    </div>
   )
 }
 

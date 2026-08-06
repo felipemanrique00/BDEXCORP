@@ -97,6 +97,57 @@ h1, h2, h3, h4 {
          transition;
 }
 
+/* Controles temporais padronizados: o ícone é renderizado pelo componente,
+   sem depender do indicador variável de cada navegador. */
+.bbt-temporal-control {
+  color-scheme: light;
+}
+
+.dark .bbt-temporal-control {
+  color-scheme: dark;
+}
+
+.bbt-temporal-input {
+  min-width: 0;
+  padding-left: 2.25rem;
+  padding-right: 2.5rem;
+  font-variant-numeric: tabular-nums;
+  color-scheme: light;
+}
+
+.dark .bbt-temporal-input {
+  color-scheme: dark;
+}
+
+.bbt-temporal-input::-webkit-calendar-picker-indicator {
+  display: none;
+  width: 0;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  -webkit-appearance: none;
+}
+
+.bbt-temporal-input::-webkit-datetime-edit,
+.bbt-temporal-input::-webkit-datetime-edit-fields-wrapper {
+  min-width: 0;
+  padding: 0;
+}
+
+.bbt-temporal-input::-webkit-date-and-time-value {
+  min-width: 0;
+  text-align: left;
+}
+
+.bbt-temporal-picker {
+  color-scheme: light;
+}
+
+.dark .bbt-temporal-picker {
+  color-scheme: dark;
+}
+
 .bbt-button-primary {
   @apply inline-flex items-center justify-center gap-2
          h-10 px-4 rounded-md

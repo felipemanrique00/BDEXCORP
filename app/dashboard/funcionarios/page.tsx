@@ -18,6 +18,7 @@ import Link from 'next/link'
 import type { Funcionario, Cargo } from '@/types'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import { DateInput } from '@/components/ui/date-input'
 
 const CARGOS: Cargo[] = ['Diretor', 'Gerente', 'Colaborador']
 const FUNCIONARIOS_PER_PAGE = 100
@@ -620,7 +621,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
           <Field label="CPF"><input value={form.cpf || ''} onChange={(e) => setForm({ ...form, cpf: e.target.value })} className="bbt-input" /></Field>
           <Field label="E-mail"><input type="email" value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} className="bbt-input" /></Field>
           <Field label="Telefone"><input value={form.telefone || ''} onChange={(e) => setForm({ ...form, telefone: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Data de Nascimento"><input type="date" value={form.data_nascimento || ''} onChange={(e) => setForm({ ...form, data_nascimento: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Data de Nascimento" htmlFor="employee-birth-date"><DateInput id="employee-birth-date" value={form.data_nascimento || ''} onChange={(e) => setForm({ ...form, data_nascimento: e.target.value })} className="bbt-input" /></Field>
           <Field label="Tipo Documento">
             <select value={form.documento_tipo || ''} onChange={(e) => setForm({ ...form, documento_tipo: e.target.value as any })} className="bbt-input">
               <option value="">Nao informado</option>
@@ -639,8 +640,8 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
               <input value={form.uf_emissor || ''} onChange={(e) => setForm({ ...form, uf_emissor: e.target.value.toUpperCase().slice(0, 2) })} className="bbt-input" placeholder="UF" />
             </div>
           </Field>
-          <Field label="Emissao Documento"><input type="date" value={form.documento_emissao || ''} onChange={(e) => setForm({ ...form, documento_emissao: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Validade Documento"><input type="date" value={form.documento_validade || ''} onChange={(e) => setForm({ ...form, documento_validade: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Emissao Documento" htmlFor="employee-document-issued-at"><DateInput id="employee-document-issued-at" value={form.documento_emissao || ''} onChange={(e) => setForm({ ...form, documento_emissao: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Validade Documento" htmlFor="employee-document-expires-at"><DateInput id="employee-document-expires-at" value={form.documento_validade || ''} onChange={(e) => setForm({ ...form, documento_validade: e.target.value })} className="bbt-input" /></Field>
           <Field label="Cargo *">
             <select value={form.cargo || 'Colaborador'} onChange={(e) => setForm({ ...form, cargo: e.target.value as Cargo })} className="bbt-input">
               {CARGOS.map((c) => <option key={c}>{c}</option>)}
@@ -705,10 +706,10 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
             )}
           </Field>
           <Field label="Passaporte"><input value={form.passaporte || ''} onChange={(e) => setForm({ ...form, passaporte: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Validade Passaporte"><input type="date" value={form.passaporte_validade || ''} onChange={(e) => setForm({ ...form, passaporte_validade: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Validade Passaporte" htmlFor="employee-passport-expires-at"><DateInput id="employee-passport-expires-at" value={form.passaporte_validade || ''} onChange={(e) => setForm({ ...form, passaporte_validade: e.target.value })} className="bbt-input" /></Field>
           <Field label="Registro CNH"><input value={form.cnh_registro || ''} onChange={(e) => setForm({ ...form, cnh_registro: e.target.value })} className="bbt-input" /></Field>
           <Field label="Categoria CNH"><input value={form.cnh_categoria || ''} onChange={(e) => setForm({ ...form, cnh_categoria: e.target.value.toUpperCase().slice(0, 3) })} className="bbt-input" /></Field>
-          <Field label="Primeira Habilitacao"><input type="date" value={form.cnh_primeira_habilitacao || ''} onChange={(e) => setForm({ ...form, cnh_primeira_habilitacao: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Primeira Habilitacao" htmlFor="employee-first-license-date"><DateInput id="employee-first-license-date" value={form.cnh_primeira_habilitacao || ''} onChange={(e) => setForm({ ...form, cnh_primeira_habilitacao: e.target.value })} className="bbt-input" /></Field>
           <Field label="Nome da Mae"><input value={form.nome_mae || ''} onChange={(e) => setForm({ ...form, nome_mae: e.target.value })} className="bbt-input" /></Field>
           <Field label="Nome do Pai"><input value={form.nome_pai || ''} onChange={(e) => setForm({ ...form, nome_pai: e.target.value })} className="bbt-input" /></Field>
           <Field label="Naturalidade"><input value={form.naturalidade || ''} onChange={(e) => setForm({ ...form, naturalidade: e.target.value })} className="bbt-input" /></Field>
@@ -724,10 +725,10 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5 uppercase tracking-wider">{label}</label>
+      <label htmlFor={htmlFor} className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5 uppercase tracking-wider">{label}</label>
       {children}
     </div>
   )

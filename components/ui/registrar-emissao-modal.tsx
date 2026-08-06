@@ -13,6 +13,7 @@ import { FileText, Hotel as HotelIcon, Calendar, DollarSign, Loader2 } from 'luc
 import type { Hotel } from '@/types'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { DateInput } from '@/components/ui/date-input'
 
 interface Props {
   open: boolean
@@ -160,12 +161,12 @@ export function RegistrarEmissaoModal({ open, onClose, hotel, empresaIdPadrao, o
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5"><Calendar className="inline w-3 h-3" /> Check-in</label>
-            <input type="date" value={dataCheckin} onChange={(e) => setDataCheckin(e.target.value)} className="bbt-input" />
+            <label htmlFor="manual-emission-checkin" className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5"><Calendar className="inline w-3 h-3" /> Check-in</label>
+            <DateInput id="manual-emission-checkin" value={dataCheckin} onChange={(e) => setDataCheckin(e.target.value)} className="bbt-input" />
           </div>
           <div>
-            <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5"><Calendar className="inline w-3 h-3" /> Check-out</label>
-            <input type="date" value={dataCheckout} onChange={(e) => setDataCheckout(e.target.value)} className="bbt-input" />
+            <label htmlFor="manual-emission-checkout" className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5"><Calendar className="inline w-3 h-3" /> Check-out</label>
+            <DateInput id="manual-emission-checkout" value={dataCheckout} onChange={(e) => setDataCheckout(e.target.value)} className="bbt-input" />
           </div>
         </div>
         <div>

@@ -18,7 +18,8 @@ import {
   Printer, ArrowLeft, Edit3, Trash2, MessageCircle, Mail, Copy, CheckCircle2, XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { formatCurrency } from '@/lib/utils'
+import { formatDateBR as formatDateValueBR } from '@/lib/date'
+import { resolveVoucherPresentationSettings } from '@/lib/vouchers/presentation'
 
 const BBT_INFO = {
   nome: 'BBT AGENCIA DE VIAGENS E TURISMO GLOBAIS',
@@ -66,6 +67,27 @@ export default function VoucherViewPage() {
   }
 
   const empresa = empresas.find((e) => e.id === voucher.empresa_id)
+  const empresaNome = voucher.empresa_nome || empresa?.nome || 'Empresa não informada'
+  const hotelNome = voucher.hotel_nome
+  const hospedes: NonNullable<VoucherEmitido['hospedes_detalhes']> = voucher.hospedes_detalhes?.length
+    ? voucher.hospedes_detalhes
+    : (voucher.passageiros?.length ? voucher.passageiros : [voucher.passageiro_nome]).map((nome, index) => ({
+        nome,
+        principal: index === 0,
+      }))
+  const fallbackRoomCount = voucher.num_apartamentos
+    || ([voucher.tipo_apartamento, voucher.hotel_categoria, voucher.regime].some(Boolean) ? 1 : 0)
+  const quartos: NonNullable<VoucherEmitido['quartos']> = voucher.quartos?.length
+    ? voucher.quartos
+    : Array.from({ length: fallbackRoomCount }, (_, index) => ({
+        numero: index + 1,
+        acomodacao: voucher.tipo_apartamento,
+        categoria: voucher.hotel_categoria,
+        regime: voucher.regime,
+        ...(fallbackRoomCount === 1 ? { hospedes: hospedes.map((hospede) => hospede.nome) } : {}),
+      }))
+  const moeda = voucher.moeda || 'BRL'
+  const presentation = voucher.presentation_settings ?? resolveVoucherPresentationSettings({})
   const canManageVoucher = user?.role === 'master'
     && hasPermission(user, 'operar_reservas')
   const canRemoveVoucher = user?.role === 'master'
@@ -123,14 +145,25 @@ export default function VoucherViewPage() {
   }
 
   function compartilharWhatsApp() {
-    const txt = `Voucher BBT ${voucher!.id}\n${voucher!.passageiro_nome}\n${voucher!.fornecedor_nome}\n${voucher!.tipo === 'Hotel' ? `${formatDataBR(voucher!.data_checkin)} → ${formatDataBR(voucher!.data_checkout)}` : ''}`
+    const serviceLine = voucher!.tipo === 'Hotel'
+      ? `Hotel: ${voucher!.hotel_nome || 'Não informado'}\nCheck-in: ${formatDateTimeBR(voucher!.checkin_em || voucher!.data_checkin)}\nCheck-out: ${formatDateTimeBR(voucher!.checkout_em || voucher!.data_checkout)}`
+      : `Serviço: ${voucher!.fornecedor_nome}`
+    const txt = [
+      `Voucher BBT ${voucher!.id}`,
+      `Viajante: ${voucher!.passageiro_nome}`,
+      serviceLine,
+      `Localizador: ${voucher!.localizador || voucher!.numero_confirmacao || 'Não informado'}`,
+    ].join('\n')
     const url = `https://wa.me/?text=${encodeURIComponent(txt)}`
     window.open(url, '_blank')
   }
 
   function compartilharEmail() {
     const subj = `Voucher BBT ${voucher!.id} - ${voucher!.passageiro_nome}`
-    const body = `Segue voucher de reserva:\n\n${voucher!.id}\nPassageiro: ${voucher!.passageiro_nome}\nFornecedor: ${voucher!.fornecedor_nome}\n\nAcesse: ${window.location.href}`
+    const hotelLine = voucher!.tipo === 'Hotel'
+      ? `Hotel: ${voucher!.hotel_nome || 'Não informado'}\nCheck-in: ${formatDateTimeBR(voucher!.checkin_em || voucher!.data_checkin)}\nCheck-out: ${formatDateTimeBR(voucher!.checkout_em || voucher!.data_checkout)}\n`
+      : ''
+    const body = `Segue voucher de reserva:\n\n${voucher!.id}\nViajante: ${voucher!.passageiro_nome}\n${hotelLine}Localizador: ${voucher!.localizador || voucher!.numero_confirmacao || 'Não informado'}\n\nAcesse: ${window.location.href}`
     window.location.href = `mailto:?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(body)}`
   }
 
@@ -196,12 +229,13 @@ export default function VoucherViewPage() {
       </div>
 
       {/* VOUCHER (área imprimível) */}
-      <div className="bg-white text-black p-8 mt-4 max-w-[210mm] mx-auto print:p-6 print:max-w-none print:mx-0 voucher-print" style={{ minHeight: '297mm' }}>
+      <div className="voucher-print mx-auto mt-4 min-h-[297mm] max-w-[210mm] bg-white p-8 text-black print:m-0 print:min-h-0 print:max-w-none print:p-0">
         <style jsx global>{`
           @media print {
             @page { size: A4; margin: 1.2cm; }
-            body { background: white !important; }
+            html, body { background: white !important; }
             .print\\:hidden { display: none !important; }
+            .voucher-print { width: 100% !important; }
           }
           .voucher-print {
             font-family: 'Helvetica', 'Arial', sans-serif;
@@ -214,22 +248,42 @@ export default function VoucherViewPage() {
           .voucher-print table { border-collapse: collapse; width: 100%; }
           .voucher-print td, .voucher-print th {
             border: 1px solid #999;
-            padding: 4px 6px;
+            padding: 5px 7px;
             font-size: 10px;
+            vertical-align: top;
           }
           .voucher-print th {
             background: #f0f0f0;
             font-weight: 600;
             text-align: center;
           }
+          .voucher-section {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+          .voucher-label {
+            color: #64748b;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: .04em;
+            text-transform: uppercase;
+          }
+          .voucher-value {
+            color: #0f172a;
+            font-size: 11px;
+            font-weight: 600;
+          }
         `}</style>
 
         {/* Cabeçalho */}
         <div className="flex items-start justify-between mb-6 pb-4 border-b-2 border-bbt-primary">
           <div className="flex items-center gap-4">
-            <div className="w-20 h-20 bg-gradient-to-br from-cyan-400 to-blue-700 rounded-lg flex items-center justify-center text-white font-bold text-3xl">
-              B
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/brand/bbt-corporativo-mark-color.webp"
+              alt="BBT Corporativo"
+              className="h-20 w-20 rounded-lg object-contain"
+            />
             <div className="text-xs leading-relaxed">
               <div className="font-bold text-base text-bbt-primary">{BBT_INFO.nome}</div>
               <div>{BBT_INFO.endereco}</div>
@@ -242,7 +296,9 @@ export default function VoucherViewPage() {
           </div>
           <div className="text-right">
             <div className="text-2xl font-bold text-bbt-primary">VOUCHER Nº {voucher.id}</div>
-            <div className="text-xs mt-1">Data de Emissão: {formatDataBR(voucher.created_at.slice(0, 10))}</div>
+            {presentation.showAdministrativeData && (
+              <div className="text-xs mt-1">Data de Emissão: {formatDataBR(voucher.created_at.slice(0, 10))}</div>
+            )}
             <div className="text-xs mt-1">Tipo: {voucher.tipo}</div>
             {voucher.status === 'cancelado' && (
               <div className="text-2xl font-bold text-red-600 mt-2 border-2 border-red-600 px-3 py-1 rotate-[-12deg] inline-block">
@@ -252,77 +308,129 @@ export default function VoucherViewPage() {
           </div>
         </div>
 
-        {/* Para / Cliente */}
-        <div className="grid grid-cols-2 gap-6 mb-4">
-          <div>
-            <div className="font-bold text-xs text-slate-600 uppercase">Para (To):</div>
-            <div className="font-semibold">{voucher.fornecedor_nome}</div>
-            {voucher.fornecedor_endereco && <div>Endereço: {voucher.fornecedor_endereco}</div>}
-            {voucher.fornecedor_cidade && <div>Cidade: {voucher.fornecedor_cidade}</div>}
-            {voucher.fornecedor_telefone && <div>Telefone: {voucher.fornecedor_telefone}</div>}
-          </div>
-          <div>
-            <div className="font-bold text-xs text-slate-600 uppercase">Cliente (Client):</div>
-            <div className="font-semibold">{voucher.passageiro_nome}</div>
-            {voucher.cpf && <div>CPF: {voucher.cpf}</div>}
-            {empresa && <div className="text-slate-600">Empresa: {empresa.nome}</div>}
-            {voucher.passageiros && voucher.passageiros.length > 1 && (
-              <div className="text-xs mt-1">
-                <span className="font-semibold">Hóspedes:</span> {voucher.passageiros.join(', ')}
-              </div>
-            )}
-          </div>
+        {/* Identificação do pedido */}
+        <div className="voucher-section mb-4 grid grid-cols-3 gap-3 rounded-md border border-slate-300 bg-slate-50 p-3">
+          <VoucherInfo
+            label="Cliente / empresa"
+            value={[empresaNome, voucher.empresa_documento].filter(Boolean).join('\n')}
+          />
+          <VoucherInfo label="Viajante responsável" value={voucher.passageiro_nome} />
+          {presentation.showAdministrativeData && (
+            <>
+              <VoucherInfo label="Pedido / OS" value={voucher.numero_solicitacao || voucher.atendimento_id} />
+              <VoucherInfo
+                label="Solicitante"
+                value={[voucher.solicitante_nome, voucher.solicitante_email].filter(Boolean).join('\n')}
+              />
+              <VoucherInfo label="Centro de custo" value={voucher.centro_custo} />
+              <VoucherInfo label="Unidade de negócio" value={voucher.unidade_negocio} />
+            </>
+          )}
         </div>
 
         {/* Detalhes por tipo */}
         {voucher.tipo === 'Hotel' && (
-          <div className="mb-4">
-            <h3 className="font-bold text-sm mb-2 italic">Dados da Hospedagem:</h3>
-            <table>
+          <div className="voucher-section mb-4">
+            <h3 className="mb-2 text-sm font-bold text-bbt-primary">Confirmação da hospedagem</h3>
+            <div className="mb-3 grid grid-cols-[1.5fr_1fr] gap-4 rounded-md border border-slate-400 p-3">
+              <div>
+                <div className="voucher-label">Hotel escolhido</div>
+                <div className="text-base font-bold text-bbt-primary">{displayValue(hotelNome)}</div>
+                <div className="mt-1 text-[10px] leading-relaxed text-slate-700">
+                  {voucher.hotel_endereco && <div>{voucher.hotel_endereco}</div>}
+                  {voucher.hotel_cidade && <div>{voucher.hotel_cidade}</div>}
+                  {[voucher.hotel_telefone, voucher.hotel_email].filter(Boolean).length > 0 && (
+                    <div>{[voucher.hotel_telefone, voucher.hotel_email].filter(Boolean).join(' · ')}</div>
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <VoucherInfo label="Check-in" value={formatDateTimeBR(voucher.checkin_em || voucher.data_checkin)} />
+                <VoucherInfo label="Check-out" value={formatDateTimeBR(voucher.checkout_em || voucher.data_checkout)} />
+                <VoucherInfo label="Noites" value={voucher.noites} />
+                <VoucherInfo label="Quartos" value={voucher.num_apartamentos || quartos.length || undefined} />
+              </div>
+            </div>
+
+            <h4 className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-700">Hóspedes</h4>
+            <table className="mb-3">
               <thead>
                 <tr>
-                  <th>Nr. Apts</th>
-                  <th>Categoria</th>
-                  <th>Tipo apt.</th>
-                  <th>Check-In</th>
-                  <th>Check-Out</th>
-                  <th>Noites</th>
-                  <th>Hóspedes</th>
+                  <th className="w-8">#</th>
+                  <th>Nome</th>
+                  <th>Papel</th>
+                  <th>Código</th>
+                  <th>Documento</th>
+                  <th>Quarto</th>
                 </tr>
               </thead>
               <tbody>
-                <tr className="text-center">
-                  <td>{voucher.num_apartamentos || 1}</td>
-                  <td>{voucher.hotel_categoria}</td>
-                  <td>{voucher.tipo_apartamento}</td>
-                  <td>{formatDataBR(voucher.data_checkin)}</td>
-                  <td>{formatDataBR(voucher.data_checkout)}</td>
-                  <td>{voucher.noites}</td>
-                  <td>{voucher.num_hospedes}</td>
-                </tr>
+                {hospedes.map((hospede, index) => (
+                  <tr key={`${hospede.nome}-${index}`}>
+                    <td className="text-center">{index + 1}</td>
+                    <td>
+                      <div className="font-semibold">{hospede.nome}</div>
+                      {(hospede.email || hospede.telefone) && (
+                        <div className="mt-0.5 text-[9px] text-slate-500">
+                          {[hospede.email, hospede.telefone].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
+                    </td>
+                    <td>{hospede.principal ? 'Responsável' : displayValue(hospede.papel || 'Acompanhante')}</td>
+                    <td>{displayValue(hospede.codigo)}</td>
+                    <td>{displayValue(hospede.documento)}</td>
+                    <td className="text-center">{displayValue(hospede.quarto)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
 
-            <table className="mt-2">
-              <thead>
-                <tr>
-                  <th>Tipo de Pagamento</th>
-                  <th>Regime de Alimentação</th>
-                  <th>Nr. Confirmação</th>
-                  <th>Dt. Confirm.</th>
-                  <th>Confirmado por</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="text-center">
-                  <td>{voucher.forma_pagamento_voucher}</td>
-                  <td>{voucher.regime}</td>
-                  <td>{voucher.numero_confirmacao}</td>
-                  <td>{formatDataBR(voucher.data_confirmacao)}</td>
-                  <td>{voucher.confirmado_por}</td>
-                </tr>
-              </tbody>
-            </table>
+            {quartos.length > 0 && (
+              <>
+                <h4 className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-700">Acomodações escolhidas</h4>
+                <table className="mb-3">
+                  <thead>
+                    <tr>
+                      <th className="w-16">Quarto</th>
+                      <th>Acomodação</th>
+                      <th>Categoria</th>
+                      <th>Regime</th>
+                      <th>Hóspedes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {quartos.map((quarto) => (
+                      <tr key={quarto.numero}>
+                        <td className="text-center font-semibold">{quarto.numero}</td>
+                        <td>{displayValue(quarto.acomodacao || voucher.tipo_apartamento)}</td>
+                        <td>{displayValue(quarto.categoria || voucher.hotel_categoria)}</td>
+                        <td>{displayValue(quarto.regime || voucher.regime)}</td>
+                        <td>{displayValue(quarto.hospedes?.join(', '))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+
+            <div className="grid grid-cols-3 gap-3 rounded-md border border-slate-300 bg-slate-50 p-3">
+              <VoucherInfo
+                label="Fornecedor operacional"
+                value={[
+                  voucher.fornecedor_nome,
+                  presentation.showAdministrativeData ? voucher.fornecedor_codigo : undefined,
+                ].filter(Boolean).join(' · ')}
+              />
+              <VoucherInfo label="Localizador / confirmação" value={voucher.numero_confirmacao || voucher.localizador} />
+              {presentation.showAdministrativeData && (
+                <>
+                  <VoucherInfo label="Canal da reserva" value={voucher.canal_reserva} />
+                  <VoucherInfo label="Forma de pagamento" value={voucher.forma_pagamento_voucher} />
+                  <VoucherInfo label="Condições cotadas" value={voucher.condicoes_pagamento} />
+                  <VoucherInfo label="Confirmado por" value={voucher.confirmado_por} />
+                </>
+              )}
+            </div>
           </div>
         )}
 
@@ -386,55 +494,174 @@ export default function VoucherViewPage() {
           </div>
         )}
 
+        {!['Hotel', 'Aéreo', 'Carro'].includes(voucher.tipo) && (
+          <div className="mb-4">
+            <h3 className="font-bold text-sm mb-2 italic">Dados do Serviço:</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Serviço</th>
+                  <th>Referência</th>
+                  <th>Origem</th>
+                  <th>Destino</th>
+                  <th>Início</th>
+                  <th>Fim</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="text-center">
+                  <td>{voucher.tipo}</td>
+                  <td>{voucher.numero_confirmacao || voucher.localizador || '—'}</td>
+                  <td>{voucher.origem || '—'}</td>
+                  <td>{voucher.destino || voucher.fornecedor_cidade || '—'}</td>
+                  <td>{formatDataBR(voucher.data_ida)}</td>
+                  <td>{formatDataBR(voucher.data_volta)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+
         {/* Financeiro */}
-        <div className="mb-4">
-          <h3 className="font-bold text-sm mb-2 italic">Valores:</h3>
+        {presentation.showConfirmedValues && <div className="voucher-section mb-4">
+          <h3 className="mb-2 text-sm font-bold text-bbt-primary">Valores confirmados</h3>
           <table>
             <tbody>
-              {voucher.valor_diaria && (
-                <tr><td className="font-semibold w-1/3">Valor Diária</td><td className="text-right">{formatCurrency(voucher.valor_diaria)}</td></tr>
+              {voucher.valor_diaria !== undefined && (
+                <tr>
+                  <td className="w-2/3">
+                    <span className="font-semibold">Diária por quarto</span>
+                    {voucher.noites && (
+                      <span className="ml-2 text-[9px] text-slate-500">
+                        {voucher.noites} noite(s) × {voucher.num_apartamentos || quartos.length} quarto(s)
+                      </span>
+                    )}
+                  </td>
+                  <td className="text-right">{formatVoucherMoney(voucher.valor_diaria, moeda)}</td>
+                </tr>
               )}
-              <tr><td className="font-semibold">Tarifa Total</td><td className="text-right">{formatCurrency(voucher.tarifa_total || 0)}</td></tr>
+              {voucher.taxas_diaria !== undefined && (
+                <tr><td className="font-semibold">Taxas por diária</td><td className="text-right">{formatVoucherMoney(voucher.taxas_diaria, moeda)}</td></tr>
+              )}
+              <tr><td className="font-semibold">Subtotal das diárias</td><td className="text-right">{formatVoucherMoney(voucher.tarifa_total || 0, moeda)}</td></tr>
               {(voucher.taxas || 0) > 0 && (
-                <tr><td className="font-semibold">Taxas</td><td className="text-right">{formatCurrency(voucher.taxas || 0)}</td></tr>
+                <tr><td className="font-semibold">Taxas totais</td><td className="text-right">{formatVoucherMoney(voucher.taxas || 0, moeda)}</td></tr>
               )}
-              <tr className="bg-slate-100 font-bold">
-                <td>TOTAL</td>
-                <td className="text-right">{formatCurrency(voucher.total)}</td>
+              {(voucher.taxa_servico || 0) > 0 && (
+                <tr><td className="font-semibold">Taxa de serviço</td><td className="text-right">{formatVoucherMoney(voucher.taxa_servico || 0, moeda)}</td></tr>
+              )}
+              <tr className="bg-bbt-primary font-bold text-white">
+                <td>TOTAL ({moeda})</td>
+                <td className="text-right">{formatVoucherMoney(voucher.total, moeda)}</td>
               </tr>
-              {voucher.centro_custo && (
-                <tr><td className="font-semibold">Centro de Custo</td><td>{voucher.centro_custo}</td></tr>
-              )}
-              {voucher.numero_solicitacao && (
-                <tr><td className="font-semibold">Nº Solicitação</td><td>{voucher.numero_solicitacao}</td></tr>
-              )}
             </tbody>
           </table>
-        </div>
+        </div>}
+
+        {presentation.showCancellationTerms && hasVoucherCancellationContent(voucher) && (
+          <div className={`voucher-section mb-4 rounded-md border p-3 ${
+            voucher.reembolsavel === false
+              ? 'border-red-300 bg-red-50'
+              : 'border-amber-300 bg-amber-50'
+          }`}>
+            <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-800">Cancelamento e condições</div>
+            <div className="grid grid-cols-3 gap-3">
+              <VoucherInfo
+                label="Condição da tarifa"
+                value={voucher.reembolsavel === false ? 'Não reembolsável' : voucher.reembolsavel === true ? 'Reembolsável' : undefined}
+              />
+              <VoucherInfo label="Prazo de cancelamento" value={formatDateTimeBR(voucher.prazo_cancelamento)} />
+              <VoucherInfo label="Política" value={voucher.politica_cancelamento} />
+            </div>
+            {voucher.politica_no_show && <div className="mt-2 text-[10px]"><strong>No-show:</strong> {voucher.politica_no_show}</div>}
+          </div>
+        )}
+
+        {presentation.showAdministrativeData && <div className="voucher-section mb-4">
+          <h3 className="mb-2 text-sm font-bold text-bbt-primary">Dados administrativos</h3>
+          <div className="grid grid-cols-3 gap-3 rounded-md border border-slate-300 p-3">
+            <VoucherInfo label="Pedido / OS" value={voucher.numero_solicitacao || voucher.atendimento_id} />
+            <VoucherInfo label="Solicitante" value={voucher.solicitante_nome} />
+            <VoucherInfo label="Autorizador(es)" value={voucher.autorizadores?.join(', ')} />
+            <VoucherInfo label="Reserva registrada em" value={formatDateTimeBR(voucher.data_reserva)} />
+            <VoucherInfo label="Aprovado em" value={formatDateTimeBR(voucher.autorizado_em)} />
+            <VoucherInfo label="Emitido em" value={formatDateTimeBR(voucher.created_at)} />
+            <VoucherInfo label="Centro de custo" value={voucher.centro_custo} />
+            <VoucherInfo label="Departamento" value={voucher.departamento} />
+            <VoucherInfo label="Referência do pagamento" value={voucher.referencia_pagamento} />
+          </div>
+        </div>}
 
         {/* Obs */}
         {voucher.observacoes && (
-          <div className="mb-4">
-            <div className="font-bold text-xs italic">Obs (Remarks):</div>
+          <div className="voucher-section mb-4">
+            <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-700">Observações ao cliente</div>
             <div className="border border-slate-400 p-2 min-h-[60px] whitespace-pre-wrap">{voucher.observacoes}</div>
           </div>
         )}
 
         {/* Disclaimer */}
         <div className="mt-6 pt-4 border-t border-slate-300 text-[10px] text-slate-600">
-          <div className="italic mb-2">Sr. Cliente, evite cancelamento de última hora devido cobrança de no-show.</div>
-          <div className="text-right mt-6 pt-2 border-t border-slate-400">
-            Voucher cadastrado por: <strong>{voucher.emitido_por_user_name}</strong>
+          <div className="italic mb-2">
+            {presentation.showCancellationTerms
+              ? 'Apresente este voucher no check-in e confira os prazos e condições descritos acima.'
+              : 'Apresente este voucher no check-in.'}
           </div>
+          {presentation.showAdministrativeData && (
+            <div className="text-right mt-6 pt-2 border-t border-slate-400">
+              Voucher cadastrado por: <strong>{voucher.emitido_por_user_name}</strong>
+            </div>
+          )}
         </div>
       </div>
     </>
   )
 }
+function formatDataBR(value?: string): string {
+  return formatDateValueBR(value, '—')
+}
 
-function formatDataBR(iso?: string): string {
-  if (!iso) return '—'
-  const [y, m, d] = iso.split('-')
-  if (!y || !m || !d) return iso
-  return `${d}/${m}/${y}`
+function formatDateTimeBR(value?: string): string {
+  if (!value) return 'Não informado'
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDataBR(value)
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return formatDataBR(value)
+  const hasTime = /T\d{2}:\d{2}/.test(value)
+  return new Intl.DateTimeFormat('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    ...(hasTime ? { hour: '2-digit', minute: '2-digit' } : {}),
+    timeZone: 'America/Sao_Paulo',
+  }).format(date)
+}
+
+function formatVoucherMoney(value: number, currency: string): string {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: /^[A-Z]{3}$/.test(currency) ? currency : 'BRL',
+  }).format(value)
+}
+
+function displayValue(value: unknown): string {
+  const normalized = String(value ?? '').trim()
+  return normalized || 'Não informado'
+}
+
+function hasVoucherCancellationContent(voucher: VoucherEmitido): boolean {
+  return typeof voucher.reembolsavel === 'boolean'
+    || [
+      voucher.prazo_cancelamento,
+      voucher.politica_cancelamento,
+      voucher.politica_no_show,
+    ].some((value) => String(value || '').trim().length > 0)
+}
+
+function VoucherInfo({ label, value }: { label: string; value: unknown }) {
+  return (
+    <div>
+      <div className="voucher-label">{label}</div>
+      <div className="voucher-value whitespace-pre-wrap">{displayValue(value)}</div>
+    </div>
+  )
 }

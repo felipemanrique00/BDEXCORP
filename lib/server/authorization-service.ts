@@ -29,6 +29,7 @@ export type AuthorizationResource =
   | 'navigation'
   | 'corporate_context'
   | 'companies'
+  | 'catalogs'
   | 'cost_centers'
   | 'employees'
   | 'requesters'
@@ -106,6 +107,14 @@ const RESOURCE_POLICIES: Record<AuthorizationResource, ResourcePolicy> = {
     delete: 'gerenciar_empresas_grupo',
     manage: 'gerenciar_empresas_grupo',
   },
+  catalogs: {
+    read: 'ver_reservas',
+    list: 'ver_reservas',
+    create: 'cadastrar_hoteis',
+    update: 'cadastrar_hoteis',
+    delete: 'cadastrar_hoteis',
+    manage: 'cadastrar_hoteis',
+  },
   cost_centers: {
     read: 'ver_centros_custo',
     list: 'ver_centros_custo',
@@ -165,6 +174,7 @@ const RESOURCE_POLICIES: Record<AuthorizationResource, ResourcePolicy> = {
     list: 'ver_emissoes',
     create: 'operar_emissoes',
     update: 'operar_emissoes',
+    issue: 'operar_emissoes',
     cancel: 'operar_cancelamentos',
   },
   vouchers: {
@@ -583,17 +593,27 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/users/directory')) return 'approvals'
   if (path.startsWith('/api/users/') && path.includes('/access')) return 'access_grants'
   if (path.startsWith('/api/users')) return 'users'
+  if (
+    path.startsWith('/api/commercial-suppliers')
+    || path.startsWith('/api/hotel-catalog')
+    || path.startsWith('/api/geography')
+  ) return 'catalogs'
   if (path.startsWith('/api/cost-centers') || path.startsWith('/api/cost-center-plans')) return 'cost_centers'
   if (path.startsWith('/api/demands') || path.startsWith('/api/operations/communications')) return 'demands'
   if (path.startsWith('/api/employees')) return 'employees'
   if (path.startsWith('/api/solicitantes')) return 'requesters'
   if (path.startsWith('/api/approvals/workflows')) return 'workflows'
   if (path.startsWith('/api/approvals')) return 'approvals'
+  if (path.startsWith('/api/offline-travel/hotel-rate-suggestions')) return 'quotes'
+  if (path.startsWith('/api/offline-travel/quotes')) return 'quotes'
+  if (path.startsWith('/api/offline-travel/reservations') && path.includes('/issue')) return 'emissions'
+  if (path.startsWith('/api/offline-travel/reservations')) return 'reservations'
   if (path.startsWith('/api/travel/quotes')) return 'quotes'
   if (path.startsWith('/api/travel/reservations')) return 'reservations'
   if (path.startsWith('/api/travel/refunds')) return 'finance'
   if (path.startsWith('/api/travel/operations')) return 'integrations'
   if (path.startsWith('/api/emissions')) return 'emissions'
+  if (path.startsWith('/api/voucher-presentation-settings')) return 'settings'
   if (path.startsWith('/api/vouchers')) return 'vouchers'
   if (path.startsWith('/api/finance') || path.startsWith('/api/reconciliation')) return 'finance'
   if (path.startsWith('/api/report-snapshots')) return 'reports'
