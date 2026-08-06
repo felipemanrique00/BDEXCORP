@@ -26,6 +26,31 @@ const SUPPLIER = Object.freeze({
   name: 'Fornecedor Ficticio de Homologacao',
 })
 
+const GEOGRAPHY = Object.freeze({
+  country: Object.freeze({
+    code: 'BR',
+    normalizedName: 'brasil',
+    provider: 'ibge',
+    providerId: '076',
+  }),
+  subdivision: Object.freeze({
+    id: stableUuid(`${FIXTURE_KEY}:geo:subdivision:BR-RJ`),
+    code: 'RJ',
+    name: 'Rio de Janeiro',
+    normalizedName: 'rio de janeiro',
+    provider: 'ibge',
+    providerId: '33',
+  }),
+  city: Object.freeze({
+    id: stableUuid(`${FIXTURE_KEY}:geo:city:3304557`),
+    name: 'Rio de Janeiro',
+    normalizedName: 'rio de janeiro',
+    provider: 'ibge',
+    providerId: '3304557',
+    timezone: 'America/Sao_Paulo',
+  }),
+})
+
 const ROOM_TYPES = Object.freeze([
   {
     code: 'SGL-CM',
@@ -100,10 +125,10 @@ async function main() {
     await client.query("set local statement_timeout = '60s'")
     await requireMigration(client)
     await client.query(`select set_config('app.tenant_id', $1, true)`, [TARGET.tenantId])
-    const context = await requireTargetContext(client)
     await client.query('select pg_advisory_xact_lock(hashtext($1))', [
-      `${FIXTURE_KEY}:${context.tenant.id}`,
+      `${FIXTURE_KEY}:${TARGET.tenantId}`,
     ])
+    const context = await requireTargetContext(client)
 
     const supplier = await upsertSupplier(client, context)
     const hotels = []
@@ -238,27 +263,157 @@ async function requireTargetContext(client) {
   )
   if (actorResult.rowCount !== 1) throw new Error('seed recusado: exige ao menos um tenant_admin platform_admin ativo')
 
-  const geographyResult = await client.query(
-    `select country.id as country_id, upper(country.iso_alpha2::text) as country_code,
-            subdivision.id as subdivision_id, upper(subdivision.code::text) as subdivision_code,
-            city.id as city_id, city.name as city_name
-       from geo_countries country
-       join geo_subdivisions subdivision
-         on subdivision.country_id = country.id
-        and upper(subdivision.code::text) = 'RJ' and subdivision.is_active
-       join geo_cities city
-         on city.country_id = country.id and city.subdivision_id = subdivision.id
-        and city.normalized_name = 'rio de janeiro' and city.is_active
-      where upper(country.iso_alpha2::text) = 'BR' and country.is_active`,
-  )
-  if (geographyResult.rowCount !== 1) throw new Error('seed recusado: geografia Rio de Janeiro/RJ nao encontrada de forma univoca')
+  const geography = await ensureRioGeography(client)
 
   return {
     tenant: tenantResult.rows[0],
     company: companyResult.rows[0],
     group: groupResult.rows[0],
     actorUserId: actorResult.rows[0].id,
-    geography: geographyResult.rows[0],
+    geography,
+  }
+}
+
+async function ensureRioGeography(client) {
+  await client.query(
+    `select pg_advisory_xact_lock(hashtext('bbt:geography:ibge'))`,
+  )
+  const countryResult = await client.query(
+    `select id, upper(iso_alpha2::text) as country_code, normalized_name,
+            provider, provider_id
+       from geo_countries
+      where upper(iso_alpha2::text) = $1 and is_active
+      for update`,
+    [GEOGRAPHY.country.code],
+  )
+  if (countryResult.rowCount !== 1) {
+    throw new Error('seed recusado: pais Brasil ativo nao encontrado de forma univoca')
+  }
+  const country = countryResult.rows[0]
+  if (country.normalized_name !== GEOGRAPHY.country.normalizedName
+    || country.provider !== GEOGRAPHY.country.provider
+    || country.provider_id !== GEOGRAPHY.country.providerId) {
+    throw new Error('seed recusado: referencia existente do Brasil e incompativel')
+  }
+
+  const subdivisionResult = await client.query(
+    `select id, country_id, upper(code::text) as code, name, normalized_name,
+            subdivision_type, provider, provider_id, is_active
+       from geo_subdivisions
+      where id = $1::uuid
+         or (country_id = $2::uuid and upper(code::text) = $3)
+         or (provider = $4 and provider_id = $5)
+      for update`,
+    [
+      GEOGRAPHY.subdivision.id,
+      country.id,
+      GEOGRAPHY.subdivision.code,
+      GEOGRAPHY.subdivision.provider,
+      GEOGRAPHY.subdivision.providerId,
+    ],
+  )
+  if (subdivisionResult.rowCount > 1) {
+    throw new Error('seed recusado: referencias conflitantes para o estado RJ')
+  }
+  let subdivision = subdivisionResult.rows[0]
+  if (subdivision) {
+    if (subdivision.country_id !== country.id
+      || subdivision.code !== GEOGRAPHY.subdivision.code
+      || subdivision.name !== GEOGRAPHY.subdivision.name
+      || subdivision.normalized_name !== GEOGRAPHY.subdivision.normalizedName
+      || subdivision.subdivision_type !== 'state'
+      || subdivision.provider !== GEOGRAPHY.subdivision.provider
+      || subdivision.provider_id !== GEOGRAPHY.subdivision.providerId
+      || !subdivision.is_active) {
+      throw new Error('seed recusado: referencia existente do estado RJ e incompativel')
+    }
+  } else {
+    const inserted = await client.query(
+      `insert into geo_subdivisions (
+         id, country_id, code, name, normalized_name, subdivision_type,
+         provider, provider_id, dataset_version_id, is_active
+       ) values (
+         $1::uuid, $2::uuid, $3, $4, $5, 'state',
+         $6, $7, null, true
+       )
+       returning id, country_id, upper(code::text) as code, name,
+                 normalized_name, subdivision_type, provider, provider_id, is_active`,
+      [
+        GEOGRAPHY.subdivision.id,
+        country.id,
+        GEOGRAPHY.subdivision.code,
+        GEOGRAPHY.subdivision.name,
+        GEOGRAPHY.subdivision.normalizedName,
+        GEOGRAPHY.subdivision.provider,
+        GEOGRAPHY.subdivision.providerId,
+      ],
+    )
+    subdivision = inserted.rows[0]
+  }
+
+  const cityResult = await client.query(
+    `select id, country_id, subdivision_id, name, normalized_name,
+            provider, provider_id, is_active
+       from geo_cities
+      where id = $1::uuid
+         or (country_id = $2::uuid and subdivision_id = $3::uuid
+           and normalized_name = $4)
+         or (provider = $5 and provider_id = $6)
+      for update`,
+    [
+      GEOGRAPHY.city.id,
+      country.id,
+      subdivision.id,
+      GEOGRAPHY.city.normalizedName,
+      GEOGRAPHY.city.provider,
+      GEOGRAPHY.city.providerId,
+    ],
+  )
+  if (cityResult.rowCount > 1) {
+    throw new Error('seed recusado: referencias conflitantes para a cidade Rio de Janeiro')
+  }
+  let city = cityResult.rows[0]
+  if (city) {
+    if (city.country_id !== country.id || city.subdivision_id !== subdivision.id
+      || city.name !== GEOGRAPHY.city.name
+      || city.normalized_name !== GEOGRAPHY.city.normalizedName
+      || city.provider !== GEOGRAPHY.city.provider
+      || city.provider_id !== GEOGRAPHY.city.providerId
+      || !city.is_active) {
+      throw new Error('seed recusado: referencia existente da cidade Rio de Janeiro e incompativel')
+    }
+  } else {
+    const inserted = await client.query(
+      `insert into geo_cities (
+         id, country_id, subdivision_id, name, normalized_name,
+         provider, provider_id, dataset_version_id, timezone, is_active
+       ) values (
+         $1::uuid, $2::uuid, $3::uuid, $4, $5,
+         $6, $7, null, $8, true
+       )
+       returning id, country_id, subdivision_id, name, normalized_name,
+                 provider, provider_id, is_active`,
+      [
+        GEOGRAPHY.city.id,
+        country.id,
+        subdivision.id,
+        GEOGRAPHY.city.name,
+        GEOGRAPHY.city.normalizedName,
+        GEOGRAPHY.city.provider,
+        GEOGRAPHY.city.providerId,
+        GEOGRAPHY.city.timezone,
+      ],
+    )
+    city = inserted.rows[0]
+  }
+
+  return {
+    country_id: country.id,
+    country_code: country.country_code,
+    subdivision_id: subdivision.id,
+    subdivision_code: subdivision.code,
+    city_id: city.id,
+    city_name: city.name,
   }
 }
 

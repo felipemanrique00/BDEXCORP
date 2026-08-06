@@ -78,6 +78,8 @@ describe('staging offline catalog fixture safety contract', () => {
     expect(source).toContain("groupId: 'grp-819fc4c3-2b88-4600-8f1f-c65a331bad02'")
     expect(source).toContain("groupName: 'QA GRUPO HOMOLOGACAO'")
     expect(source).toContain("const REQUIRED_MIGRATION = '0068_commercial_supplier_offline_catalog.sql'")
+    expect(source).toContain("providerId: '33'")
+    expect(source).toContain("providerId: '3304557'")
   })
 
   it('is transactional, locked, idempotent and non-destructive', () => {
@@ -87,6 +89,10 @@ describe('staging offline catalog fixture safety contract', () => {
     expect(source).toContain("await client.query('set constraints all immediate')")
     expect(source).toContain("await client.query('commit')")
     expect(source).toContain("await client.query('rollback')")
+    expect(source).toContain('async function ensureRioGeography(client)')
+    expect(source).toContain("pg_advisory_xact_lock(hashtext('bbt:geography:ibge'))")
+    expect(source).toContain('insert into geo_subdivisions')
+    expect(source).toContain('insert into geo_cities')
     expect(source.match(/is distinct from row\(/g)).toHaveLength(5)
     expect(source).toContain('where hotel_supplier_rate_scopes.deleted_at is not null')
     expect(source).toContain("amenities->>'fixture'")
