@@ -11,6 +11,7 @@ Nunca coloque valores reais neste documento ou no repositorio. Variaveis vazias 
 | `HOSTNAME` | nao | Bind do container, padrao `0.0.0.0`. |
 | `APP_URL` | producao | URL canonica HTTPS; usada para origem, cookies e links. |
 | `NEXT_PUBLIC_APP_URL` | compose | Compatibilidade de configuracao publica; nao armazene segredo. |
+| `NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED` | build | Habilita a interface offline no JavaScript compilado; mantenha `false` fora de ambientes homologados. |
 | `APP_VERSION` | producao | Identificador imutavel da release. |
 | `ALLOW_INSECURE_LOCALHOST` | somente teste/local | Permite HTTP apenas em loopback. |
 | `LOG_LEVEL` | nao | `info` ou `debug`; nao habilitar debug permanente. |

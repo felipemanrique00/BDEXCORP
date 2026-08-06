@@ -39,6 +39,15 @@ const voucherDetailPage = readFileSync(
   resolve(process.cwd(), 'app/dashboard/vouchers/[id]/page.tsx'),
   'utf8',
 )
+const dockerfile = readFileSync(resolve(process.cwd(), 'Dockerfile'), 'utf8')
+const stagingCompose = readFileSync(
+  resolve(process.cwd(), 'docker-compose.staging.yml'),
+  'utf8',
+)
+const stagingEnvironmentExample = readFileSync(
+  resolve(process.cwd(), '.env.staging.example'),
+  'utf8',
+)
 
 describe('offline travel UI wiring', () => {
   it('keeps the existing connector flow as the default and gates the offline form locally', () => {
@@ -47,6 +56,19 @@ describe('offline travel UI wiring', () => {
     expect(reservationsPage).toContain("operationChannel === 'online'")
     expect(reservationsPage).toContain('<OfflineTravelWorkspace')
     expect(reservationsPage).toContain('Atendimento offline / manual')
+  })
+
+  it('injects the staging offline flag during the image build and at runtime', () => {
+    const buildArgument = 'ARG NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED=false'
+    const buildEnvironment = 'ENV NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED=${NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED}'
+    const requiredStagingFlag = 'NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED: ${NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED:?Defina NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED}'
+
+    expect(dockerfile).toContain(buildArgument)
+    expect(dockerfile).toContain(buildEnvironment)
+    expect(dockerfile.indexOf(buildArgument)).toBeLessThan(dockerfile.indexOf('RUN npm run build'))
+    expect(dockerfile.indexOf(buildEnvironment)).toBeLessThan(dockerfile.indexOf('RUN npm run build'))
+    expect(stagingCompose.match(new RegExp(requiredStagingFlag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(2)
+    expect(stagingEnvironmentExample).toContain('NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED=true')
   })
 
   it('supports reservation, issuance and safe correction of an existing offline reservation', () => {
