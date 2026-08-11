@@ -60,7 +60,7 @@ const AUDIT_INSERT_SQL = `insert into audit_logs (
 ) values ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9, $10::jsonb)`
 
 function isCriticalAuditAction(action: string): boolean {
-  return /^(auth\.|platform\.|system\.reset|user\.|finance\.|reservation\.|emission\.|policy\.|approval\.|workflow\.|travel\.lifecycle\.)/.test(action)
+  return /^(auth\.|platform\.|system\.reset|user\.|finance\.|reservation\.|emission\.|policy\.|approval\.|workflow\.|travel\.lifecycle\.|voucher\.email\.attempt$)/.test(action)
 }
 
 function sanitizeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {

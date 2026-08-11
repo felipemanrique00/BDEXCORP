@@ -10,6 +10,7 @@ import { registrarLog } from '@/lib/atendimentos-storage'
 import { maskCPF, onlyDigits } from '@/lib/utils'
 import { encontrarFuncionarioConfiavel } from '@/lib/funcionario-identidade'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import { validateEmployeeAirProfileForm } from '@/lib/travelers/employee-air-profile-form'
 import type { Cargo, Funcionario } from '@/types'
 
 interface Props {
@@ -20,6 +21,7 @@ interface Props {
 }
 
 interface LinhaPlanilha {
+  linha_numero: number
   matricula: string
   nome: string
   cpf: string
@@ -168,6 +170,7 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
   const { funcionarios, addFuncionario, updateFuncionario } = useStore()
   const [file, setFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [linhas, setLinhas] = useState<LinhaPlanilha[]>([])
   const [statusFiltro, setStatusFiltro] = useState<'todos' | 'ativos'>('todos')
   const [colunasDetectadas, setColunasDetectadas] = useState<string[]>([])
@@ -261,16 +264,21 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
           }
 
           const cpfLimpo = onlyDigits(cpfRaw.valor)
-          const cpfValido = !cpfRaw.valor || cpfLimpo.length === 11
-
-          const valido = !!nome.valor
-          const erro = !nome.valor ? 'Nome em branco' : !cpfValido ? 'CPF inválido' : undefined
-
-          return {
-            matricula: matricula.valor,
+          const airProfile = validateEmployeeAirProfileForm({
             nome: nome.valor,
             cpf: cpfLimpo,
             data_nascimento: dataFormatada,
+          })
+          const erros = Object.values(airProfile.errors).filter(Boolean)
+          const valido = airProfile.ok
+          const erro = erros.length ? erros.join(' ') : undefined
+
+          return {
+            linha_numero: idx + 2,
+            matricula: matricula.valor,
+            nome: airProfile.normalized.nome || nome.valor,
+            cpf: airProfile.normalized.cpf || cpfLimpo,
+            data_nascimento: airProfile.normalized.data_nascimento || dataFormatada,
             cargo_original: cargoOriginal.valor,
             cargo_mapeado: mapearCargo(cargoOriginal.valor),
             centro_custo,
@@ -287,7 +295,6 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
             },
           }
         })
-        .filter((l) => l.nome)
 
       setMapeamento(mapa)
       setLinhas(parsed)
@@ -307,15 +314,27 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
   }
 
   async function confirmar() {
-    const paraImportar = statusFiltro === 'ativos'
+    if (importing) return
+    const selecionadas = statusFiltro === 'ativos'
       ? linhas.filter((l) => !l.situacao || /atividade|ativo|normal/i.test(l.situacao))
       : linhas
+    const invalidas = selecionadas.filter((linha) => !linha.valido)
+    const paraImportar = selecionadas.filter((linha) => linha.valido)
 
     if (paraImportar.length === 0) {
-      toast.error('Nenhum funcionário a importar após os filtros.')
+      toast.error(
+        invalidas.length
+          ? `Nenhuma linha válida para importar. Corrija nome completo, CPF e data de nascimento nas ${invalidas.length} linha(s) destacada(s).`
+          : 'Nenhum funcionário a importar após os filtros.',
+      )
       return
     }
 
+    if (invalidas.length) {
+      toast.warning(`${invalidas.length} linha(s) inválida(s) serão ignoradas. Somente ${paraImportar.length} linha(s) válida(s) serão importadas.`)
+    }
+
+    setImporting(true)
     let importados = 0, atualizados = 0, comCpf = 0, comNasc = 0
     const baseAtual = [...funcionarios]
     paraImportar.forEach((l) => {
@@ -381,10 +400,12 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
       await commitPendingRemoteStorage()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a importacao no servidor.')
+      setImporting(false)
       return
     }
 
-    toast.success(`${importados} importados, ${atualizados} atualizados. (${comCpf} com CPF, ${comNasc} com data nasc.)`, { duration: 5000 })
+    toast.success(`${importados} importados, ${atualizados} atualizados. (${comCpf} com CPF, ${comNasc} com data nasc.)${invalidas.length ? ` ${invalidas.length} inválido(s) ignorado(s).` : ''}`, { duration: 5000 })
+    setImporting(false)
     fechar()
   }
 
@@ -396,6 +417,17 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
   const totalAtivos = linhas.filter((l) => !l.situacao || /atividade|ativo|normal/i.test(l.situacao)).length
   const comCpf = linhas.filter((l) => l.cpf).length
   const comNasc = linhas.filter((l) => l.data_nascimento).length
+  const linhasValidas = linhas.filter((linha) => linha.valido)
+  const linhasInvalidas = linhas.filter((linha) => !linha.valido)
+  const validasNoFiltro = statusFiltro === 'ativos'
+    ? linhasValidas.filter((linha) => !linha.situacao || /atividade|ativo|normal/i.test(linha.situacao)).length
+    : linhasValidas.length
+  const invalidasNoFiltro = statusFiltro === 'ativos'
+    ? linhasInvalidas.filter((linha) => !linha.situacao || /atividade|ativo|normal/i.test(linha.situacao)).length
+    : linhasInvalidas.length
+  const invalidasFiltradas = statusFiltro === 'ativos'
+    ? linhasInvalidas.filter((linha) => !linha.situacao || /atividade|ativo|normal/i.test(linha.situacao))
+    : linhasInvalidas
 
   return (
     <Modal open={open} onClose={fechar} title={`Importar funcionários para ${companyName}`} size="xl">
@@ -457,14 +489,38 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
           </div>
 
           {/* KPIs */}
-          <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
+          <div className="grid grid-cols-3 md:grid-cols-8 gap-3">
             <Stat label="Total" value={linhas.length} />
+            <Stat label="Válidos" value={linhasValidas.length} color="green" />
+            <Stat label="Inválidos" value={linhasInvalidas.length} color={linhasInvalidas.length ? 'amber' : 'slate'} />
             <Stat label="Com CPF" value={comCpf} color={comCpf > 0 ? 'green' : 'slate'} />
             <Stat label={<><Calendar className="inline w-3 h-3 mr-0.5" />Com nasc.</>} value={comNasc} color={comNasc > 0 ? 'green' : 'amber'} />
             <Stat label="Diretores" value={contagemCargos.Diretor} color="purple" />
             <Stat label="Gerentes" value={contagemCargos.Gerente} color="blue" />
             <Stat label="Colab." value={contagemCargos.Colaborador} color="green" />
           </div>
+
+          {invalidasNoFiltro > 0 && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                {invalidasNoFiltro} linha(s) não serão importadas. Cada passageiro aéreo precisa de nome e sobrenome, CPF válido e data de nascimento real e não futura.
+                <details className="mt-2">
+                  <summary className="cursor-pointer font-semibold">Ver inconsistências por linha</summary>
+                  <ul className="mt-1 space-y-1">
+                    {invalidasFiltradas.slice(0, 100).map((linha) => (
+                      <li key={linha.linha_numero}>
+                        Linha {linha.linha_numero}: {linha.erro || 'Dados obrigatórios inválidos.'}
+                      </li>
+                    ))}
+                    {invalidasFiltradas.length > 100 && (
+                      <li>... e mais {invalidasFiltradas.length - 100} linha(s) inválida(s).</li>
+                    )}
+                  </ul>
+                </details>
+              </span>
+            </div>
+          )}
 
           <div className="flex items-center gap-4 text-sm flex-wrap">
             <label className="flex items-center gap-2 cursor-pointer">
@@ -489,11 +545,12 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
                       <th className="px-2 py-2 text-left font-semibold">Nasc.</th>
                       <th className="px-2 py-2 text-left font-semibold">Cargo Original</th>
                       <th className="px-2 py-2 text-left font-semibold">→ Mapeado</th>
+                      <th className="px-2 py-2 text-left font-semibold">Validação</th>
                     </tr>
                   </thead>
                   <tbody>
                     {linhas.slice(0, 15).map((l, i) => (
-                      <tr key={i} className="border-t border-bbt-gray-100 dark:border-slate-700">
+                      <tr key={l.linha_numero} className={`border-t border-bbt-gray-100 dark:border-slate-700 ${l.valido ? '' : 'bg-red-50/70 dark:bg-red-950/20'}`}>
                         <td className="px-2 py-1.5 font-medium truncate max-w-[180px]">{l.nome}</td>
                         <td className="px-2 py-1.5 text-slate-500 font-mono text-[10px]">{l.cpf ? maskCPF(l.cpf) : '—'}</td>
                         <td className={`px-2 py-1.5 font-mono text-[10px] ${l.data_nascimento ? 'text-green-600 dark:text-green-400 font-semibold' : 'text-slate-300'}`}>
@@ -510,6 +567,9 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
                             <option>Diretor</option><option>Gerente</option><option>Colaborador</option>
                           </select>
                         </td>
+                        <td className={`px-2 py-1.5 text-[10px] ${l.valido ? 'text-green-700 dark:text-green-400' : 'max-w-[260px] text-red-700 dark:text-red-400'}`}>
+                          {l.valido ? 'Pronto para aéreo' : `Linha ${l.linha_numero}: ${l.erro || 'Dados obrigatórios inválidos.'}`}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -524,12 +584,12 @@ export function ImportarFuncionariosModal({ open, onClose, companyId, companyNam
           </div>
 
           <div className="flex justify-between items-center pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
-            <button onClick={resetar} className="bbt-button-ghost text-sm">Trocar arquivo</button>
+            <button onClick={resetar} disabled={importing} className="bbt-button-ghost text-sm disabled:cursor-not-allowed disabled:opacity-50">Trocar arquivo</button>
             <div className="flex gap-2">
-              <button onClick={fechar} className="bbt-button-ghost">Cancelar</button>
-              <button onClick={confirmar} className="bbt-button-primary flex items-center gap-2">
-                <CheckCircle className="w-4 h-4" />
-                Importar {statusFiltro === 'ativos' ? totalAtivos : linhas.length}
+              <button onClick={fechar} disabled={importing} className="bbt-button-ghost disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
+              <button onClick={confirmar} disabled={importing || validasNoFiltro === 0} className="bbt-button-primary flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50">
+                {importing ? <Upload className="w-4 h-4 animate-pulse" /> : <CheckCircle className="w-4 h-4" />}
+                {importing ? 'Importando...' : `Importar ${validasNoFiltro} válida(s)`}
               </button>
             </div>
           </div>

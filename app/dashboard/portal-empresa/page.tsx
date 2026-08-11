@@ -63,9 +63,16 @@ import { AI_SHORT_NAME } from '@/lib/branding'
 import { AIAssistantFab, AI_CONTEXT_EVENTS } from '@/components/ai/ai-assistant-fab'
 import { HotelDemandConfigurator } from '@/components/travel/hotel-demand-configurator'
 import { AirDemandConfigurator } from '@/components/travel/air-demand-configurator'
+import {
+  airPassengerProfileIssueLabel,
+  airPassengersFromDetails,
+  withAirPassengers,
+  type AirPassengerValidationState,
+} from '@/lib/air-demand/passenger-selection'
 import { OfflineAirQuoteChoiceWorkspace } from '@/components/travel/offline-air-quote-choice-workspace'
 import { OfflineQuoteChoicePanel } from '@/components/travel/offline-quote-choice-panel'
 import { DateInput } from '@/components/ui/date-input'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 import {
   HotelDemandGuestsAdmin,
   type HotelDemandCostCenterOption,
@@ -89,6 +96,10 @@ import { filtrarPeriodo, montarMetricasRelatorio, montarRelatorioOperacional } f
 import { createEntityId } from '@/lib/ids'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import { isRequesterUser } from '@/lib/user-access-kind'
+import {
+  MANUAL_DEMAND_BOOKING_MODE,
+  shouldSubmitDemandOnCreate,
+} from '@/lib/travel/demand-booking-mode'
 import { useCorporateCompanyScope, useCorporateContext } from '@/components/corporate-context-provider'
 import {
   collectVisiblePortalDemandIds,
@@ -142,8 +153,7 @@ function montarResumoCarteiraEscopo(empresas: Array<Pick<Empresa, 'id'>>) {
 }
 
 export default function PortalEmpresaPage() {
-  const user = typeof window !== 'undefined' ? getCurrentUser() : null
-  const { context: corporateContext, selectContext } = useCorporateContext()
+  const { context: corporateContext, selectContext, user } = useCorporateContext()
   const { includesCompany } = useCorporateCompanyScope()
   const isGlobalMaster = canEditGlobal(user)
   const isInternalUser = user?.role === 'master'
@@ -1384,6 +1394,7 @@ function PedidosTab({
   onSaved,
   podeCriar,
 }: any) {
+  const bookingMode = MANUAL_DEMAND_BOOKING_MODE
   const [tipo, setTipo] = useState<TipoServico>('Hotel')
   const [funcId, setFuncId] = useState('')
   const [funcCodigo, setFuncCodigo] = useState('')
@@ -1396,6 +1407,12 @@ function PedidosTab({
     trip_type: 'round_trip',
     classe: 'Econômica',
     baggage_pieces: 0,
+  })
+  const [airPassengerValidation, setAirPassengerValidation] = useState<AirPassengerValidationState>({
+    passengerCount: 0,
+    blockingIssues: [],
+    pendingVerificationIds: [],
+    lookupErrors: [],
   })
   const [detHotel, setDetHotel] = useState<DetalhesHotel>({})
   const [observacoes, setObservacoes] = useState('')
@@ -1447,6 +1464,22 @@ function PedidosTab({
         || '',
     ))
   }, [authenticatedUser, isInternalUser, solicitanteAtual?.id, solicitanteAtual?.nome])
+
+  useEffect(() => {
+    setFuncId('')
+    setFuncCodigo('')
+    setPassageiro('')
+    setDetAereo((current) => withAirPassengers(
+      current as unknown as Record<string, unknown>,
+      [],
+    ) as DetalhesAereo)
+    setAirPassengerValidation({
+      passengerCount: 0,
+      blockingIssues: [],
+      pendingVerificationIds: [],
+      lookupErrors: [],
+    })
+  }, [empresaId])
 
   useEffect(() => {
     setCostCenterId(empresa?.centro_custo_padrao_id || null)
@@ -1513,11 +1546,33 @@ function PedidosTab({
   async function enviarPedido(e: React.FormEvent) {
     e.preventDefault()
     if (!podeCriar) return
+    const airPassengers = airPassengersFromDetails(detAereo, funcId ? {
+      employee_id: funcId,
+      name: passageiro.trim() || undefined,
+    } : null)
+    const airDetailsWithPassengers = withAirPassengers(
+      detAereo as unknown as Record<string, unknown>,
+      airPassengers,
+    ) as DetalhesAereo
     const parsedHotel = tipo === 'Hotel' ? hotelDemandDetailsSchema.safeParse(detHotel) : null
     if (parsedHotel && !parsedHotel.success) {
       return toast.error(parsedHotel.error.issues[0]?.message || 'Revise destino, datas, quartos e hospedes.')
     }
-    const parsedAir = tipo === 'Aéreo' ? detalhesAereoSchema.safeParse(detAereo) : null
+    if (tipo === 'Aéreo' && !airPassengers.length) {
+      return toast.error('Adicione ao menos um passageiro ativo da empresa.')
+    }
+    if (tipo === 'Aéreo' && airPassengerValidation.pendingVerificationIds.length) {
+      return toast.error('Aguarde a conferência cadastral de todos os passageiros antes de enviar.')
+    }
+    if (tipo === 'Aéreo' && airPassengerValidation.blockingIssues.length) {
+      const firstIssue = airPassengerValidation.blockingIssues[0]
+      const fields = firstIssue.issues.map(airPassengerProfileIssueLabel).join(', ')
+      return toast.error(`Complete o cadastro de ${firstIssue.name}: ${fields}.`)
+    }
+    if (tipo === 'Aéreo' && airPassengerValidation.lookupErrors.length) {
+      return toast.error(airPassengerValidation.lookupErrors[0].message)
+    }
+    const parsedAir = tipo === 'Aéreo' ? detalhesAereoSchema.safeParse(airDetailsWithPassengers) : null
     if (parsedAir && (!parsedAir.success || !parsedAir.data.trechos?.length)) {
       return toast.error(parsedAir.success
         ? 'Informe ao menos um trecho aéreo completo.'
@@ -1526,8 +1581,17 @@ function PedidosTab({
     const hotelPrimaryGuest = parsedHotel?.success
       ? parsedHotel.data.rooms.flatMap((room) => room.guests).find((guest) => guest.role === 'responsible')
       : null
-    const effectivePassengerName = tipo === 'Hotel' ? hotelPrimaryGuest?.name || '' : passageiro.trim()
-    const effectiveEmployeeId = tipo === 'Hotel' ? hotelPrimaryGuest?.employee_id || null : funcId || null
+    const airPrimaryPassenger = airPassengers[0]
+    const effectivePassengerName = tipo === 'Hotel'
+      ? hotelPrimaryGuest?.name || ''
+      : tipo === 'Aéreo'
+        ? airPrimaryPassenger?.name || passageiro.trim()
+        : passageiro.trim()
+    const effectiveEmployeeId = tipo === 'Hotel'
+      ? hotelPrimaryGuest?.employee_id || null
+      : tipo === 'Aéreo'
+        ? airPrimaryPassenger?.employee_id || null
+        : funcId || null
     if (!effectivePassengerName) return toast.error(tipo === 'Hotel' ? 'Selecione o hospede responsavel.' : 'Informe o passageiro.')
     if (tipo === 'Hotel') {
       const parsedAdministrative = hotelDemandAdministrativeSchema.safeParse({
@@ -1557,6 +1621,7 @@ function PedidosTab({
         funcionario_id: effectiveEmployeeId,
         passageiro_nome: effectivePassengerName,
         tipo_servico: tipo,
+        booking_mode: bookingMode,
         valor_cotacao: 0,
         agente_user_id: user?.id || '',
         ...(tipo === 'Hotel'
@@ -1579,7 +1644,12 @@ function PedidosTab({
         observacoes: observacoes.trim(),
         data_atendimento: todayISODate(),
         ...(tipo === 'Aéreo'
-          ? { detalhes_aereo: parsedAir?.success ? parsedAir.data : detAereo }
+          ? {
+              detalhes_aereo: withAirPassengers(
+                (parsedAir?.success ? parsedAir.data : airDetailsWithPassengers) as unknown as Record<string, unknown>,
+                airPassengers,
+              ) as DetalhesAereo,
+            }
           : tipo === 'Hotel'
           ? { detalhes_hotel: parsedHotel?.success ? parsedHotel.data : detHotel }
           : tipo === 'Carro'
@@ -1587,14 +1657,17 @@ function PedidosTab({
           : { detalhes_pacote: { destino: destino.trim(), data_ida: dataInicio, data_volta: dataFim, descricao: observacoes } }),
         created_at: new Date().toISOString(),
       }
-      const persistida = await persistNewDemandWithCompatibility(novo, tipo !== 'Hotel')
+      const persistida = await persistNewDemandWithCompatibility(
+        novo,
+        shouldSubmitDemandOnCreate(bookingMode),
+      )
       const atendimento = persistida.demand
-      if (tipo === 'Hotel') {
-        toast.success(`Pedido ${atendimento.serial_os || atendimento.id} enviado para cotacao do consultor.`)
-      } else if (persistida.governance?.policy.blocked) {
+      if (persistida.governance?.policy.blocked) {
         toast.warning(`Pedido ${atendimento.serial_os || atendimento.id} bloqueado pela política corporativa.`)
       } else if (persistida.governance?.policy.requiresAction) {
         toast.warning(`Pedido ${atendimento.serial_os || atendimento.id} aguarda requisitos obrigatórios da política.`)
+      } else if (bookingMode === 'offline') {
+        toast.success(`Pedido ${atendimento.serial_os || atendimento.id} enviado para cotação por serviço do consultor.`)
       } else if (persistida.governance?.approval.required) {
         toast.info(persistida.governance.approval.configured
           ? `Pedido ${atendimento.serial_os || atendimento.id} enviado para aprovação.`
@@ -1603,6 +1676,7 @@ function PedidosTab({
         toast.success('Pedido enviado! A BBT já recebeu.')
       }
       setPassageiro(''); setOrigem(''); setDestino(''); setDataInicio(''); setDataFim(''); setDetHotel({}); setDetAereo({ trip_type: 'round_trip', classe: 'Econômica', baggage_pieces: 0 }); setObservacoes(''); setFuncId(''); setFuncCodigo('')
+      setAirPassengerValidation({ passengerCount: 0, blockingIssues: [], pendingVerificationIds: [], lookupErrors: [] })
       setCostCenterId(empresa?.centro_custo_padrao_id || null)
       setCostCenterCode(String(empresa?.centro_custo_padrao || ''))
       setPaymentMethod('IV')
@@ -1638,6 +1712,13 @@ function PedidosTab({
           <h3 className="font-bold text-bbt-primary dark:text-white flex items-center gap-2">
             <Plus className="w-4 h-4 text-bbt-accent" /> Novo pedido
           </h3>
+          <div
+            role="status"
+            data-booking-mode={bookingMode}
+            className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-900 dark:border-indigo-900/60 dark:bg-indigo-950/30 dark:text-indigo-100"
+          >
+            <strong>Modalidade offline.</strong> O pedido seguirá para cotação do serviço; a aprovação ocorrerá somente após a escolha da opção.
+          </div>
           <Field label="Tipo de serviço">
             <div className="grid grid-cols-4 gap-1.5">
               {(['Aéreo', 'Hotel', 'Carro', 'Pacote'] as TipoServico[]).map((t) => (
@@ -1649,7 +1730,7 @@ function PedidosTab({
               ))}
             </div>
           </Field>
-          {tipo !== 'Hotel' && (
+          {tipo !== 'Hotel' && tipo !== 'Aéreo' && (
             <>
               <Field label="Funcionário (opcional)">
                 <input
@@ -1713,7 +1794,39 @@ function PedidosTab({
             </div>
           )}
           {tipo === 'Aéreo' && (
-            <AirDemandConfigurator value={detAereo} onChange={setDetAereo} disabled={enviando} />
+            <AirDemandConfigurator
+              value={detAereo}
+              onChange={setDetAereo}
+              companyId={empresaId}
+              legacyPrimaryPassenger={funcId ? {
+                employee_id: funcId,
+                name: passageiro.trim() || undefined,
+              } : null}
+              onPrimaryPassengerChange={(passenger, profile) => {
+                setFuncId(passenger?.employee_id || '')
+                setPassageiro(passenger?.name || '')
+                const employee = funcionariosEmpresa.find((item: any) => item.id === passenger?.employee_id)
+                setFuncCodigo(employee?.codigo_identificacao || '')
+                if (passenger) {
+                  setCostCenterId(
+                    (profile
+                      ? profile.costCenterId
+                      : employee?.cost_center_id)
+                    || empresa?.centro_custo_padrao_id
+                    || null,
+                  )
+                  setCostCenterCode(
+                    (profile
+                      ? profile.costCenter
+                      : employee?.centro_custo)
+                    || empresa?.centro_custo_padrao
+                    || '',
+                  )
+                }
+              }}
+              onPassengerValidationChange={setAirPassengerValidation}
+              disabled={enviando}
+            />
           )}
           {tipo !== 'Aéreo' && tipo !== 'Hotel' && (
             <Field label="Cidade / Destino">
@@ -1743,7 +1856,7 @@ function PedidosTab({
           )}
           <button type="submit" disabled={enviando} className="bbt-button-primary w-full">
             <Send className="w-4 h-4" />
-            {enviando ? 'Enviando...' : tipo === 'Hotel' ? 'Enviar para cotação' : 'Enviar pedido'}
+            {enviando ? 'Enviando...' : 'Enviar para cotação'}
           </button>
         </form>
       )}
@@ -2495,13 +2608,13 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
           </div>
           <div className="grid gap-3 md:grid-cols-3">
             <Field label="Limite de crédito">
-              <input type="number" min={0} disabled={!podeEditar} value={limiteCredito} onChange={(e) => setLimiteCredito(Number(e.target.value || 0))} className="bbt-input" />
+              <NumericDecimalInput value={limiteCredito} emptyValue={0} minValue={0} disabled={!podeEditar} onNumberChange={(value) => setLimiteCredito(value ?? 0)} />
             </Field>
             <Field label="Limite Pix diário">
-              <input type="number" min={0} disabled={!podeEditar} value={limitePix} onChange={(e) => setLimitePix(Number(e.target.value || 0))} className="bbt-input" />
+              <NumericDecimalInput value={limitePix} emptyValue={0} minValue={0} disabled={!podeEditar} onNumberChange={(value) => setLimitePix(value ?? 0)} />
             </Field>
             <Field label="Limite cartão mensal">
-              <input type="number" min={0} disabled={!podeEditar} value={limiteCartao} onChange={(e) => setLimiteCartao(Number(e.target.value || 0))} className="bbt-input" />
+              <NumericDecimalInput value={limiteCartao} emptyValue={0} minValue={0} disabled={!podeEditar} onNumberChange={(value) => setLimiteCartao(value ?? 0)} />
             </Field>
           </div>
           <button type="button" disabled={!podeEditar} onClick={ativarCarteira} className="bbt-button-primary mt-4 disabled:cursor-not-allowed disabled:opacity-50">
@@ -2521,13 +2634,13 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Aporte manual">
               <div className="flex gap-2">
-                <input type="number" min={0} disabled={!podeEditar} value={valorAporte} onChange={(e) => setValorAporte(Number(e.target.value || 0))} className="bbt-input" />
+                <NumericDecimalInput value={valorAporte} emptyValue={0} minValue={0} disabled={!podeEditar} onNumberChange={(value) => setValorAporte(value ?? 0)} containerClassName="flex-1" />
                 <button type="button" disabled={!podeEditar} onClick={registrarAporte} className="bbt-button-outline whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50">Creditar</button>
               </div>
             </Field>
             <Field label="Débito externo">
               <div className="flex gap-2">
-                <input type="number" min={0} disabled={!podeEditar} value={pixValor} onChange={(e) => setPixValor(Number(e.target.value || 0))} className="bbt-input" />
+                <NumericDecimalInput value={pixValor} emptyValue={0} minValue={0} disabled={!podeEditar} onNumberChange={(value) => setPixValor(value ?? 0)} containerClassName="flex-1" />
                 <button type="button" disabled={!podeEditar} onClick={registrarPix} className="bbt-button-outline whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50">Registrar</button>
               </div>
             </Field>
@@ -2586,7 +2699,7 @@ function CarteiraTab({ empresaId, empresaNome, resumo, funcionariosEmpresa, onCh
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Limite">
-                <input type="number" min={0} disabled={!podeEditar} value={cardForm.limite} onChange={(e) => setCardForm({ ...cardForm, limite: Number(e.target.value || 0) })} className="bbt-input" />
+                <NumericDecimalInput value={cardForm.limite} emptyValue={0} minValue={0} disabled={!podeEditar} onNumberChange={(value) => setCardForm({ ...cardForm, limite: value ?? 0 })} />
               </Field>
               <Field label="Uso permitido">
                 <input value={cardForm.merchant_lock} disabled={!podeEditar} onChange={(e) => setCardForm({ ...cardForm, merchant_lock: e.target.value })} className="bbt-input" placeholder="Hotel, aéreo..." />

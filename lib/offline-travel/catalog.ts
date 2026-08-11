@@ -1,4 +1,4 @@
-import type { VoucherTipo } from '@/types'
+import type { TipoServico, VoucherTipo } from '@/types'
 
 import type { OfflineTravelService } from './schema'
 
@@ -149,6 +149,22 @@ export function offlineServiceFromDemand(value: string): OfflineTravelService | 
     ['outros', ['outro', 'outros']],
   ]
   return aliases.find(([, values]) => values.includes(normalized))?.[0] || null
+}
+
+/**
+ * Mantém a fronteira com as telas legadas tipada e localizada. O domínio
+ * relacional usa códigos como `air` e `hotel`; `Atendimento` ainda espera os
+ * rótulos de `TipoServico`.
+ */
+export function offlineLegacyServiceType(value: string): TipoServico {
+  const service = offlineServiceFromDemand(value)
+  if (service === 'aereo') return 'Aéreo'
+  if (service === 'hotelaria') return 'Hotel'
+  if (service === 'locacao') return 'Carro'
+  if (service === 'pacotes' || service === 'lazer' || service === 'transfer' || service === 'seguro') {
+    return 'Pacote'
+  }
+  return 'Outro'
 }
 
 function normalizeService(value: string): string {

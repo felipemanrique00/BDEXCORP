@@ -15,8 +15,14 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 
+import {
+  AirportCombobox,
+  type AirportOption,
+} from '@/components/travel/airport-combobox'
 import { DateTimeInput } from '@/components/ui/date-input'
+import { DecimalInput } from '@/components/ui/decimal-input'
 
+import { AirlineCombobox } from './airline-combobox'
 import {
   MAX_AIR_QUOTE_OPTIONS,
   MAX_AIR_SEGMENTS,
@@ -25,6 +31,7 @@ import {
   createEmptyAirQuoteOption,
   createEmptyAirSegment,
   formatAirMoney,
+  isValidDecimalInput,
   isValidMoneyInput,
 } from './pricing'
 import type {
@@ -415,12 +422,13 @@ function AirSegmentEditor({ segment, index, disabled, canRemove, onPatch, onRemo
         </button>
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Field label="Cia. aérea *">
-          <input className="bbt-input" value={segment.airlineName} onChange={(event) => onPatch({ airlineName: event.target.value })} disabled={disabled} placeholder="LATAM" />
-        </Field>
-        <Field label="Código cia.">
-          <input className="bbt-input uppercase" value={segment.airlineCode} onChange={(event) => onPatch({ airlineCode: event.target.value.toUpperCase() })} disabled={disabled} placeholder="LA" maxLength={3} />
-        </Field>
+        <AirlineCombobox
+          className="md:col-span-2"
+          airlineCode={segment.airlineCode}
+          airlineName={segment.airlineName}
+          onChange={(airlineCode, airlineName) => onPatch({ airlineCode, airlineName })}
+          disabled={disabled}
+        />
         <Field label="Voo *">
           <input className="bbt-input uppercase" value={segment.flightNumber} onChange={(event) => onPatch({ flightNumber: event.target.value.toUpperCase() })} disabled={disabled} placeholder="3375" />
         </Field>
@@ -446,11 +454,23 @@ function AirSegmentEditor({ segment, index, disabled, canRemove, onPatch, onRemo
         </Field>
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <LocationField label="Origem *" code={segment.originCode} name={segment.originName} disabled={disabled} onCode={(originCode) => onPatch({ originCode })} onName={(originName) => onPatch({ originName })} />
+        <AirportLocationField
+          label="Origem *"
+          code={segment.originCode}
+          name={segment.originName}
+          disabled={disabled}
+          onChange={(originCode, originName) => onPatch({ originCode, originName })}
+        />
         <Field label="Saída *">
           <DateTimeInput value={segment.departureAt} onInput={(event) => onPatch({ departureAt: event.currentTarget.value })} disabled={disabled} />
         </Field>
-        <LocationField label="Destino *" code={segment.destinationCode} name={segment.destinationName} disabled={disabled} onCode={(destinationCode) => onPatch({ destinationCode })} onName={(destinationName) => onPatch({ destinationName })} />
+        <AirportLocationField
+          label="Destino *"
+          code={segment.destinationCode}
+          name={segment.destinationName}
+          disabled={disabled}
+          onChange={(destinationCode, destinationName) => onPatch({ destinationCode, destinationName })}
+        />
         <Field label="Chegada *">
           <DateTimeInput value={segment.arrivalAt} onInput={(event) => onPatch({ arrivalAt: event.currentTarget.value })} disabled={disabled} />
         </Field>
@@ -459,22 +479,59 @@ function AirSegmentEditor({ segment, index, disabled, canRemove, onPatch, onRemo
   )
 }
 
-function LocationField({ label, code, name, disabled, onCode, onName }: {
+function AirportLocationField({ label, code, name, disabled, onChange }: {
   label: string
   code: string
   name: string
   disabled: boolean
-  onCode: (value: string) => void
-  onName: (value: string) => void
+  onChange: (code: string, name: string) => void
 }) {
   return (
-    <Field label={label}>
-      <div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-2">
-        <input className="bbt-input uppercase" value={code} onChange={(event) => onCode(event.target.value.toUpperCase())} disabled={disabled} placeholder="IATA" maxLength={4} aria-label={`${label} - código`} />
-        <input className="bbt-input" value={name} onChange={(event) => onName(event.target.value)} disabled={disabled} placeholder="Cidade / aeroporto" aria-label={`${label} - cidade ou aeroporto`} />
-      </div>
-    </Field>
+    <AirportCombobox
+      label={label}
+      value={airQuoteAirportLegacyValue(code, name)}
+      onChange={(value, airport) => {
+        const location = resolveAirQuoteAirportValue(value, airport)
+        onChange(location.code, location.name)
+      }}
+      disabled={disabled}
+      required
+      placeholder="Busque por IATA, aeroporto ou cidade"
+      limit={12}
+    />
   )
+}
+
+function airQuoteAirportLegacyValue(code: string, name: string): string {
+  const normalizedCode = code.trim().toUpperCase()
+  const normalizedName = name.trim()
+  if (normalizedCode && normalizedName) return `${normalizedCode} - ${normalizedName}`
+  return normalizedCode || normalizedName
+}
+
+function resolveAirQuoteAirportValue(
+  value: string,
+  airport: AirportOption | null,
+): { code: string; name: string } {
+  if (airport) {
+    return {
+      code: airport.iataCode.trim().toUpperCase(),
+      name: airport.name.trim() || airport.municipality.trim(),
+    }
+  }
+
+  const rawValue = value.trim()
+  const legacyMatch = rawValue.match(/^([A-Za-z0-9]{3,4})\s+[-–—]\s+(.+)$/)
+  if (legacyMatch) {
+    return {
+      code: legacyMatch[1].toUpperCase(),
+      name: legacyMatch[2].trim(),
+    }
+  }
+  if (/^[A-Z0-9]{3,4}$/.test(rawValue)) {
+    return { code: rawValue, name: '' }
+  }
+  return { code: '', name: value }
 }
 
 function PriceEditor({ pricing, disabled, onPatch }: {
@@ -505,7 +562,7 @@ function PriceEditor({ pricing, disabled, onPatch }: {
         <MoneyField label="Taxas" value={pricing.taxes} disabled={disabled} onChange={(taxes) => onPatch({ taxes })} />
         <MoneyField label="RAV" value={pricing.rav} disabled={disabled} onChange={(rav) => onPatch({ rav })} />
         <MoneyField label="RAC" value={pricing.rac} disabled={disabled} onChange={(rac) => onPatch({ rac })} />
-        <MoneyField label="Câmbio" value={pricing.exchangeRate} disabled={disabled} onChange={(exchangeRate) => onPatch({ exchangeRate })} />
+        <MoneyField label="Câmbio" value={pricing.exchangeRate} scale={4} disabled={disabled} onChange={(exchangeRate) => onPatch({ exchangeRate })} />
         <MoneyField label="Tarifa referência" value={pricing.referenceFare} disabled={disabled} onChange={(referenceFare) => onPatch({ referenceFare })} />
         <Field label="Milhas">
           <input className="bbt-input" inputMode="numeric" value={pricing.mileage} onChange={(event) => onPatch({ mileage: event.target.value.replace(/[^0-9]/g, '') })} disabled={disabled} placeholder="0" />
@@ -516,10 +573,10 @@ function PriceEditor({ pricing, disabled, onPatch }: {
   )
 }
 
-function MoneyField({ label, value, disabled, onChange }: { label: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
+function MoneyField({ label, value, scale = 2, disabled, onChange }: { label: string; value: string; scale?: number; disabled: boolean; onChange: (value: string) => void }) {
   return (
     <Field label={label}>
-      <input className="bbt-input tabular-nums" inputMode="decimal" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} placeholder="0,00" />
+      <DecimalInput value={value} onValueChange={onChange} scale={scale} disabled={disabled} placeholder={scale === 2 ? '0,00' : '0,0000'} />
     </Field>
   )
 }
@@ -561,10 +618,12 @@ function validateOptions(options: OfflineAirQuoteOptionDraft[]): string[] {
       ['taxas', option.pricing.taxes],
       ['RAV', option.pricing.rav],
       ['RAC', option.pricing.rac],
-      ['câmbio', option.pricing.exchangeRate],
       ['tarifa de referência', option.pricing.referenceFare],
     ]) {
       if (!isValidMoneyInput(value)) errors.push(`${prefix}: o valor de ${label} é inválido.`)
+    }
+    if (!isValidDecimalInput(option.pricing.exchangeRate, 4, true)) {
+      errors.push(`${prefix}: o valor de câmbio é inválido.`)
     }
 
     if (!option.segments.length) errors.push(`${prefix}: informe pelo menos um trecho.`)

@@ -23,6 +23,7 @@ const base: DemandUpdateSnapshot = {
   project: 'EXPANSAO',
   paymentMethod: 'invoice',
   passengerName: 'Aldo Fernandes Junior',
+  passengerIds: ['employee-a'],
 }
 
 const demandServiceSource = readFileSync(
@@ -64,6 +65,24 @@ describe('demand update governance', () => {
     expect(assessment.material).toBe(false)
     expect(assessment.changedFields).toEqual([])
     expect(assessment.previousHash).toBe(assessment.currentHash)
+  })
+
+  it('considera a troca ou reordenacao de passageiros aereos uma mudanca material', () => {
+    const assessment = assessDemandUpdate(
+      { ...base, serviceType: 'air', passengerIds: ['employee-a', 'employee-b'] },
+      { ...base, serviceType: 'air', passengerIds: ['employee-b', 'employee-a'] },
+    )
+
+    expect(assessment.material).toBe(true)
+    expect(assessment.changedFields).toContain('passengerIds')
+    expect(demandServiceSource).toContain('AIR_DEMAND_PASSENGERS_EDIT_LOCKED')
+    expect(demandServiceSource).toContain('AIR_DEMAND_PASSENGERS_REQUIRED_FOR_PRIMARY_CHANGE')
+  })
+
+  it('evaluates every structured air passenger against corporate policies', () => {
+    expect(demandServiceSource).toContain('loadDemandPolicyTravelers')
+    expect(demandServiceSource).toContain('for (const traveler of policyTravelers)')
+    expect(demandServiceSource).toContain('travelerSequence: traveler.sequence')
   })
 
   it('bloqueia alteracao material depois de reserva ou emissao', () => {

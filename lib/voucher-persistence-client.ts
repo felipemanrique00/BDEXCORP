@@ -181,6 +181,47 @@ export async function getVoucherFromServer(id: string): Promise<VoucherEmitido> 
   return result.voucher as VoucherEmitido
 }
 
+export async function sendVoucherEmailFromServer(
+  id: string,
+  recipients: string[],
+  idempotencyKey: string,
+  customRecipients: string[] = [],
+  acknowledgeExternalDisclosure = false,
+): Promise<{
+  recipients: string[]
+  acceptedRecipients: string[]
+  rejectedRecipients: string[]
+  sentAt: string
+  duplicate: boolean
+}> {
+  const response = await fetch(`/api/vouchers/${encodeURIComponent(id)}/email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      recipients,
+      customRecipients,
+      acknowledgeExternalDisclosure,
+      idempotencyKey,
+    }),
+  })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok || !result?.ok) {
+    throw new Error(result?.error || 'Não foi possível enviar o voucher por e-mail.')
+  }
+  const acceptedRecipients = Array.isArray(result.acceptedRecipients)
+    ? result.acceptedRecipients
+    : Array.isArray(result.recipients)
+      ? result.recipients
+      : [...recipients, ...customRecipients]
+  return {
+    recipients: Array.isArray(result.recipients) ? result.recipients : acceptedRecipients,
+    acceptedRecipients,
+    rejectedRecipients: Array.isArray(result.rejectedRecipients) ? result.rejectedRecipients : [],
+    sentAt: String(result.sentAt || ''),
+    duplicate: result.duplicate === true,
+  }
+}
+
 function isVoucherEmitido(value: unknown): value is VoucherEmitido {
   if (!value || typeof value !== 'object') return false
   const candidate = value as Partial<VoucherEmitido>

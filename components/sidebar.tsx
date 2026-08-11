@@ -13,7 +13,7 @@ import {
   UserCircle2,
 } from 'lucide-react'
 
-import { BBTLogo } from '@/components/branding/bbt-logo'
+import { EffectiveBrandLogo } from '@/components/branding/effective-brand-logo'
 import { CorporateContextSelector } from '@/components/corporate-context-selector'
 import { logout } from '@/lib/auth'
 import { getUltimaVista, NOVA_DEMANDA_EVENT } from '@/lib/notificacoes'
@@ -112,11 +112,11 @@ export function Sidebar({ user, mobileOpen = false, onMobileClose }: SidebarProp
         <div className="flex items-center justify-between gap-3">
           {!collapsed ? (
             <Link href="/dashboard" className="flex min-w-0 items-center">
-              <BBTLogo variant="full" tone="white" size={38} />
+              <EffectiveBrandLogo variant="full" tone="white" size={38} brandedSurface />
             </Link>
           ) : (
             <Link href="/dashboard" className="flex w-full justify-center">
-              <BBTLogo variant="mark" tone="white" size={34} />
+              <EffectiveBrandLogo variant="mark" tone="white" size={34} brandedSurface />
             </Link>
           )}
           <button

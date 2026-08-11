@@ -101,6 +101,42 @@ export interface DemandMutationClientResult {
   replayed: boolean
 }
 
+export interface AgencyDemandRequesterOption {
+  id: string
+  employeeId: string | null
+  name: string
+  email: string
+  department: string | null
+  costCenter: string | null
+}
+
+export interface AgencyDemandTravelerOption {
+  id: string
+  identificationCode: string
+  name: string
+  email: string | null
+  department: string | null
+  jobTitle: string | null
+  costCenterId: string | null
+  costCenter: string | null
+}
+
+export interface AgencyDemandOptionsClientResult {
+  companyId: string
+  requesters: AgencyDemandRequesterOption[]
+  requesterTotal: number
+  travelers: AgencyDemandTravelerOption[]
+  travelerTotal: number
+  limit: number
+}
+
+export interface AgencyDemandOptionsClientFilters {
+  requesterQ?: string
+  travelerQ?: string
+  participant?: 'all' | 'requesters' | 'travelers'
+  limit?: number
+}
+
 export interface DemandDetailsUpdateClientResult extends DemandMutationClientResult {
   policy: {
     blocked: boolean
@@ -458,6 +494,86 @@ export async function createDemandOnServer(
   }
 }
 
+export async function listAgencyDemandOptionsFromServer(
+  companyId: string,
+  filters: AgencyDemandOptionsClientFilters = {},
+): Promise<AgencyDemandOptionsClientResult> {
+  const limit = Math.min(100, Math.max(1, Math.trunc(filters.limit ?? 50)))
+  const search = new URLSearchParams({
+    companyId,
+    participant: filters.participant || 'all',
+    limit: String(limit),
+  })
+  if (filters.requesterQ?.trim()) search.set('requesterQ', filters.requesterQ.trim())
+  if (filters.travelerQ?.trim()) search.set('travelerQ', filters.travelerQ.trim())
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 15_000)
+  try {
+    const response = await fetch(`/api/demands/agency-options?${search}`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+    const payload = await readPayload(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new DemandClientError(
+        text(payload.error) || 'Nao foi possivel carregar solicitantes e viajantes da empresa.',
+        text(payload.code),
+        response.status,
+      )
+    }
+    const requesters = Array.isArray(payload.requesters)
+      ? payload.requesters.filter(isAgencyDemandRequesterOption)
+      : []
+    const travelers = Array.isArray(payload.travelers)
+      ? payload.travelers.filter(isAgencyDemandTravelerOption)
+      : []
+    const requesterTotal = finiteNumber(payload.requesterTotal)
+    const travelerTotal = finiteNumber(payload.travelerTotal)
+    const responseLimit = finiteNumber(payload.limit)
+    if (
+      typeof payload.companyId !== 'string'
+      || requesters.length !== (Array.isArray(payload.requesters) ? payload.requesters.length : -1)
+      || travelers.length !== (Array.isArray(payload.travelers) ? payload.travelers.length : -1)
+      || requesterTotal < 0
+      || travelerTotal < 0
+      || !Number.isInteger(responseLimit)
+      || responseLimit < 1
+      || responseLimit > 100
+    ) {
+      throw new DemandClientError(
+        'O servidor retornou participantes invalidos para a demanda.',
+        'INVALID_SERVER_RESPONSE',
+        502,
+      )
+    }
+    return {
+      companyId: payload.companyId,
+      requesters,
+      requesterTotal,
+      travelers,
+      travelerTotal,
+      limit: responseLimit,
+    }
+  } catch (error) {
+    if (error instanceof DemandClientError) throw error
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new DemandClientError(
+        'O servidor demorou para carregar os participantes da empresa.',
+        'DEMAND_PARTICIPANTS_TIMEOUT',
+        504,
+      )
+    }
+    throw new DemandClientError(
+      error instanceof Error ? error.message : 'Falha ao carregar participantes da empresa.',
+      'DEMAND_NETWORK_ERROR',
+      503,
+    )
+  } finally {
+    window.clearTimeout(timeout)
+  }
+}
+
 async function demandMutationRequest(
   demandId: string,
   operation: 'assignment' | 'status',
@@ -565,6 +681,22 @@ function isDemandCreationResult(value: Record<string, unknown>): value is Record
     && typeof approval.required === 'boolean'
     && typeof approval.configured === 'boolean'
     && typeof value.replayed === 'boolean'
+}
+
+function isAgencyDemandRequesterOption(value: unknown): value is AgencyDemandRequesterOption {
+  const item = record(value)
+  return typeof item.id === 'string'
+    && typeof item.name === 'string'
+    && typeof item.email === 'string'
+    && (item.employeeId === null || typeof item.employeeId === 'string')
+}
+
+function isAgencyDemandTravelerOption(value: unknown): value is AgencyDemandTravelerOption {
+  const item = record(value)
+  return typeof item.id === 'string'
+    && typeof item.identificationCode === 'string'
+    && typeof item.name === 'string'
+    && (item.email === null || typeof item.email === 'string')
 }
 
 function isDemandPolicy(value: unknown): boolean {

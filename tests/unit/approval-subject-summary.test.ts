@@ -105,6 +105,7 @@ describe('approval hotel quote subject presentation', () => {
     ), 'utf8')
 
     expect(component).toContain('Resumo para decisão')
+    expect(component).toContain('<AirlineLogo')
     expect(component).toContain('Hotel escolhido')
     expect(component).toContain('Composição do valor')
     expect(component).toContain('Condições para decisão')
@@ -215,6 +216,16 @@ describe('approval hotel quote subject presentation', () => {
     expect(extractHotelQuoteApprovalSummary({
       ...subject,
       quoteSnapshot: '{invalid',
+    })).toBeNull()
+
+    expect(extractHotelQuoteApprovalSummary({
+      ...subject,
+      product: 'carro',
+      quoteSnapshot: {
+        ...quoteSnapshot,
+        serviceKey: 'carro',
+        option: { ...quoteSnapshot.option, hotel: undefined },
+      },
     })).toBeNull()
   })
 })

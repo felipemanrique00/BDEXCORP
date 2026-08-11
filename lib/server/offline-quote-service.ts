@@ -18,6 +18,7 @@ import {
   type OfflineQuoteSelectionReadModel,
 } from '@/lib/offline-travel/quote-schema'
 import { sha256, type PolicyEvaluationResult, type PolicyScopeContext } from '@/lib/policy'
+import { offlinePolicyCoverageFingerprint } from '@/lib/offline-travel/policy-coverage'
 import { createApprovalInstance } from '@/lib/server/approval-service'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
@@ -73,6 +74,16 @@ interface QuoteDemandRow extends QueryResultRow {
   check_in: string | Date | null
   check_out: string | Date | null
   preferred_hotel_ids: string[] | null
+  air_passengers: unknown
+}
+
+interface SelectionPolicyTraveler {
+  demandTravelerId: string | null
+  employeeId: string | null
+  name: string
+  department: string | null
+  costCenter: string | null
+  sequence: number
 }
 
 interface DemandRoomRow extends QueryResultRow {
@@ -964,38 +975,70 @@ async function prepareSelection(
     const selectionId = randomUUID()
     const snapshot = canonicalSelectionSnapshot(demand, option)
     const snapshotHash = sha256(snapshot)
-    const policy = await evaluateAndPersistPoliciesInTransaction(client, principal, {
-      companyId: demand.company_id,
-      employeeId: demand.employee_id,
-      demandId: demand.id,
-      context: {
-        checkpoint: 'selection',
-        evaluatedAt: new Date().toISOString(),
-        mode: 'enforce',
-        scopes: policyScopes(demand),
-        facts: selectionPolicyFacts(demand, option, snapshot),
-      },
-    })
-    if (!policy.result.passed || policy.result.blocks.length) {
+    const policyTravelers = selectionPolicyTravelers(demand, option)
+    const policyEvaluations: Array<{
+      databaseEvaluationId: string
+      result: PolicyEvaluationResult
+    }> = []
+    const evaluatedAt = new Date().toISOString()
+    for (const traveler of policyTravelers) {
+      policyEvaluations.push(await evaluateAndPersistPoliciesInTransaction(client, principal, {
+        companyId: demand.company_id,
+        employeeId: traveler.employeeId,
+        demandId: demand.id,
+        context: {
+          checkpoint: 'selection',
+          evaluatedAt,
+          mode: 'enforce',
+          scopes: policyScopes(demand, traveler),
+          facts: selectionPolicyFacts(demand, option, snapshot, traveler),
+        },
+      }))
+    }
+    const policy = policyEvaluations[0]
+    const policyResults = policyEvaluations.map((evaluation) => evaluation.result)
+    const policyBlocks = policyResults.flatMap((result) => result.blocks)
+    if (policyResults.some((result) => !result.passed) || policyBlocks.length) {
       throw new TravelGovernanceError(
         'OFFLINE_SELECTION_POLICY_BLOCKED',
         'A politica vigente bloqueia esta escolha.',
         422,
-        { policies: policy.result.blocks.map((block) => block.policyCode) },
+        { policies: policyBlocks.map((block) => block.policyCode) },
       )
     }
-    if (policy.result.justificationsRequired.length) {
+    const requiredJustifications = policyResults.flatMap((result) => result.justificationsRequired)
+    if (requiredJustifications.length) {
       throw new TravelGovernanceError(
         'OFFLINE_SELECTION_JUSTIFICATION_REQUIRED',
         'A politica exige justificativa antes desta escolha.',
         422,
-        { policies: policy.result.justificationsRequired.map((item) => item.policyCode) },
+        { policies: requiredJustifications.map((item) => item.policyCode) },
       )
     }
-    const workflowCode = policy.result.approvalsRequired.length
-      ? await resolveApprovalWorkflowCode(client, principal.tenantId, policy.result)
+    const uncoveredSecondaryRequirements = policyResults.slice(1).flatMap((result) => [
+      ...result.requiredDocuments,
+      ...result.requiredActions.filter((item) => item.action !== 'require_budget'),
+    ])
+    if (uncoveredSecondaryRequirements.length) {
+      throw new TravelGovernanceError(
+        'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
+        'Uma politica de passageiro adicional exige uma acao que este fluxo ainda nao pode satisfazer.',
+        422,
+        { policies: uncoveredSecondaryRequirements.map((item) => item.policyCode) },
+      )
+    }
+    const approvalsRequired = policyResults.flatMap((result) => result.approvalsRequired)
+    const policyCoverageFingerprint = approvalsRequired.length
+      && policyTravelers.every((traveler) => traveler.demandTravelerId)
+      ? offlinePolicyCoverageFingerprint(
+          policyTravelers.map((traveler) => traveler.demandTravelerId as string),
+          approvalsRequired,
+        )
       : null
-    if (policy.result.approvalsRequired.length && !workflowCode) {
+    const workflowCode = approvalsRequired.length
+      ? await resolveApprovalWorkflowCode(client, principal.tenantId, policyResults)
+      : null
+    if (approvalsRequired.length && !workflowCode) {
       throw new TravelGovernanceError(
         'OFFLINE_SELECTION_WORKFLOW_NOT_CONFIGURED',
         'A politica exige aprovacao, mas nao aponta para um unico workflow publicado.',
@@ -1006,11 +1049,13 @@ async function prepareSelection(
       policyEvaluationId: policy.databaseEvaluationId,
       policyPassed: true,
       policyHasBlocks: false,
-      approvalsSatisfied: policy.result.approvalsRequired.length === 0,
+      approvalsSatisfied: approvalsRequired.length === 0,
       companySelected: true,
       travelerSelected: Boolean(demand.employee_id || demand.passenger_name_snapshot.trim()),
       offerSelected: true,
-      budgetSatisfied: !policy.result.requiredActions.some((item) => item.action === 'require_budget'),
+      budgetSatisfied: !policyResults.some((result) => (
+        result.requiredActions.some((item) => item.action === 'require_budget')
+      )),
     }
     return {
       input,
@@ -1029,12 +1074,19 @@ async function prepareSelection(
         urgent: demand.priority === 'urgent',
         product: selectionServiceKey(demand, option),
         destination: selectionDestination(demand, option),
-        policyViolationCodes: policy.result.approvalsRequired.map((item) => item.policyCode),
+        policyViolationCodes: approvalsRequired.map((item) => item.policyCode),
         quoteSelectionId: selectionId,
         quoteId: option.quote_id,
         quoteOptionId: option.option_id,
         quoteSnapshotHash: snapshotHash,
         quoteSnapshot: snapshot,
+        offlinePolicyCoverageFingerprint: policyCoverageFingerprint,
+        offlinePolicyEvaluations: policyEvaluations.map((evaluation, index) => ({
+          databaseEvaluationId: evaluation.databaseEvaluationId,
+          demandTravelerId: policyTravelers[index]?.demandTravelerId || null,
+          employeeId: policyTravelers[index]?.employeeId || null,
+          sequence: policyTravelers[index]?.sequence || index + 1,
+        })),
       },
     }
   })
@@ -1183,12 +1235,41 @@ async function loadQuoteDemand(
               where preference.tenant_id = demand.tenant_id
                 and preference.demand_id = demand.id
             ), case when detail.preferred_hotel_id is null
-              then array[]::text[] else array[detail.preferred_hotel_id]::text[] end) as preferred_hotel_ids
+              then array[]::text[] else array[detail.preferred_hotel_id]::text[] end) as preferred_hotel_ids,
+            coalesce((
+              select jsonb_agg(jsonb_build_object(
+                'id', traveler.id,
+                'employeeId', traveler.employee_id,
+                'name', traveler.name_snapshot,
+                'firstName', traveler.first_name_snapshot,
+                'lastName', traveler.last_name_snapshot,
+                'sequence', traveler.traveler_sequence,
+                'employeeActive', traveler_employee.id is not null,
+                'department', traveler_employee.department,
+                'costCenter', traveler_employee.cost_center
+              ) order by traveler.is_primary desc,
+                         traveler.traveler_sequence nulls last,
+                         traveler.created_at, traveler.id)
+              from demand_travelers traveler
+              left join employees traveler_employee
+                on traveler_employee.tenant_id = traveler.tenant_id
+               and traveler_employee.company_id = traveler.company_id
+               and traveler_employee.id = traveler.employee_id
+               and traveler_employee.status = 'active'
+               and traveler_employee.deleted_at is null
+              where traveler.tenant_id = demand.tenant_id
+                and traveler.demand_id = demand.id
+                and traveler.deleted_at is null
+            ), '[]'::jsonb) as air_passengers
      from demands demand
      join companies company
        on company.tenant_id = demand.tenant_id and company.id = demand.company_id
      left join employees employee
-       on employee.tenant_id = demand.tenant_id and employee.id = demand.employee_id
+       on employee.tenant_id = demand.tenant_id
+      and employee.company_id = demand.company_id
+      and employee.id = demand.employee_id
+      and employee.status = 'active'
+      and employee.deleted_at is null
      left join hotel_demand_details detail
        on detail.tenant_id = demand.tenant_id and detail.demand_id = demand.id
      left join geo_cities city on city.id = detail.city_id
@@ -1317,6 +1398,7 @@ function canonicalSelectionSnapshot(
       serviceKey,
       demand: {
         ...commonDemand,
+        passengers: demandPassengerSnapshots(demand.air_passengers),
         airRequest: airDemandDetails(demand),
       },
       quote: {
@@ -1367,26 +1449,128 @@ function canonicalSelectionSnapshot(
   }
 }
 
+function demandPassengerSnapshots(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const passenger = item as Record<string, unknown>
+    const name = String(passenger.name || '').trim()
+    if (!name) return []
+    return [{
+      id: passenger.id || null,
+      employeeId: passenger.employeeId || null,
+      name,
+      firstName: passenger.firstName || null,
+      lastName: passenger.lastName || null,
+      sequence: Number(passenger.sequence) || undefined,
+    }]
+  })
+}
+
+function selectionPolicyTravelers(
+  demand: QuoteDemandRow,
+  option: SelectionContextRow,
+): SelectionPolicyTraveler[] {
+  if (selectionServiceKey(demand, option) !== 'aereo') {
+    return [{
+      demandTravelerId: null,
+      employeeId: demand.employee_id,
+      name: demand.employee_name || demand.passenger_name_snapshot,
+      department: demand.employee_department,
+      costCenter: demand.cost_center,
+      sequence: 1,
+    }]
+  }
+  if (!Array.isArray(demand.air_passengers) || demand.air_passengers.length === 0) {
+    if (demandDeclaresAirPassengerContract(demand)) {
+      throw new TravelGovernanceError(
+        'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
+        'A demanda aerea multipassageiro nao possui passageiros ativos para avaliacao das politicas.',
+        409,
+      )
+    }
+    if (!demand.employee_id || !demand.employee_name) {
+      throw new TravelGovernanceError(
+        'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
+        'O passageiro principal da demanda aerea legada nao esta ativo nesta empresa.',
+        409,
+      )
+    }
+    return [{
+      demandTravelerId: null,
+      employeeId: demand.employee_id,
+      name: demand.passenger_name_snapshot || demand.employee_name,
+      department: demand.employee_department,
+      costCenter: demand.cost_center,
+      sequence: 1,
+    }]
+  }
+  const passengers = demand.air_passengers.flatMap((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const passenger = item as Record<string, unknown>
+    const name = String(passenger.name || '').trim()
+    const demandTravelerId = nullableText(passenger.id)
+    const employeeId = nullableText(passenger.employeeId)
+    if (!name || !employeeId || !demandTravelerId || passenger.employeeActive !== true) return []
+    return [{
+      demandTravelerId,
+      employeeId,
+      name,
+      department: nullableText(passenger.department),
+      costCenter: nullableText(passenger.costCenter),
+      sequence: Number(passenger.sequence) || index + 1,
+    }]
+  })
+  if (passengers.length !== demand.air_passengers.length) {
+    throw new TravelGovernanceError(
+      'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
+      'Todos os passageiros aereos precisam estar vinculados a um funcionario para avaliacao das politicas.',
+      422,
+    )
+  }
+  return passengers
+}
+
+function demandDeclaresAirPassengerContract(demand: QuoteDemandRow): boolean {
+  const metadata = objectValue(demand.metadata)
+  const serviceAir = objectValue(objectValue(metadata.serviceDetails).air)
+  const legacy = objectValue(metadata.legacySnapshot)
+  const legacyAir = objectValue(legacy.detalhes_aereo || legacy.airDetails)
+  return [serviceAir.passengers, legacyAir.passengers].some((value) => (
+    Array.isArray(value) && value.length > 0
+  ))
+}
+
 function selectionPolicyFacts(
   demand: QuoteDemandRow,
   option: SelectionContextRow,
   snapshot: Record<string, unknown>,
+  traveler?: SelectionPolicyTraveler,
 ): Record<string, unknown> {
   const serviceKey = selectionServiceKey(demand, option)
   const destination = selectionDestination(demand, option)
   const breakdown = objectValue(objectValue(option.option_metadata).offlineHotel)
+  const employeeId = traveler ? traveler.employeeId : demand.employee_id
+  const employeeName = traveler?.name || demand.employee_name || demand.passenger_name_snapshot
+  const employeeDepartment = traveler ? traveler.department : demand.employee_department
+  const employeeCostCenter = traveler ? traveler.costCenter : demand.cost_center
   const baseFacts: Record<string, unknown> = {
     tenant: { id: demand.tenant_id },
     organization: { groupId: demand.group_id, companyId: demand.company_id },
     company: { id: demand.company_id, name: demand.company_name, groupId: demand.group_id },
     employee: {
-      id: demand.employee_id,
-      name: demand.employee_name || demand.passenger_name_snapshot,
-      department: demand.employee_department,
-      costCenter: demand.cost_center,
-      registered: Boolean(demand.employee_id),
+      id: employeeId,
+      name: employeeName,
+      department: employeeDepartment,
+      costCenter: employeeCostCenter,
+      registered: Boolean(employeeId),
     },
-    traveler: { id: demand.employee_id, name: demand.employee_name || demand.passenger_name_snapshot },
+    traveler: {
+      id: employeeId,
+      demandTravelerId: traveler?.demandTravelerId || null,
+      name: employeeName,
+      sequence: traveler?.sequence || 1,
+    },
     requester: { id: demand.requester_id },
     request: {
       id: demand.id,
@@ -1479,13 +1663,14 @@ function airDemandDetails(demand: QuoteDemandRow): Record<string, unknown> {
 async function resolveApprovalWorkflowCode(
   client: PoolClient,
   tenantId: string,
-  result: PolicyEvaluationResult,
+  results: PolicyEvaluationResult[],
 ): Promise<string | null> {
-  const configured = result.approvalsRequired.flatMap((item) => {
+  const approvalItems = results.flatMap((result) => result.approvalsRequired)
+  const configured = approvalItems.flatMap((item) => {
     const workflow = item.configuration.workflow
     return typeof workflow === 'string' && workflow.trim() ? [workflow.trim()] : []
   })
-  const versionIds = Array.from(new Set(result.approvalsRequired.map((item) => item.policyVersionId)))
+  const versionIds = Array.from(new Set(approvalItems.map((item) => item.policyVersionId)))
   const dependencies = versionIds.length
     ? await client.query<{ dependency_key: string }>(
         `select distinct dependency_key from policy_dependencies
@@ -1650,13 +1835,26 @@ function normalizeExpiry(
   return expiresAt
 }
 
-function policyScopes(demand: QuoteDemandRow): PolicyScopeContext[] {
+function policyScopes(
+  demand: QuoteDemandRow,
+  traveler?: SelectionPolicyTraveler,
+): PolicyScopeContext[] {
+  const employeeId = traveler ? traveler.employeeId : demand.employee_id
+  const department = traveler ? traveler.department : demand.employee_department
+  const costCenter = traveler ? traveler.costCenter : demand.cost_center
   return [
     { type: 'tenant', id: null },
     ...(demand.group_id ? [{ type: 'group' as const, id: demand.group_id }] : []),
     { type: 'company', id: demand.company_id },
-    ...(demand.employee_department ? [{ type: 'department' as const, id: demand.employee_department }] : []),
-    ...(demand.employee_id ? [{ type: 'traveler' as const, id: demand.employee_id }] : []),
+    ...(department
+      ? [{ type: 'department' as const, id: department }]
+      : []),
+    ...(costCenter
+      ? [{ type: 'cost_center' as const, id: costCenter }]
+      : []),
+    ...(employeeId
+      ? [{ type: 'traveler' as const, id: employeeId }]
+      : []),
     ...(demand.requester_id ? [{ type: 'requester' as const, id: demand.requester_id }] : []),
   ]
 }

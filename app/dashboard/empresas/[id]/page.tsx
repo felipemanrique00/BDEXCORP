@@ -10,7 +10,7 @@ import { WhatsAppButton } from '@/components/ui/whatsapp-button'
 import {
   ArrowLeft, Building2, Users, Mail, MapPin, Hash, DollarSign, Briefcase,
   FileText, Upload, TrendingUp, Hotel as HotelIcon, Calendar, BarChart3, Clock,
-  AlertCircle, CheckCircle2, XCircle, UserRound,
+  AlertCircle, CheckCircle2, XCircle, UserRound, Palette,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useState, useEffect } from 'react'
@@ -19,6 +19,7 @@ import { toast } from 'sonner'
 import { PoliticaModal } from '@/components/ui/politica-modal'
 import { SolicitantesEmpresaTab } from '@/components/empresas/solicitantes-empresa-tab'
 import { CostCentersCompanyTab } from '@/components/empresas/cost-centers-company-tab'
+import { CorporateBrandingSettingsPanel } from '@/components/branding/corporate-branding-settings-panel'
 import { VoucherPresentationSettingsPanel } from '@/components/vouchers/voucher-presentation-settings-panel'
 import { getEmissoesByEmpresa, getRankingHoteisByEmpresa, type Emissao } from '@/lib/emissoes-storage'
 import { loadManualHotelBookingsFromServer } from '@/lib/manual-hotel-booking-client'
@@ -43,7 +44,7 @@ const ImportarEmpresaModal = dynamic(
   { ssr: false },
 )
 
-type Tab = 'dados' | 'funcionarios' | 'politicas' | 'emissoes' | 'atendimentos' | 'solicitantes' | 'centros_custo' | 'voucher'
+type Tab = 'dados' | 'funcionarios' | 'politicas' | 'emissoes' | 'atendimentos' | 'solicitantes' | 'centros_custo' | 'branding' | 'voucher'
 
 export default function EmpresaDetalhePage() {
   const { id } = useParams<{ id: string }>()
@@ -65,6 +66,7 @@ export default function EmpresaDetalhePage() {
   const canManageCostCenters = includesCompany(id, 'gerenciar_centros_custo')
   const canViewVouchers = includesCompany(id, 'ver_vouchers')
   const canManageVoucherSettings = includesCompany(id, 'alterar_configuracoes')
+  const canManageBranding = includesCompany(id, 'alterar_configuracoes')
   const canManageRequesterLogins = canManageUserAccess(user)
     && canAccessCompanyPermission(
       user,
@@ -114,6 +116,7 @@ export default function EmpresaDetalhePage() {
     ...(canViewEmployees ? [{ id: 'funcionarios' as const, label: 'Funcionários', icon: Users, count: funcs.length }] : []),
     ...(canViewRequesters ? [{ id: 'solicitantes' as const, label: 'Acessos', icon: UserRound, count: getSolicitantesPorEmpresa(id).length }] : []),
     ...(canViewCostCenters ? [{ id: 'centros_custo' as const, label: 'Centros de custo', icon: DollarSign }] : []),
+    ...(canManageBranding ? [{ id: 'branding' as const, label: 'Identidade visual', icon: Palette }] : []),
     ...(canViewVouchers ? [{ id: 'voucher' as const, label: 'Voucher', icon: FileText }] : []),
     { id: 'politicas', label: 'Políticas', icon: Briefcase },
     ...(canViewDemands ? [{ id: 'atendimentos' as const, label: 'Atendimentos', icon: BarChart3 }] : []),
@@ -225,6 +228,16 @@ export default function EmpresaDetalhePage() {
           companyId={empresa.id}
           companyName={empresa.nome}
           canManage={canManageCostCenters}
+        />
+      )}
+
+      {canManageBranding && tab === 'branding' && (
+        <CorporateBrandingSettingsPanel
+          key={`company:${empresa.id}`}
+          scopeType="company"
+          scopeId={empresa.id}
+          scopeName={empresa.nome}
+          canManage
         />
       )}
 

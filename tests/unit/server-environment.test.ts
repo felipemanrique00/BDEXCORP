@@ -44,6 +44,65 @@ describe('server environment', () => {
       /SMTP_HOST e obrigatorio quando SMTP_ENABLED=true/,
     )
   })
+
+  it('mantem o bypass de MFA desabilitado por padrao', async () => {
+    vi.stubEnv('MFA_LOCAL_BYPASS', 'false')
+
+    const { getServerEnvironment, isLocalMfaBypassEnabled } = await import('@/lib/server/environment')
+
+    expect(getServerEnvironment().MFA_LOCAL_BYPASS).toBe(false)
+    expect(isLocalMfaBypassEnabled()).toBe(false)
+  })
+
+  it('permite o bypass explicito somente no runtime HTTP de loopback', async () => {
+    vi.stubEnv('APP_URL', 'http://127.0.0.1:3010')
+    vi.stubEnv('ALLOW_INSECURE_LOCALHOST', 'true')
+    vi.stubEnv('MFA_LOCAL_BYPASS', 'true')
+
+    const { isLocalMfaBypassEnabled } = await import('@/lib/server/environment')
+
+    expect(isLocalMfaBypassEnabled()).toBe(true)
+  })
+
+  it('bloqueia o bypass em URL publica mesmo fora de NODE_ENV=production', async () => {
+    vi.stubEnv('NODE_ENV', 'development')
+    vi.stubEnv('APP_URL', 'https://staging.bdextravel.com.br')
+    vi.stubEnv('ALLOW_INSECURE_LOCALHOST', 'true')
+    vi.stubEnv('MFA_LOCAL_BYPASS', 'true')
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    expect(() => getServerEnvironment()).toThrow(
+      /MFA_LOCAL_BYPASS bloqueado: .*APP_URL deve usar HTTP e apontar estritamente para localhost ou loopback/,
+    )
+  })
+
+  it('bloqueia o bypass local sem a segunda confirmacao de ambiente inseguro', async () => {
+    vi.stubEnv('NODE_ENV', 'development')
+    vi.stubEnv('APP_URL', 'http://localhost:3010')
+    vi.stubEnv('ALLOW_INSECURE_LOCALHOST', 'false')
+    vi.stubEnv('MFA_LOCAL_BYPASS', 'true')
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    expect(() => getServerEnvironment()).toThrow(
+      /ALLOW_INSECURE_LOCALHOST deve estar explicitamente habilitado/,
+    )
+  })
+
+  it('nao aceita desabilitar a politica administrativa junto com o bypass local', async () => {
+    vi.stubEnv('NODE_ENV', 'development')
+    vi.stubEnv('APP_URL', 'http://127.0.0.1:3010')
+    vi.stubEnv('ALLOW_INSECURE_LOCALHOST', 'true')
+    vi.stubEnv('MFA_ADMIN_REQUIRED', 'false')
+    vi.stubEnv('MFA_LOCAL_BYPASS', 'true')
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    expect(() => getServerEnvironment()).toThrow(
+      /MFA_ADMIN_REQUIRED deve permanecer habilitado/,
+    )
+  })
 })
 
 function configureRequiredProductionEnvironment(): void {
@@ -53,5 +112,6 @@ function configureRequiredProductionEnvironment(): void {
   vi.stubEnv('DATABASE_URL', 'postgresql://app:password@postgres:5432/bdex_test')
   vi.stubEnv('AUTH_SECRET', 'a'.repeat(48))
   vi.stubEnv('MFA_ADMIN_REQUIRED', 'true')
+  vi.stubEnv('MFA_LOCAL_BYPASS', 'false')
   vi.stubEnv('MFA_ENCRYPTION_KEY', Buffer.alloc(32, 7).toString('base64'))
 }

@@ -11,6 +11,7 @@ import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
 import { formatCurrency } from '@/lib/utils'
 import type { Empresa, Funcionario, GrupoEmpresarial, Permissoes, User } from '@/types'
 import { useCorporateContext } from '@/components/corporate-context-provider'
+import { CorporateBrandingSettingsPanel } from '@/components/branding/corporate-branding-settings-panel'
 import { VoucherPresentationSettingsPanel } from '@/components/vouchers/voucher-presentation-settings-panel'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
@@ -250,6 +251,17 @@ export default function GruposEmpresariaisPage() {
               scopeId={grupoSelecionado.id}
               scopeName={grupoSelecionado.nome}
               canManage={podeAlterarVoucherGrupo}
+              compact
+            />
+          )}
+
+          {grupoSelecionado && podeAlterarVoucherGrupo && (
+            <CorporateBrandingSettingsPanel
+              key={`group:${grupoSelecionado.id}`}
+              scopeType="group"
+              scopeId={grupoSelecionado.id}
+              scopeName={grupoSelecionado.nome}
+              canManage
               compact
             />
           )}

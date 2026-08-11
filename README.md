@@ -29,6 +29,8 @@ Nao existe fallback de producao para JSON local. O navegador mantem apenas cache
 4. Defina as variaveis `BOOTSTRAP_*` e execute `npm run db:bootstrap` uma unica vez.
 5. Inicie com `npm run dev`.
 
+Para manter a aplicacao local iniciando automaticamente com o Windows, sem o custo permanente de compilacao sob demanda, consulte [Ambiente local automatico no Windows](docs/LOCAL-WINDOWS-AUTOSTART.md). O modo automatico usa build reutilizavel; o hot reload continua disponivel explicitamente.
+
 O bootstrap e idempotente pelo slug do tenant e nao imprime a senha informada.
 
 ## Validacao

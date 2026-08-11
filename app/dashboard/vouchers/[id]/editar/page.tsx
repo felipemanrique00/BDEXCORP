@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { DateInput } from '@/components/ui/date-input'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 
 export default function EditarVoucherPage() {
   const { id } = useParams<{ id: string }>()
@@ -196,7 +197,7 @@ export default function EditarVoucherPage() {
             <Field label="Hóspedes"><input type="number" value={v.num_hospedes || 1} onChange={(e) => update('num_hospedes', Number(e.target.value))} className="bbt-input" /></Field>
             <Field label="Check-in" htmlFor="voucher-edit-checkin"><DateInput id="voucher-edit-checkin" value={v.data_checkin || ''} onChange={(e) => update('data_checkin', e.target.value)} className="bbt-input" /></Field>
             <Field label="Check-out" htmlFor="voucher-edit-checkout"><DateInput id="voucher-edit-checkout" value={v.data_checkout || ''} onChange={(e) => update('data_checkout', e.target.value)} className="bbt-input" /></Field>
-            <Field label="Valor Diária"><input type="number" step="0.01" value={v.valor_diaria || 0} onChange={(e) => update('valor_diaria', Number(e.target.value))} className="bbt-input" /></Field>
+            <Field label="Valor Diária"><NumericDecimalInput value={v.valor_diaria || 0} emptyValue={0} onNumberChange={(value) => update('valor_diaria', value ?? 0)} /></Field>
             <Field label="Regime"><input value={v.regime || ''} onChange={(e) => update('regime', e.target.value)} className="bbt-input" /></Field>
             <Field label="Forma Pgto Voucher"><input value={v.forma_pagamento_voucher || ''} onChange={(e) => update('forma_pagamento_voucher', e.target.value)} className="bbt-input" /></Field>
           </div>
@@ -231,9 +232,9 @@ export default function EditarVoucherPage() {
       <div className="bbt-card p-4 space-y-3">
         <h2 className="font-semibold text-sm flex items-center gap-2"><DollarSign className="w-4 h-4 text-bbt-accent" /> Financeiro</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <Field label="Tarifa Total"><input type="number" step="0.01" value={v.tarifa_total || 0} onChange={(e) => update('tarifa_total', Number(e.target.value))} className="bbt-input" /></Field>
-          <Field label="Taxas"><input type="number" step="0.01" value={v.taxas || 0} onChange={(e) => update('taxas', Number(e.target.value))} className="bbt-input" /></Field>
-          <Field label="Total"><input type="number" step="0.01" value={v.total || 0} onChange={(e) => update('total', Number(e.target.value))} className="bbt-input" /></Field>
+          <Field label="Tarifa Total"><NumericDecimalInput value={v.tarifa_total || 0} emptyValue={0} onNumberChange={(value) => update('tarifa_total', value ?? 0)} /></Field>
+          <Field label="Taxas"><NumericDecimalInput value={v.taxas || 0} emptyValue={0} onNumberChange={(value) => update('taxas', value ?? 0)} /></Field>
+          <Field label="Total"><NumericDecimalInput value={v.total || 0} emptyValue={0} onNumberChange={(value) => update('total', value ?? 0)} /></Field>
           <Field label="Centro de Custo"><input value={v.centro_custo || ''} onChange={(e) => update('centro_custo', e.target.value)} className="bbt-input" /></Field>
           <Field label="Nº Solicitação"><input value={v.numero_solicitacao || ''} onChange={(e) => update('numero_solicitacao', e.target.value)} className="bbt-input" /></Field>
         </div>

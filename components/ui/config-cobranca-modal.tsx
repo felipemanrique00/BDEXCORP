@@ -7,6 +7,7 @@ import { useStore } from '@/lib/store'
 import type { Empresa, ConfigCobrancaEmpresa } from '@/types'
 import { CONFIG_COBRANCA_PADRAO } from '@/types'
 import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 
 interface Props {
   open: boolean
@@ -75,14 +76,13 @@ export function ConfigCobrancaModal({ open, onClose, empresa }: Props) {
                 Markup padrão sugerido (%)
               </label>
               <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  step="0.5"
-                  min={0}
-                  max={100}
+                <NumericDecimalInput
                   value={config.markup_padrao_pct}
-                  onChange={(e) => setConfig({ ...config, markup_padrao_pct: parseFloat(e.target.value) || 0 })}
-                  className="bbt-input w-32"
+                  emptyValue={0}
+                  minValue={0}
+                  maxValue={100}
+                  onNumberChange={(value) => setConfig({ ...config, markup_padrao_pct: value ?? 0 })}
+                  containerClassName="w-32"
                 />
                 <span className="text-sm text-slate-500">% sobre o custo</span>
               </div>
@@ -136,13 +136,11 @@ export function ConfigCobrancaModal({ open, onClose, empresa }: Props) {
                   <label className="block text-xs font-semibold uppercase text-slate-600 mb-1.5">
                     Taxa fixa (R$ por demanda)
                   </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min={0}
+                  <NumericDecimalInput
                     value={config.taxa_valor_fixo}
-                    onChange={(e) => setConfig({ ...config, taxa_valor_fixo: parseFloat(e.target.value) || 0 })}
-                    className="bbt-input w-40"
+                    emptyValue={0}
+                    onNumberChange={(value) => setConfig({ ...config, taxa_valor_fixo: value ?? 0 })}
+                    containerClassName="w-40"
                   />
                 </div>
               ) : (
@@ -151,14 +149,13 @@ export function ConfigCobrancaModal({ open, onClose, empresa }: Props) {
                     Taxa padrão (% sobre a venda)
                   </label>
                   <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      step="0.5"
-                      min={0}
-                      max={100}
+                    <NumericDecimalInput
                       value={config.taxa_padrao_pct}
-                      onChange={(e) => setConfig({ ...config, taxa_padrao_pct: parseFloat(e.target.value) || 0 })}
-                      className="bbt-input w-32"
+                      emptyValue={0}
+                      minValue={0}
+                      maxValue={100}
+                      onNumberChange={(value) => setConfig({ ...config, taxa_padrao_pct: value ?? 0 })}
+                      containerClassName="w-32"
                     />
                     <span className="text-sm text-slate-500">%</span>
                   </div>

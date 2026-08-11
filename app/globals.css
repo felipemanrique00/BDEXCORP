@@ -4,15 +4,26 @@
 
 :root {
   --bbt-primary: #20265A;
+  --bbt-primary-rgb: 32 38 90;
   --bbt-primary-mid: #30377A;
+  --bbt-primary-mid-rgb: 48 55 122;
   --bbt-primary-light: #416FAF;
+  --bbt-primary-light-rgb: 65 111 175;
   --bbt-accent: #21BFC5;
+  --bbt-accent-rgb: 33 191 197;
   --bbt-violet: #4A3191;
+  --bbt-violet-rgb: 74 49 145;
   --bbt-gold: #D8A128;
+  --bbt-gold-rgb: 216 161 40;
+  --bbt-sidebar: #1B204D;
+  --bbt-sidebar-rgb: 27 32 77;
   --bbt-bg: #F4F6FA;
+  --bbt-gray-50-rgb: 244 246 250;
   --bbt-surface: #FFFFFF;
   --bbt-border: #D9E0EA;
+  --bbt-gray-100-rgb: 217 224 234;
   --bbt-text: #172033;
+  --bbt-text-rgb: 23 32 51;
   --bbt-muted: #647084;
 }
 
@@ -21,6 +32,7 @@
   --bbt-surface: #171C38;
   --bbt-border: #30375E;
   --bbt-text: #F3F5FC;
+  --bbt-text-rgb: 243 245 252;
   --bbt-muted: #A7AFC2;
 }
 
@@ -88,13 +100,15 @@ h1, h2, h3, h4 {
   box-shadow: 0 10px 28px rgba(32, 38, 90, 0.08), 0 2px 6px rgba(32, 38, 90, 0.04);
 }
 
-.bbt-input {
-  @apply w-full h-10 px-3 rounded-md border border-bbt-gray-100 dark:border-slate-700
-         bg-white dark:bg-slate-900 text-bbt-text dark:text-slate-100
-         text-sm
-         placeholder:text-slate-400
-         focus:outline-none focus:ring-2 focus:ring-bbt-accent/20 focus:border-bbt-accent
-         transition;
+@layer components {
+  .bbt-input {
+    @apply w-full h-10 px-3 rounded-md border border-bbt-gray-100 dark:border-slate-700
+           bg-white dark:bg-slate-900 text-bbt-text dark:text-slate-100
+           text-sm
+           placeholder:text-slate-400
+           focus:outline-none focus:ring-2 focus:ring-bbt-accent/20 focus:border-bbt-accent
+           transition;
+  }
 }
 
 /* Controles temporais padronizados: o ícone é renderizado pelo componente,
@@ -109,10 +123,12 @@ h1, h2, h3, h4 {
 
 .bbt-temporal-input {
   min-width: 0;
-  padding-left: 2.25rem;
+  padding-left: 0.75rem;
   padding-right: 2.5rem;
   font-variant-numeric: tabular-nums;
   color-scheme: light;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .dark .bbt-temporal-input {
@@ -120,6 +136,17 @@ h1, h2, h3, h4 {
 }
 
 .bbt-temporal-input::-webkit-calendar-picker-indicator {
+  display: none;
+  width: 0;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  -webkit-appearance: none;
+}
+
+.bbt-temporal-input::-webkit-inner-spin-button,
+.bbt-temporal-input::-webkit-clear-button {
   display: none;
   width: 0;
   height: 0;
@@ -194,9 +221,11 @@ h1, h2, h3, h4 {
    ============================================================ */
 
 .bbt-page-header {
-  @apply relative overflow-hidden rounded-lg border border-[#353d78] bg-[#20265a] p-5 text-white
+  @apply relative overflow-hidden rounded-lg border p-5 text-white
          flex flex-wrap items-end justify-between gap-4;
-  box-shadow: 0 12px 30px rgba(32, 38, 90, 0.16);
+  background: var(--bbt-primary);
+  border-color: var(--bbt-primary-light);
+  box-shadow: 0 12px 30px rgb(var(--bbt-primary-rgb) / 0.16);
 }
 
 .bbt-page-header::before {
@@ -204,7 +233,7 @@ h1, h2, h3, h4 {
   position: absolute;
   inset: 0 0 auto;
   height: 4px;
-  background: linear-gradient(90deg, #45d0d4 0 38%, #4a3191 38% 76%, #d8a128 76% 100%);
+  background: linear-gradient(90deg, var(--bbt-accent) 0 38%, var(--bbt-primary-light) 38% 76%, var(--bbt-gold) 76% 100%);
   pointer-events: none;
 }
 
@@ -248,9 +277,9 @@ h1, h2, h3, h4 {
 /* Hero corporativo escuro (igual ao do dashboard) — reusable */
 .bbt-hero {
   @apply relative overflow-hidden rounded-lg border text-white;
-  background: #20265a;
-  border-color: #353d78;
-  box-shadow: 0 12px 30px rgba(32, 38, 90, 0.16);
+  background: var(--bbt-primary);
+  border-color: var(--bbt-primary-light);
+  box-shadow: 0 12px 30px rgb(var(--bbt-primary-rgb) / 0.16);
 }
 
 .bbt-hero::before {
@@ -258,7 +287,7 @@ h1, h2, h3, h4 {
   position: absolute;
   inset: 0 0 auto;
   height: 4px;
-  background: linear-gradient(90deg, #45d0d4 0 38%, #4a3191 38% 76%, #d8a128 76% 100%);
+  background: linear-gradient(90deg, var(--bbt-accent) 0 38%, var(--bbt-primary-light) 38% 76%, var(--bbt-gold) 76% 100%);
   pointer-events: none;
 }
 
@@ -278,13 +307,13 @@ h1, h2, h3, h4 {
   inset: 0 0 auto;
   z-index: 2;
   height: 3px;
-  background: linear-gradient(90deg, #45d0d4 0 38%, #4a3191 38% 76%, #d8a128 76% 100%);
+  background: linear-gradient(90deg, var(--bbt-accent) 0 38%, var(--bbt-primary-light) 38% 76%, var(--bbt-gold) 76% 100%);
   pointer-events: none;
 }
 
 .bbt-sidebar {
-  background: #1b204d;
-  box-shadow: 10px 0 30px rgba(22, 26, 62, 0.12);
+  background: var(--bbt-sidebar);
+  box-shadow: 10px 0 30px rgb(var(--bbt-sidebar-rgb) / 0.12);
 }
 
 .bbt-report-brand-header {
@@ -304,7 +333,7 @@ h1, h2, h3, h4 {
   position: absolute;
   inset: 0 0 auto;
   height: 4px;
-  background: linear-gradient(90deg, #45d0d4 0 38%, #4a3191 38% 76%, #d8a128 76% 100%);
+  background: linear-gradient(90deg, var(--bbt-accent) 0 38%, var(--bbt-primary-light) 38% 76%, var(--bbt-gold) 76% 100%);
 }
 
 .bbt-report-brand-copy {

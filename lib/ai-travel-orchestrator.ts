@@ -19,6 +19,10 @@ import {
 import { AI_NAME } from '@/lib/branding'
 import { encontrarFuncionarioConfiavel, encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
 import type { AiActionProposal, PrepareAiAction } from '@/lib/ai-actions'
+import {
+  MANUAL_DEMAND_BOOKING_MODE,
+  shouldSubmitDemandOnCreate,
+} from '@/lib/travel/demand-booking-mode'
 
 export interface TravelAgentContext {
   empresas: Empresa[]
@@ -155,7 +159,10 @@ export async function runTravelAgent(
         actionType: 'create_demand',
         companyId: empresa?.id || null,
         summary: `Criar demanda de ${demandInput.passageiro_nome}`,
-        payload: { demand: demandInput, submit: true },
+        payload: {
+          demand: demandInput,
+          submit: shouldSubmitDemandOnCreate(MANUAL_DEMAND_BOOKING_MODE),
+        },
         expiresInMinutes: 30,
       })
     : null
@@ -449,6 +456,7 @@ function montarAtendimento({
     funcionario_id: funcionario?.id || null,
     passageiro_nome: passageiro,
     tipo_servico: tipo,
+    booking_mode: MANUAL_DEMAND_BOOKING_MODE,
     valor_cotacao: 0,
     valor_final: 0,
     valor_custo: 0,

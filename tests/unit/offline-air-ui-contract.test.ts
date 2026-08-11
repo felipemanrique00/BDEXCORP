@@ -62,7 +62,7 @@ describe('offline air UI contract', () => {
     expect(option.segments).toHaveLength(2)
     expect(option.segments[0]).toMatchObject({ originCode: 'REC', destinationCode: 'GYN' })
     expect(option.segments[1]).toMatchObject({ originCode: 'GYN', destinationCode: 'REC' })
-    expect(option.pricing).toMatchObject({ currency: 'BRL', exchangeRate: '1', rac: '0' })
+    expect(option.pricing).toMatchObject({ currency: 'BRL', exchangeRate: '1,0000', rac: '0,00' })
   })
 
   it('adapts PT-BR UI fields to the canonical backend schema', () => {
@@ -135,21 +135,33 @@ describe('offline air UI contract', () => {
       'Prazo de emissão',
       'Regras tarifárias',
       'Política de cancelamento',
+      'Câmbio informado',
+      'Tarifa de referência',
+      'Milhagem do itinerário',
       'Escolher e enviar',
     ]) {
       expect(choicePanelSource).toContain(label)
     }
     expect(choicePanelSource).toContain('airQuoteTotalMinor(option.pricing)')
+    expect(choicePanelSource).toContain('type="radio"')
+    expect(choicePanelSource).toContain('aria-expanded={expanded}')
+    expect(choicePanelSource).toContain('{expanded && <div')
+    expect(choicePanelSource).toContain('<AirlineLogo')
+    expect(choicePanelSource).toContain('option.validatingAirlineCode')
     expect(choicePanelSource).toContain('Confirmo os trechos, passageiros, bagagem, valor total')
   })
 
   it('locks the approved commercial snapshot and exposes only operational reservation and issuance fields', () => {
     expect(operationFieldsSource).toContain('data-locked-approved-air-snapshot')
     expect(operationFieldsSource).toContain('cotação imutável para a operação')
+    expect(operationFieldsSource).toContain('<AirlineLogo')
+    expect(operationFieldsSource).toContain('option.validatingAirlineCode')
     expect(operationFieldsSource).toContain('Para alterá-los, retorne à cotação e abra uma nova rodada.')
+    expect(operationFieldsSource).toContain('data-air-request-summary')
+    expect(operationFieldsSource).toContain('data-air-administrative-details')
     for (const label of [
       'Localizador confirmado *',
-      'Fornecedor operacional *',
+      'Emissor / consolidador *',
       'Reserva confirmada em *',
       'Bilhetes por passageiro',
       'Forma de pagamento',

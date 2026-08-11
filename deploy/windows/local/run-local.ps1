@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('production', 'development')]
+    [string]$Mode = 'production'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -8,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 
 $config = Get-BdexLocalConfig
 Initialize-BdexLocalRuntime -Config $config
+$selectedNextDistDir = if ($Mode -eq 'development') { $config.DevelopmentDistDir } else { $config.ProductionDistDir }
 $createdNew = $false
 $mutex = $null
 try {
@@ -32,7 +36,8 @@ try {
         health_ok = $false
         ready_ok = $false
         url = "http://$($config.Host):$($config.Port)"
-        next_dist_dir = $config.NextDistDir
+        mode = $Mode
+        next_dist_dir = $selectedNextDistDir
     })
     throw
 }
@@ -134,6 +139,30 @@ function Start-PostgresCommand {
     }
 }
 
+function Invoke-LocalBuildIfRequired {
+    $fingerprint = Get-BdexLocalSourceFingerprint -Config $config
+    if (Test-BdexLocalProductionBuildCurrent -Config $config -Fingerprint $fingerprint) {
+        Write-BdexLocalSupervisorLog -Config $config -Message 'Build local reutilizado; fontes sem alteracoes.'
+        return
+    }
+
+    Write-BdexLocalSupervisorLog -Config $config -Message 'Fontes alteradas; iniciando build incremental do Next.js.'
+    $buildCommand = '"{0}" "{1}" build 1>>"{2}" 2>>"{3}"' -f $nodePath, $nextCliPath, $config.AppOutLog, $config.AppErrorLog
+    $buildProcess = Start-HiddenLoggedCommand -Command $buildCommand -WorkingDirectory $config.ProjectRoot
+    $buildProcess.WaitForExit()
+    if ($buildProcess.ExitCode -ne 0) {
+        throw 'O build local falhou. Consulte app.stderr.log; o servidor nao iniciou uma versao incompleta.'
+    }
+
+    Write-BdexLocalJsonAtomic -Path $config.ProductionBuildStateFile -Value ([ordered]@{
+        schema_version = 1
+        source_fingerprint = $fingerprint
+        dist_dir = $config.ProductionDistDir
+        built_at = (Get-Date).ToString('o')
+    })
+    Write-BdexLocalSupervisorLog -Config $config -Message 'Build incremental concluido.'
+}
+
 function Start-NextCommand {
     foreach ($path in @($config.AppOutLog, $config.AppErrorLog)) { Rotate-BdexLocalLog -Path $path }
 
@@ -148,22 +177,44 @@ function Start-NextCommand {
         }
     }
 
+    $applicationEnvironment = Get-BdexLocalApplicationEnvironment -Config $config
     $previousDist = $env:NEXT_DIST_DIR
     $previousTelemetry = $env:NEXT_TELEMETRY_DISABLED
     $previousNodeOptions = $env:NODE_OPTIONS
+    $previousNodeEnvironment = $env:NODE_ENV
+    $previousAuthSecret = $env:AUTH_SECRET
+    $previousMfaEncryptionKey = $env:MFA_ENCRYPTION_KEY
+    $previousMfaLocalBypass = $env:MFA_LOCAL_BYPASS
+    $previousAppVersion = $env:APP_VERSION
     try {
-        $env:NEXT_DIST_DIR = $config.NextDistDir
+        $env:NEXT_DIST_DIR = $selectedNextDistDir
         $env:NEXT_TELEMETRY_DISABLED = '1'
+        $env:AUTH_SECRET = $applicationEnvironment.AuthSecret
+        $env:MFA_ENCRYPTION_KEY = $applicationEnvironment.MfaEncryptionKey
+        $env:MFA_LOCAL_BYPASS = 'true'
+        $env:APP_VERSION = $applicationEnvironment.AppVersion
         if ([string]$env:NODE_OPTIONS -notmatch 'max-old-space-size') {
             $env:NODE_OPTIONS = (([string]$env:NODE_OPTIONS).Trim() + ' --max-old-space-size=4096').Trim()
         }
-        $command = '"{0}" "{1}" dev --hostname {2} --port {3} 1>>"{4}" 2>>"{5}"' -f $nodePath, $nextCliPath, $config.Host, $config.Port, $config.AppOutLog, $config.AppErrorLog
+        if ($Mode -eq 'development') {
+            $env:NODE_ENV = 'development'
+            $command = '"{0}" "{1}" dev --hostname {2} --port {3} 1>>"{4}" 2>>"{5}"' -f $nodePath, $nextCliPath, $config.Host, $config.Port, $config.AppOutLog, $config.AppErrorLog
+        } else {
+            $env:NODE_ENV = 'production'
+            Invoke-LocalBuildIfRequired
+            $command = '"{0}" "{1}" start --hostname {2} --port {3} 1>>"{4}" 2>>"{5}"' -f $nodePath, $nextCliPath, $config.Host, $config.Port, $config.AppOutLog, $config.AppErrorLog
+        }
         return Start-HiddenLoggedCommand -Command $command -WorkingDirectory $config.ProjectRoot
     } finally {
         foreach ($entry in @(
             @{ Name = 'NEXT_DIST_DIR'; Value = $previousDist },
             @{ Name = 'NEXT_TELEMETRY_DISABLED'; Value = $previousTelemetry },
-            @{ Name = 'NODE_OPTIONS'; Value = $previousNodeOptions }
+            @{ Name = 'NODE_OPTIONS'; Value = $previousNodeOptions },
+            @{ Name = 'NODE_ENV'; Value = $previousNodeEnvironment },
+            @{ Name = 'AUTH_SECRET'; Value = $previousAuthSecret },
+            @{ Name = 'MFA_ENCRYPTION_KEY'; Value = $previousMfaEncryptionKey },
+            @{ Name = 'MFA_LOCAL_BYPASS'; Value = $previousMfaLocalBypass },
+            @{ Name = 'APP_VERSION'; Value = $previousAppVersion }
         )) {
             Set-Item -Path "Env:$($entry.Name)" -Value $entry.Value -ErrorAction SilentlyContinue
             if ($null -eq $entry.Value) { Remove-Item -Path "Env:$($entry.Name)" -ErrorAction SilentlyContinue }
@@ -187,7 +238,8 @@ function Write-CurrentState {
         health_ok = [bool]$Health.Ok
         ready_ok = [bool]$Ready.Ok
         url = "http://$($config.Host):$($config.Port)"
-        next_dist_dir = $config.NextDistDir
+        mode = $Mode
+        next_dist_dir = $selectedNextDistDir
     })
     if ($Status -ne $lastLoggedStatus) {
         Write-BdexLocalSupervisorLog -Config $config -Message "$Status - $Message"
@@ -197,7 +249,7 @@ function Write-CurrentState {
 
 try {
     if (Test-Path -LiteralPath $config.StopFile) { Remove-Item -LiteralPath $config.StopFile -Force }
-    Write-BdexLocalSupervisorLog -Config $config -Message "Supervisor iniciado. PID $PID."
+    Write-BdexLocalSupervisorLog -Config $config -Message "Supervisor iniciado em modo $Mode. PID $PID."
 
     while (-not (Test-Path -LiteralPath $config.StopFile)) {
         $databaseUp = Test-BdexTcpPort -HostAddress $database.Host -Port $database.Port

@@ -8,7 +8,7 @@ import { requiresAdministrativeMfa } from '@/lib/security/mfa-policy'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import { hydratePrincipalAuthorizationGrants } from '@/lib/server/authorization-grant-service'
 import { hydratePrincipalCorporateAccess } from '@/lib/server/corporate-access-service'
-import { getServerEnvironment } from '@/lib/server/environment'
+import { getServerEnvironment, isLocalMfaBypassEnabled } from '@/lib/server/environment'
 import {
   queryDatabase,
   withDatabaseSecurityContext,
@@ -251,6 +251,7 @@ export async function resolveSession(token: string | null | undefined): Promise<
   const principal = await hydratePrincipalAccess(toPrincipal(row, row.session_id))
   if (
     getServerEnvironment().MFA_ADMIN_REQUIRED &&
+    !isLocalMfaBypassEnabled() &&
     requiresAdministrativeMfa(principal) &&
     principal.authenticationLevel !== 'mfa'
   ) {

@@ -19,12 +19,15 @@ describe('browser-safe temporal inputs', () => {
     expect(temporalInputSource).toContain('input.click()')
     expect(temporalInputSource).toContain('type="button"')
     expect(temporalInputSource).toContain('aria-label={resolvedPickerLabel}')
-    expect(temporalInputSource).toContain('pl-9 pr-10')
+    expect(temporalInputSource).toContain('bbt-temporal-input pr-10')
+    expect(temporalInputSource).toContain("type TemporalKind = 'date' | 'datetime-local' | 'time'")
+    expect(temporalInputSource).toContain('export const TimeInput')
   })
 
   it('scopes native calendar normalization and preserves both themes', () => {
     expect(globalStyles).toContain('.bbt-temporal-control')
     expect(globalStyles).toContain('.bbt-temporal-input::-webkit-calendar-picker-indicator')
+    expect(globalStyles).toContain('.bbt-temporal-input::-webkit-inner-spin-button')
     expect(globalStyles).toContain('.bbt-temporal-input::-webkit-datetime-edit')
     expect(globalStyles).toContain('.bbt-temporal-input::-webkit-date-and-time-value')
     expect(globalStyles).toContain('.dark .bbt-temporal-input')
@@ -58,5 +61,12 @@ describe('browser-safe temporal inputs', () => {
       expect(migratedSource).toContain('function TemporalField')
       expect(migratedSource).toContain('<div>')
     }
+  })
+
+  it('uses the shared temporal control for the air request date and time windows', () => {
+    const airDemandSource = source('components/travel/air-demand-configurator.tsx')
+    expect(airDemandSource.match(/<TimeInput\b/g)).toHaveLength(2)
+    expect(airDemandSource).not.toContain('type="time"')
+    expect(airDemandSource).toContain('function TemporalField')
   })
 })

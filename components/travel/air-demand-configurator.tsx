@@ -3,12 +3,29 @@
 import { ArrowRight, Luggage, Plane, Plus, Trash2 } from 'lucide-react'
 import { useMemo } from 'react'
 
-import { DateInput } from '@/components/ui/date-input'
+import { AirportCombobox } from '@/components/travel/airport-combobox'
+import { AirDemandPassengers } from '@/components/travel/air-demand-passengers'
+import { DateInput, TimeInput } from '@/components/ui/date-input'
+import {
+  airPassengersFromDetails,
+  withAirPassengers,
+  type AirPassengerSelection,
+  type AirPassengerValidationState,
+} from '@/lib/air-demand/passenger-selection'
 import type { AirDemandLeg, ClasseAerea, DetalhesAereo } from '@/types'
+import type { TravelerDirectoryItem } from '@/lib/travelers/types'
 
 interface AirDemandConfiguratorProps {
   value: DetalhesAereo
   onChange: (value: DetalhesAereo) => void
+  companyId?: string
+  legacyPrimaryPassenger?: AirPassengerSelection | null
+  legacyUnlinkedPassengerName?: string
+  onPrimaryPassengerChange?: (
+    value: AirPassengerSelection | null,
+    profile: TravelerDirectoryItem | null,
+  ) => void
+  onPassengerValidationChange?: (value: AirPassengerValidationState) => void
   disabled?: boolean
 }
 
@@ -25,9 +42,26 @@ const CABIN_CLASSES: ClasseAerea[] = [
   'Primeira',
 ]
 
-export function AirDemandConfigurator({ value, onChange, disabled = false }: AirDemandConfiguratorProps) {
+export function AirDemandConfigurator({
+  value,
+  onChange,
+  companyId = '',
+  legacyPrimaryPassenger = null,
+  legacyUnlinkedPassengerName = '',
+  onPrimaryPassengerChange,
+  onPassengerValidationChange,
+  disabled = false,
+}: AirDemandConfiguratorProps) {
   const tripType = value.trip_type || (value.data_volta ? 'round_trip' : 'one_way')
   const legs = useMemo(() => normalizeLegs(value, tripType), [tripType, value])
+  const passengers = useMemo(
+    () => airPassengersFromDetails(value, legacyPrimaryPassenger),
+    [legacyPrimaryPassenger, value],
+  )
+
+  function setPassengers(next: AirPassengerSelection[]) {
+    onChange(withAirPassengers(value as DetalhesAereo & Record<string, unknown>, next))
+  }
 
   function setTripType(nextType: DetalhesAereo['trip_type']) {
     if (!nextType) return
@@ -103,6 +137,16 @@ export function AirDemandConfigurator({ value, onChange, disabled = false }: Air
 
   return (
     <section className="space-y-4 rounded-xl border border-bbt-gray-100 p-4 dark:border-slate-700" aria-labelledby="air-demand-title">
+      <AirDemandPassengers
+        companyId={companyId}
+        value={passengers}
+        onChange={setPassengers}
+        onValidationChange={onPassengerValidationChange}
+        onPrimaryTravelerChange={onPrimaryPassengerChange}
+        legacyUnlinkedPassengerName={legacyUnlinkedPassengerName}
+        disabled={disabled}
+      />
+
       <header>
         <h4 id="air-demand-title" className="flex items-center gap-2 font-semibold text-bbt-primary dark:text-white">
           <Plane className="h-4 w-4 text-bbt-accent" aria-hidden="true" />
@@ -147,25 +191,35 @@ export function AirDemandConfigurator({ value, onChange, disabled = false }: Air
             </div>
 
             <div className="grid gap-3 md:grid-cols-[1fr_auto_1fr] md:items-end">
-              <Field label="Origem *">
-                <input value={leg.origin} onChange={(event) => updateLeg(index, { origin: event.target.value })} disabled={disabled} className="bbt-input uppercase" placeholder="REC - Recife" title="Informe o código IATA de 3 letras, opcionalmente seguido do nome" />
-              </Field>
+              <AirportCombobox
+                label="Origem *"
+                value={leg.origin}
+                onChange={(origin) => updateLeg(index, { origin })}
+                disabled={disabled}
+                required
+                placeholder="Ex.: REC, Recife ou Guararapes"
+              />
               <ArrowRight className="mb-3 hidden h-4 w-4 text-slate-400 md:block" aria-hidden="true" />
-              <Field label="Destino *">
-                <input value={leg.destination} onChange={(event) => updateLeg(index, { destination: event.target.value })} disabled={disabled} className="bbt-input uppercase" placeholder="GYN - Goiânia" title="Informe o código IATA de 3 letras, opcionalmente seguido do nome" />
-              </Field>
+              <AirportCombobox
+                label="Destino *"
+                value={leg.destination}
+                onChange={(destination) => updateLeg(index, { destination })}
+                disabled={disabled}
+                required
+                placeholder="Ex.: GYN, Goiânia ou Santa Genoveva"
+              />
             </div>
 
             <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <Field label="Data *">
+              <TemporalField label="Data *">
                 <DateInput value={leg.departure_date} onChange={(event) => updateLeg(index, { departure_date: event.target.value })} disabled={disabled} aria-label={`Data do trecho ${index + 1}`} />
-              </Field>
-              <Field label="Horário a partir de">
-                <input type="time" value={leg.earliest_time || ''} onChange={(event) => updateLeg(index, { earliest_time: event.target.value })} disabled={disabled} className="bbt-input" />
-              </Field>
-              <Field label="Horário até">
-                <input type="time" value={leg.latest_time || ''} onChange={(event) => updateLeg(index, { latest_time: event.target.value })} disabled={disabled} className="bbt-input" />
-              </Field>
+              </TemporalField>
+              <TemporalField label="Horário a partir de">
+                <TimeInput value={leg.earliest_time || ''} onChange={(event) => updateLeg(index, { earliest_time: event.target.value })} disabled={disabled} aria-label={`Horário inicial do trecho ${index + 1}`} />
+              </TemporalField>
+              <TemporalField label="Horário até">
+                <TimeInput value={leg.latest_time || ''} onChange={(event) => updateLeg(index, { latest_time: event.target.value })} disabled={disabled} aria-label={`Horário final do trecho ${index + 1}`} />
+              </TemporalField>
             </div>
           </article>
         ))}
@@ -249,6 +303,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
       {children}
     </label>
+  )
+}
+
+function TemporalField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="block">
+      <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
+      {children}
+    </div>
   )
 }
 

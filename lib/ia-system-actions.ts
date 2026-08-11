@@ -13,6 +13,10 @@ import { AI_NAME } from '@/lib/branding'
 import { encontrarFuncionarioConfiavel, encontrarFuncionarioPorNomeInteligente } from '@/lib/funcionario-identidade'
 import type { AiActionProposal, PrepareAiAction } from '@/lib/ai-actions'
 import {
+  MANUAL_DEMAND_BOOKING_MODE,
+  shouldSubmitDemandOnCreate,
+} from '@/lib/travel/demand-booking-mode'
+import {
   getSupplierIntegrations,
   selectSuppliersForService,
   supplierSummaryForAI,
@@ -395,6 +399,7 @@ async function fluxoCriarDemanda(pergunta: string, ctx: SystemAIContext, ops: Sy
     funcionario_id: funcionario?.id || null,
     passageiro_nome: passageiro,
     tipo_servico: tipo as any,
+    booking_mode: MANUAL_DEMAND_BOOKING_MODE,
     valor_cotacao: parsed.valor_diaria || 0,
     valor_final: parsed.valor_diaria || 0,
     valor_custo: 0,
@@ -448,7 +453,10 @@ async function fluxoCriarDemanda(pergunta: string, ctx: SystemAIContext, ops: Sy
     actionType: 'create_demand',
     companyId: empresa.id,
     summary: `Criar demanda de ${passageiro}`,
-    payload: { demand: demanda, submit: true },
+    payload: {
+      demand: demanda,
+      submit: shouldSubmitDemandOnCreate(MANUAL_DEMAND_BOOKING_MODE),
+    },
     expiresInMinutes: 30,
   })
 
@@ -462,7 +470,7 @@ async function fluxoCriarDemanda(pergunta: string, ctx: SystemAIContext, ops: Sy
       `Tipo: ${tipo}. Prioridade: ${parsed.urgente ? 'urgente' : 'media'}.`,
       parsed.cidade_destino ? `Destino: ${parsed.cidade_destino}.` : '',
       parsed.data_checkin || parsed.data_ida ? `Data principal: ${formatarDataBR(parsed.data_checkin || parsed.data_ida || '')}.` : '',
-      'Revise os dados abaixo. Nada será gravado até você confirmar; o servidor validará empresa, permissão, política e identidade novamente.',
+      'Revise os dados abaixo. Após sua confirmação, a solicitação offline seguirá para cotação; a aprovação ocorrerá somente depois da escolha de uma opção.',
     ]
       .filter(Boolean)
       .join('\n'),

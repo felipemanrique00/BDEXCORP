@@ -11,5 +11,7 @@ describe('air demand service wiring', () => {
     expect(source).toContain('hasPersistedAirDemandDetailsInTransaction')
     expect(source).toContain('AIR_DEMAND_DETAILS_INVALID')
     expect(source).toContain('demandSnapshotWithAirItinerary')
+    expect(source).toContain('const primaryPassenger = details.passengers?.[0]')
+    expect(source).toContain('employeeId: primaryPassenger?.employeeId || snapshot.employeeId')
   })
 })

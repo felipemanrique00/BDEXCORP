@@ -82,3 +82,79 @@ export interface GeographySyncStatus {
   latestRun: GeographySyncRunStatus | null
   datasetVersion: GeographyDatasetVersion | null
 }
+
+export type GeographyAirportType =
+  | 'large_airport'
+  | 'medium_airport'
+  | 'small_airport'
+  | 'heliport'
+  | 'seaplane_base'
+  | 'balloonport'
+  | 'closed'
+  | 'other'
+
+export interface GeographyAirport {
+  id: string
+  iataCode: string | null
+  icaoCode: string | null
+  ident: string
+  name: string
+  municipality: string | null
+  subdivisionCode: string | null
+  countryCode: string
+  label: string
+  provider: string
+  providerId: string
+  scheduledService: boolean
+  isActive: boolean
+  latitude: number
+  longitude: number
+  timezone: string | null
+  type: GeographyAirportType
+}
+
+export interface AirportCatalogSyncResult {
+  runId: string
+  provider: string
+  datasetKey: 'airports'
+  checksum: string
+  inserted: number
+  updated: number
+  unchanged: number
+  inactivated: number
+  airports: number
+  startedAt: string
+  finishedAt: string
+}
+
+export interface AirportCatalogSyncRunStatus {
+  runId: string
+  provider: string
+  datasetKey: 'airports'
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  inserted: number
+  updated: number
+  unchanged: number
+  inactivated: number
+  errors: number
+  checksum: string | null
+  errorMessage: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
+export interface AirportCatalogDatasetVersion {
+  id: string
+  provider: string
+  datasetKey: 'airports'
+  checksum: string
+  recordCount: number
+  sourceUrl: string | null
+  activatedAt: string
+  createdAt: string
+}
+
+export interface AirportCatalogSyncStatus {
+  latestRun: AirportCatalogSyncRunStatus | null
+  datasetVersion: AirportCatalogDatasetVersion | null
+}

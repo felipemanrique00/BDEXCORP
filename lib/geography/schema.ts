@@ -7,6 +7,13 @@ const queryBooleanSchema = z.preprocess((value) => {
   return value
 }, z.boolean().optional())
 
+const optionalUpperCode = (length: number) => z.string()
+  .trim()
+  .length(length)
+  .regex(/^[A-Za-z0-9]+$/)
+  .transform((value) => value.toUpperCase())
+  .optional()
+
 export const geographySearchSchema = z.object({
   q: z.string().trim().max(160).optional(),
   includeInactive: queryBooleanSchema.default(false),
@@ -49,8 +56,36 @@ export const geographySyncStatusQuerySchema = z.object({
   datasetKey: z.enum(['brazil', 'countries']).default('brazil'),
 }).strict()
 
+export const airportSearchSchema = z.object({
+  q: z.string().trim().max(160).optional(),
+  countryCode: optionalUpperCode(2),
+  subdivisionCode: z.string().trim().min(2).max(16)
+    .regex(/^[A-Za-z0-9-]+$/)
+    .transform((value) => value.toUpperCase())
+    .optional(),
+  scheduledService: queryBooleanSchema,
+  includeInactive: queryBooleanSchema.default(false),
+  includeWithoutIata: queryBooleanSchema.default(false),
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+}).strict()
+
+export const airportCatalogSyncSchema = z.object({
+  provider: z.literal('ourairports').default('ourairports'),
+  datasetKey: z.literal('airports').default('airports'),
+  deactivateMissing: z.boolean().default(true),
+}).strict()
+
+export const airportCatalogSyncStatusQuerySchema = z.object({
+  provider: z.literal('ourairports').default('ourairports'),
+  datasetKey: z.literal('airports').default('airports'),
+}).strict()
+
 export type GeographySearchInput = z.infer<typeof geographySearchSchema>
 export type SubdivisionSearchInput = z.infer<typeof subdivisionSearchSchema>
 export type CitySearchInput = z.infer<typeof citySearchSchema>
 export type GeographySyncInput = z.infer<typeof geographySyncSchema>
 export type GeographySyncStatusQuery = z.infer<typeof geographySyncStatusQuerySchema>
+export type AirportSearchInput = z.infer<typeof airportSearchSchema>
+export type AirportCatalogSyncInput = z.infer<typeof airportCatalogSyncSchema>
+export type AirportCatalogSyncStatusQuery = z.infer<typeof airportCatalogSyncStatusQuerySchema>

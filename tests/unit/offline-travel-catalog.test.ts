@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   OFFLINE_SERVICE_DEFINITIONS,
+  offlineLegacyServiceType,
   offlineSegmentType,
   offlineServiceDefinition,
   offlineServiceFromDemand,
@@ -61,6 +62,11 @@ describe('offline travel catalog', () => {
     expect(offlineServiceFromDemand('Aéreo')).toBe('aereo')
     expect(offlineServiceFromDemand('car')).toBe('locacao')
     expect(offlineServiceFromDemand('bus')).toBe('rodoviario')
+    expect(offlineLegacyServiceType('air')).toBe('Aéreo')
+    expect(offlineLegacyServiceType('hotel')).toBe('Hotel')
+    expect(offlineLegacyServiceType('car')).toBe('Carro')
+    expect(offlineLegacyServiceType('transfer')).toBe('Pacote')
+    expect(offlineLegacyServiceType('bus')).toBe('Outro')
     expect(offlineServiceDefinition('hotelaria').capabilities.formalChoice).toBe(true)
     expect(offlineServiceDefinition('aereo').capabilities.formalChoice).toBe(true)
     expect(offlineServiceDefinition('transfer').capabilities.formalChoice).toBe(false)

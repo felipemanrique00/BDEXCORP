@@ -13,6 +13,7 @@ import { AutomationServiceError } from '@/lib/server/automation-service'
 import { TechIntegrationError } from '@/lib/integrations/tech/tech-errors'
 import { CorporateAccessDeniedError } from '@/lib/server/corporate-access-service'
 import { CorporateFinanceServiceError } from '@/lib/server/corporate-finance-service'
+import { CorporateBrandingServiceError } from '@/lib/server/corporate-branding-error'
 import { CommercialSupplierServiceError } from '@/lib/server/commercial-supplier-service'
 import { CostCenterServiceError } from '@/lib/server/cost-center-service'
 import { DemandServiceError } from '@/lib/server/demand-service'
@@ -59,6 +60,7 @@ export function governanceErrorResponse(error: unknown, requestId: string): Next
     || error instanceof TravelOperationReconciliationError
     || error instanceof VoucherServiceError
     || error instanceof VoucherPresentationServiceError
+    || error instanceof CorporateBrandingServiceError
   ) {
     return NextResponse.json(
       { ok: false, code: error.code, error: error.message, requestId },

@@ -2,7 +2,7 @@
 
 > Arquivo gerado por `npm run inventory:features`. Nao editar manualmente.
 
-Paginas encontradas: **64**. Rotas de API encontradas: **190**.
+Paginas encontradas: **64**. Rotas de API encontradas: **200**.
 
 ## Paginas
 
@@ -128,6 +128,8 @@ Paginas encontradas: **64**. Rotas de API encontradas: **190**.
 | `/api/automations/process` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/automations` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/automations/runs` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/brand-identity-settings/[scopeType]/[scopeId]/logo` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/brand-identity-settings/[scopeType]/[scopeId]` | `GET, PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/commercial-suppliers/[id]/hotel-links/[linkId]/rates/[rateId]` | `PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/commercial-suppliers/[id]/hotel-links/[linkId]/rates` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/commercial-suppliers/[id]/hotel-links/[linkId]` | `PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
@@ -141,6 +143,7 @@ Paginas encontradas: **64**. Rotas de API encontradas: **190**.
 | `/api/demands/[id]/assignment` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands/[id]` | `GET, PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands/[id]/status` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/demands/agency-options` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands/import/[jobId]/rollback` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands/import` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/demands` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
@@ -160,6 +163,9 @@ Paginas encontradas: **64**. Rotas de API encontradas: **190**.
 | `/api/finance/entries/[id]/settle` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/finance/entries` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/finance/entries/sync-demands` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/geography/airlines` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/geography/airports` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/geography/airports/sync` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/geography/cities` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/geography/countries` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/geography/subdivisions` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
@@ -195,8 +201,11 @@ Paginas encontradas: **64**. Rotas de API encontradas: **190**.
 | `/api/integrations/wintour/emissor-mappings` | `GET, PUT, DELETE` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/intelligence/insights/[fingerprint]` | `PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/intelligence/overview` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/me/branding-logo/[id]` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/me/corporate-contexts` | `GET, PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/me/effective-branding` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/navigation-summary` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/offline-travel/air/quotes` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/offline-travel/hotel-rate-suggestions` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/offline-travel/quotes/[id]/select` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/offline-travel/quotes` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
@@ -252,6 +261,7 @@ Paginas encontradas: **64**. Rotas de API encontradas: **190**.
 | `/api/users/directory` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/users` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/voucher-presentation-settings/[scopeType]/[scopeId]` | `GET, PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/vouchers/[id]/email` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/vouchers/[id]` | `GET, PATCH, DELETE` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/vouchers/batch` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/vouchers` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |

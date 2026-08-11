@@ -19,6 +19,11 @@ import type { Funcionario, Cargo } from '@/types'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { DateInput } from '@/components/ui/date-input'
+import { commitPendingRemoteStorage } from '@/lib/storage-quota'
+import {
+  validateEmployeeAirProfileForm,
+  type EmployeeAirProfileFormErrors,
+} from '@/lib/travelers/employee-air-profile-form'
 
 const CARGOS: Cargo[] = ['Diretor', 'Gerente', 'Colaborador']
 const FUNCIONARIOS_PER_PAGE = 100
@@ -341,12 +346,33 @@ function FuncionariosInner() {
           onClose={() => { setModalOpen(false); setEditing(null) }}
           editing={editing}
           empresas={empresasPermitidas}
-          onSave={(data) => {
+          onSave={async (data) => {
             if (editing) {
               updateFuncionario(editing.id, { ...data, cpf: onlyDigits(data.cpf || ''), telefone: onlyDigits(data.telefone || '') })
+              try {
+                await commitPendingRemoteStorage()
+              } catch (error) {
+                updateFuncionario(editing.id, editing)
+                throw new Error(
+                  error instanceof Error
+                    ? error.message
+                    : 'Não foi possível confirmar a atualização no servidor.',
+                )
+              }
               toast.success('Funcionário atualizado!')
             } else {
-              addFuncionario({ ...data, cpf: onlyDigits(data.cpf || ''), telefone: onlyDigits(data.telefone || ''), ativo: true } as any)
+              const created = addFuncionario({ ...data, cpf: onlyDigits(data.cpf || ''), telefone: onlyDigits(data.telefone || ''), ativo: true } as any)
+              if (!created) throw new Error('Não foi possível preparar o cadastro do funcionário.')
+              try {
+                await commitPendingRemoteStorage()
+              } catch (error) {
+                deleteFuncionario(created.id)
+                throw new Error(
+                  error instanceof Error
+                    ? error.message
+                    : 'Não foi possível confirmar o cadastro no servidor.',
+                )
+              }
               toast.success('Funcionário cadastrado!')
             }
             setModalOpen(false); setEditing(null)
@@ -381,7 +407,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   onClose: () => void
   editing: Funcionario | null
   empresas: any[]
-  onSave: (data: Partial<Funcionario>) => void
+  onSave: (data: Partial<Funcionario>) => Promise<void>
 }) {
   const [form, setForm] = useState<Partial<Funcionario>>(editing || {
     nome: '', cpf: '', email: '', telefone: '', data_nascimento: '',
@@ -400,6 +426,8 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   const [costCentersLoading, setCostCentersLoading] = useState(false)
   const [costCentersUnavailable, setCostCentersUnavailable] = useState(false)
   const [costCentersLoaded, setCostCentersLoaded] = useState(false)
+  const [airProfileErrors, setAirProfileErrors] = useState<EmployeeAirProfileFormErrors>({})
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open || !form.company_id) {
@@ -454,9 +482,25 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
     && !costCenters.some((item) => item.id === form.cost_center_id),
   )
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
-    if (!form.nome || !form.company_id) { toast.error('Preencha nome e empresa.'); return }
+    if (saving) return
+    if (!form.company_id) { toast.error('Selecione a empresa do funcionário.'); return }
+    const airProfile = validateEmployeeAirProfileForm({
+      nome: form.nome,
+      cpf: form.cpf,
+      data_nascimento: form.data_nascimento,
+    })
+    setAirProfileErrors(airProfile.errors)
+    if (!airProfile.ok) {
+      toast.error(
+        airProfile.errors.nome
+        || airProfile.errors.cpf
+        || airProfile.errors.data_nascimento
+        || 'Revise os dados obrigatórios do passageiro.',
+      )
+      return
+    }
     if (costCentersLoading) {
       toast.error('Aguarde o carregamento dos centros de custo.')
       return
@@ -465,7 +509,23 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
       toast.error('O centro de custo do funcionário está inativo ou indisponível. Selecione outro centro ou remova o vínculo.')
       return
     }
-    onSave(form)
+    setSaving(true)
+    try {
+      await onSave({
+        ...form,
+        nome: airProfile.normalized.nome,
+        cpf: airProfile.normalized.cpf,
+        data_nascimento: airProfile.normalized.data_nascimento,
+      })
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : 'Não foi possível confirmar o cadastro no servidor. Tente novamente.',
+      )
+    } finally {
+      setSaving(false)
+    }
   }
 
   async function handleDocumento(file: File) {
@@ -505,6 +565,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   }
 
   function aplicarDocumentoNoFormulario(parsed: DocumentoFuncionarioExtraido) {
+    setAirProfileErrors({})
     setForm((current) => ({
       ...current,
       nome: parsed.nome || current.nome,
@@ -530,7 +591,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={editing ? 'Editar Funcionário' : 'Novo Funcionário'} size="lg">
+    <Modal open={open} onClose={() => { if (!saving) onClose() }} title={editing ? 'Editar Funcionário' : 'Novo Funcionário'} size="lg">
       <form onSubmit={submit} className="space-y-4">
         <div
           onDragOver={(e) => e.preventDefault()}
@@ -595,6 +656,10 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
           )}
         </div>
 
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
+          Para emissão aérea, o cadastro precisa ter nome e sobrenome, CPF válido e data de nascimento.
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="ID do funcionario">
             <input
@@ -603,7 +668,29 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
               disabled
             />
           </Field>
-          <Field label="Nome *"><input required value={form.nome || ''} onChange={(e) => setForm({ ...form, nome: e.target.value })} className="bbt-input" autoFocus /></Field>
+          <Field label="Nome completo *" htmlFor="employee-full-name">
+            <input
+              id="employee-full-name"
+              required
+              value={form.nome || ''}
+              onInvalid={(e) => e.currentTarget.setCustomValidity('Informe o nome completo do passageiro.')}
+              onChange={(e) => {
+                e.currentTarget.setCustomValidity('')
+                setForm({ ...form, nome: e.target.value })
+                setAirProfileErrors((current) => ({ ...current, nome: undefined }))
+              }}
+              aria-invalid={Boolean(airProfileErrors.nome)}
+              aria-describedby={airProfileErrors.nome ? 'employee-full-name-error' : undefined}
+              className={`bbt-input ${airProfileErrors.nome ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20' : ''}`}
+              placeholder="Primeiro nome e sobrenome"
+              autoFocus
+            />
+            {airProfileErrors.nome && (
+              <p id="employee-full-name-error" role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {airProfileErrors.nome}
+              </p>
+            )}
+          </Field>
           <div className="md:col-span-2">
             <Field label="Nomes vindos de relatorios/importacoes">
               <textarea
@@ -618,10 +705,53 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
               Use este campo para vincular nomes diferentes que aparecem em Wintour, companhias aereas ou hoteis ao mesmo ID deste funcionario.
             </p>
           </div>
-          <Field label="CPF"><input value={form.cpf || ''} onChange={(e) => setForm({ ...form, cpf: e.target.value })} className="bbt-input" /></Field>
+          <Field label="CPF *" htmlFor="employee-cpf">
+            <input
+              id="employee-cpf"
+              required
+              inputMode="numeric"
+              value={form.cpf || ''}
+              onInvalid={(e) => e.currentTarget.setCustomValidity('Informe um CPF válido para o passageiro.')}
+              onChange={(e) => {
+                e.currentTarget.setCustomValidity('')
+                setForm({ ...form, cpf: e.target.value })
+                setAirProfileErrors((current) => ({ ...current, cpf: undefined }))
+              }}
+              aria-invalid={Boolean(airProfileErrors.cpf)}
+              aria-describedby={airProfileErrors.cpf ? 'employee-cpf-error' : undefined}
+              className={`bbt-input ${airProfileErrors.cpf ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20' : ''}`}
+              placeholder="000.000.000-00"
+            />
+            {airProfileErrors.cpf && (
+              <p id="employee-cpf-error" role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {airProfileErrors.cpf}
+              </p>
+            )}
+          </Field>
           <Field label="E-mail"><input type="email" value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} className="bbt-input" /></Field>
           <Field label="Telefone"><input value={form.telefone || ''} onChange={(e) => setForm({ ...form, telefone: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Data de Nascimento" htmlFor="employee-birth-date"><DateInput id="employee-birth-date" value={form.data_nascimento || ''} onChange={(e) => setForm({ ...form, data_nascimento: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Data de Nascimento *" htmlFor="employee-birth-date">
+            <DateInput
+              id="employee-birth-date"
+              required
+              max={todayISODate()}
+              value={form.data_nascimento || ''}
+              onInvalid={(e) => e.currentTarget.setCustomValidity('Informe uma data de nascimento real e que não esteja no futuro.')}
+              onChange={(e) => {
+                e.currentTarget.setCustomValidity('')
+                setForm({ ...form, data_nascimento: e.target.value })
+                setAirProfileErrors((current) => ({ ...current, data_nascimento: undefined }))
+              }}
+              aria-invalid={Boolean(airProfileErrors.data_nascimento)}
+              aria-describedby={airProfileErrors.data_nascimento ? 'employee-birth-date-error' : undefined}
+              className={airProfileErrors.data_nascimento ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20' : ''}
+            />
+            {airProfileErrors.data_nascimento && (
+              <p id="employee-birth-date-error" role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {airProfileErrors.data_nascimento}
+              </p>
+            )}
+          </Field>
           <Field label="Tipo Documento">
             <select value={form.documento_tipo || ''} onChange={(e) => setForm({ ...form, documento_tipo: e.target.value as any })} className="bbt-input">
               <option value="">Nao informado</option>
@@ -717,8 +847,10 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
         </div>
         <Field label="Preferências"><textarea value={form.preferencias || ''} onChange={(e) => setForm({ ...form, preferencias: e.target.value })} rows={2} className="bbt-input" /></Field>
         <div className="flex justify-end gap-2 pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
-          <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
-          <button type="submit" className="bbt-button-primary">{editing ? 'Salvar' : 'Cadastrar'}</button>
+          <button type="button" onClick={onClose} disabled={saving} className="bbt-button-ghost disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
+          <button type="submit" disabled={saving} className="bbt-button-primary disabled:cursor-not-allowed disabled:opacity-60">
+            {saving ? 'Salvando...' : editing ? 'Salvar' : 'Cadastrar'}
+          </button>
         </div>
       </form>
     </Modal>

@@ -30,7 +30,7 @@ describe('tenant reset policy', () => {
       'air_reservation_segments',
       'air_emission_tickets',
     ]))
-    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(171)
+    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(173)
     expect(TENANT_RESET_PRESERVED_TABLES).toHaveLength(17)
   })
 

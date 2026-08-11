@@ -127,9 +127,14 @@ export function extractHotelQuoteApprovalSummary(
   const snapshot = parseSnapshot(subject.quoteSnapshot)
   if (!snapshot) return null
 
+  const service = approvalQuoteService(snapshot.serviceKey)
+    || approvalQuoteService(subject.product)
+  if (service && service !== 'hotelaria') return null
+
   const quote = asRecord(snapshot.quote)
   const demand = asRecord(snapshot.demand)
   const option = asRecord(snapshot.option)
+  if (asRecord(option?.air)) return null
   const hotel = asRecord(option?.hotel)
   const breakdown = asRecord(option?.breakdown)
 
@@ -178,7 +183,10 @@ export function extractAirQuoteApprovalSummary(
   subject: Record<string, unknown>,
 ): AirQuoteApprovalSummary | null {
   const snapshot = parseSnapshot(subject.quoteSnapshot)
-  if (!snapshot || text(snapshot.serviceKey) !== 'aereo') return null
+  if (!snapshot) return null
+  const service = approvalQuoteService(snapshot.serviceKey)
+    || approvalQuoteService(subject.product)
+  if (service !== 'aereo') return null
 
   const quote = asRecord(snapshot.quote)
   const demand = asRecord(snapshot.demand)
@@ -256,11 +264,11 @@ export function buildApprovalSubjectPresentation(
   subject: Record<string, unknown>,
   context: ApprovalPresentationContext = {},
 ): ApprovalSubjectPresentation {
-  const hotelQuote = extractHotelQuoteApprovalSummary(subject)
-  if (hotelQuote) return { kind: 'hotel_quote', hotelQuote }
   const airQuote = extractAirQuoteApprovalSummary(subject)
-  return airQuote
-    ? { kind: 'air_quote', airQuote }
+  if (airQuote) return { kind: 'air_quote', airQuote }
+  const hotelQuote = extractHotelQuoteApprovalSummary(subject)
+  return hotelQuote
+    ? { kind: 'hotel_quote', hotelQuote }
     : { kind: 'business', business: extractApprovalBusinessSummary(subject, context) }
 }
 
@@ -314,6 +322,7 @@ export function approvalPolicyLabel(value: string): string {
   const normalized = value.trim().toLocaleLowerCase('pt-BR')
   const labels: Record<string, string> = {
     'local-hotel-selection-approval': 'Aprovação da cotação de hotel escolhida',
+    'local-air-selection-approval': 'Aprovação da cotação aérea escolhida',
     'approval.dual-merit-cost': 'Aprovação de mérito e custo',
     'approval.international': 'Aprovação para viagem internacional',
     'approval.expiry-deadline': 'Prazo de aprovação em risco',
@@ -368,6 +377,18 @@ function parseSnapshot(value: unknown): Record<string, unknown> | null {
     }
   }
   return asRecord(value)
+}
+
+function approvalQuoteService(value: unknown): 'hotelaria' | 'aereo' | 'other' | null {
+  const source = text(value)
+  if (!source) return null
+  const normalized = source
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('pt-BR')
+  if (normalized === 'aereo' || normalized === 'air' || normalized === 'flight') return 'aereo'
+  if (normalized === 'hotelaria' || normalized === 'hotel' || normalized === 'hospedagem') return 'hotelaria'
+  return 'other'
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

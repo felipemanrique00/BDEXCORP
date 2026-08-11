@@ -93,6 +93,10 @@ export const detalhesAereoSchema = z.object({
   baggage_pieces: z.number().int().min(0).max(10).optional(),
   flexible_dates: z.boolean().optional(),
   flexible_times: z.boolean().optional(),
+  passengers: z.array(z.object({
+    employee_id: z.string().trim().min(1).max(200),
+    name: z.string().trim().min(2).max(300),
+  }).strict()).min(1).max(100).optional(),
   trechos: z.array(z.object({
     sequence: z.number().int().positive(),
     direction: z.enum(['outbound', 'return', 'multi_city']).optional(),
@@ -109,6 +113,16 @@ export const detalhesAereoSchema = z.object({
     latest_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional().or(z.literal('')),
   }).strict()).min(1).max(12).optional(),
 }).superRefine((details, context) => {
+  if (details.passengers) {
+    const employeeIds = details.passengers.map((passenger) => passenger.employee_id)
+    if (new Set(employeeIds).size !== employeeIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['passengers'],
+        message: 'O mesmo passageiro pode ser informado somente uma vez.',
+      })
+    }
+  }
   const legs = details.trechos || []
   legs.forEach((leg, index) => {
     if (leg.earliest_time && leg.latest_time && leg.latest_time < leg.earliest_time) {

@@ -23,6 +23,14 @@ const voucherPage = readFileSync(
   resolve(process.cwd(), 'app/dashboard/vouchers/[id]/page.tsx'),
   'utf8',
 )
+const voucherDocument = readFileSync(
+  resolve(process.cwd(), 'components/vouchers/voucher-document.tsx'),
+  'utf8',
+)
+const voucherDocumentModel = readFileSync(
+  resolve(process.cwd(), 'lib/vouchers/document-model.ts'),
+  'utf8',
+)
 
 describe('voucher presentation settings UI wiring', () => {
   it('adds a company Voucher tab only for viewers and delegates editing permission', () => {
@@ -68,12 +76,18 @@ describe('voucher presentation settings UI wiring', () => {
   it('does not return an old persisted PDF when current rules hide voucher sections', () => {
     expect(travelerVoucherDownloadRoute).toContain('getTravelerVoucherDownloadDescriptor')
     expect(travelerVoucherDownloadRoute).toContain('requiresSanitizedVoucherRendering')
-    expect(travelerVoucherDownloadRoute).toContain('renderVoucherHtml(descriptor.voucher, true)')
+    expect(travelerVoucherDownloadRoute).toContain('const html = renderVoucherHtml(')
+    expect(travelerVoucherDownloadRoute).toContain('descriptor.voucher,')
+    expect(travelerVoucherDownloadRoute).toContain("toVoucherDocumentAssets(assets, 'data-uri'")
     expect(travelerVoucherDownloadRoute).toContain("'X-Voucher-Presentation': 'sanitized'")
   })
 
   it('uses cancellation content instead of service type to render the controlled section', () => {
-    expect(voucherPage).toContain('presentation.showCancellationTerms && hasVoucherCancellationContent(voucher)')
-    expect(voucherPage).not.toContain("presentation.showCancellationTerms && voucher.tipo === 'Hotel'")
+    expect(voucherPage).toContain('<VoucherDocument model={documentModel} assets={documentAssets} />')
+    expect(voucherDocumentModel).toContain(
+      'cancellationFields: presentation.showCancellationTerms ? buildCancellationFields(voucher) : []',
+    )
+    expect(voucherDocument).toContain('model.cancellationFields.length > 0')
+    expect(voucherDocument).not.toContain("model.presentation.showCancellationTerms && model.voucherType === 'Hotel'")
   })
 })

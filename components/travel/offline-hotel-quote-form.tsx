@@ -25,6 +25,7 @@ import {
 import { toast } from 'sonner'
 
 import { DateTimeInput } from '@/components/ui/date-input'
+import { DecimalInput } from '@/components/ui/decimal-input'
 import { listHotelCatalog } from '@/lib/hotel-catalog/client'
 import type { HotelCatalogItem, HotelCatalogSupplier } from '@/lib/hotel-catalog/types'
 import { nightsBetween } from '@/lib/hotel-demand/model'
@@ -360,8 +361,8 @@ export function OfflineHotelQuoteForm({
         ...(!suggestion && option.rateId ? {
           mealPlan: '',
           nightlyRate: '',
-          nightlyTaxes: '0',
-          serviceFee: '0',
+          nightlyTaxes: '0,00',
+          serviceFee: '0,00',
           refundable: false,
           cancellationPolicy: '',
           paymentTerms: '',
@@ -1003,23 +1004,7 @@ function MoneyInput({
   onChange: (value: string) => void
   required?: boolean
 }) {
-  return (
-    <div className="relative">
-      <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-xs font-semibold text-slate-400">
-        R$
-      </span>
-      <input
-        type="number"
-        min="0"
-        step="0.01"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="bbt-input pl-10"
-        placeholder="0,00"
-        required={required}
-      />
-    </div>
-  )
+  return <DecimalInput value={value} onValueChange={onChange} prefix="R$" placeholder="0,00" required={required} />
 }
 
 function SummaryItem({
@@ -1079,8 +1064,8 @@ function emptyOptionDraft(clientId: string): QuoteOptionDraft {
     roomCategory: '',
     mealPlan: '',
     nightlyRate: '',
-    nightlyTaxes: '0',
-    serviceFee: '0',
+    nightlyTaxes: '0,00',
+    serviceFee: '0,00',
     refundable: false,
     cancellationDeadline: '',
     cancellationPolicy: '',
@@ -1127,7 +1112,7 @@ function supplierPatch(supplier: HotelCatalogSupplier | undefined): Partial<Quot
 }
 
 function moneyField(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(2) : '0.00'
+  return Number.isFinite(value) ? value.toFixed(2).replace('.', ',') : '0,00'
 }
 
 function changesCatalogRate(patch: Partial<QuoteOptionDraft>): boolean {

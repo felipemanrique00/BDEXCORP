@@ -14,6 +14,7 @@ import type { Hotel } from '@/types'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import { DateInput } from '@/components/ui/date-input'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 
 interface Props {
   open: boolean
@@ -171,7 +172,7 @@ export function RegistrarEmissaoModal({ open, onClose, hotel, empresaIdPadrao, o
         </div>
         <div>
           <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5"><DollarSign className="inline w-3 h-3" /> Valor Total (R$)</label>
-          <input type="number" step="0.01" value={valorTotal || ''} onChange={(e) => setValorTotal(parseFloat(e.target.value) || 0)} className="bbt-input" />
+          <NumericDecimalInput value={valorTotal} emptyValue={0} blankWhenZero onNumberChange={(value) => setValorTotal(value ?? 0)} />
         </div>
         <div>
           <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5">Observações</label>

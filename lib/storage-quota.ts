@@ -30,14 +30,18 @@ export interface RemoteStorageFlushResult {
   rejectedKeys: string[]
 }
 
+export type StorageHydrationResult = 'hydrated' | 'local' | 'failed' | 'superseded'
+
 const STORAGE_API = '/api/storage'
 const REMOTE_SYNC_DEBOUNCE_MS = 450
-const REMOTE_HYDRATE_TIMEOUT_MS = 3500
+// O primeiro acesso em `next dev` pode compilar a API sob demanda. Um limite
+// curto fazia a interface prosseguir com o cache vazio antes da resposta.
+const REMOTE_HYDRATE_TIMEOUT_MS = 10_000
 const LOCAL_COMPACTION_MIN_INTERVAL_MS = 60_000
 const LOCAL_CACHE_ENTRY_LIMIT_CHARS = 512 * 1024
 
 const hydratedRemoteKeys = new Set<SharedStorageKey>()
-const remoteHydratePromises = new Map<string, Promise<boolean>>()
+const remoteHydratePromises = new Map<string, Promise<StorageHydrationResult>>()
 let scopedStorageInitialized = false
 let syncTimer: number | null = null
 let remoteRetryDelayMs = 5_000
@@ -198,12 +202,20 @@ export async function hydrateServerStorage(
   force = false,
   requestedKeys?: readonly SharedStorageKey[],
 ): Promise<boolean> {
-  if (typeof window === 'undefined') return false
+  const result = await hydrateServerStorageWithResult(force, requestedKeys)
+  return result === 'hydrated' || result === 'local'
+}
+
+export async function hydrateServerStorageWithResult(
+  force = false,
+  requestedKeys?: readonly SharedStorageKey[],
+): Promise<StorageHydrationResult> {
+  if (typeof window === 'undefined') return 'failed'
   const normalizedKeys = normalizeHydrationKeys(requestedKeys)
   const keysToFetch = force
     ? normalizedKeys
     : normalizedKeys.filter((key) => !hydratedRemoteKeys.has(key))
-  if (!keysToFetch.length) return true
+  if (!keysToFetch.length) return 'hydrated'
 
   const requestKey = keysToFetch.slice().sort().join(',')
   const inFlight = remoteHydratePromises.get(requestKey)
@@ -220,12 +232,16 @@ export async function hydrateServerStorage(
         cache: 'no-store',
         signal: controller.signal,
       })
-      if (!response.ok) return false
+      if (!response.ok) return 'failed'
       const payload = await response.json()
-      if (!payload?.enabled || !payload?.entries || typeof payload.entries !== 'object') {
-        return false
+      // Um backend que desabilita explicitamente o storage compartilhado em
+      // modo local continua apto a usar o cache do navegador. Erros HTTP,
+      // timeouts e payloads inválidos permanecem falhas reais de hidratação.
+      if (payload?.enabled === false) return 'local'
+      if (!payload?.entries || typeof payload.entries !== 'object') {
+        return 'failed'
       }
-      if (hydrationGeneration !== storageMutationGeneration) return false
+      if (hydrationGeneration !== storageMutationGeneration) return 'superseded'
 
       const remoteEntries = payload.entries as RemoteEntries
       const scoped = payload.scoped === true
@@ -267,12 +283,12 @@ export async function hydrateServerStorage(
       }
 
       keysToFetch.forEach((key) => hydratedRemoteKeys.add(key))
-      return true
+      return 'hydrated'
     } catch (error) {
       if (!(error instanceof DOMException && error.name === 'AbortError')) {
         console.warn('[storage] Falha ao carregar dados compartilhados.', error)
       }
-      return false
+      return 'failed'
     } finally {
       window.clearTimeout(timeout)
       remoteHydratePromises.delete(requestKey)
@@ -450,6 +466,7 @@ function isQuotaError(error: any): boolean {
 
 function queueRemoteSet(key: string, rawValue: string, previousRaw: string | null): void {
   if (typeof window === 'undefined' || !isSharedStorageKey(key) || key === SYSTEM_STORAGE_META_KEY) return
+  storageMutationGeneration += 1
   pendingRemoteDeletes.delete(key)
   const syncValue = createStorageSyncValue(
     key,
@@ -464,6 +481,7 @@ function queueRemoteSet(key: string, rawValue: string, previousRaw: string | nul
 
 function queueRemoteDelete(key: string): void {
   if (typeof window === 'undefined' || !isSharedStorageKey(key) || key === SYSTEM_STORAGE_META_KEY) return
+  storageMutationGeneration += 1
   delete pendingRemoteEntries[key]
   pendingRemoteDeletes.add(key)
   scheduleRemoteFlush()

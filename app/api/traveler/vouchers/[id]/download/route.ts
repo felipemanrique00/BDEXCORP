@@ -3,9 +3,15 @@ import { NextResponse } from 'next/server'
 import { guardApiRequest, runInApiGuardContext } from '@/lib/security/api-guard'
 import { renderVoucherHtml } from '@/lib/assistant/pdf'
 import { writeAuditEvent } from '@/lib/server/audit-log'
+import { getCompanyDocumentBranding } from '@/lib/server/corporate-branding-service'
 import { readStoredFile, StoredFileNotFoundError } from '@/lib/server/file-storage'
 import { logError } from '@/lib/server/logger'
 import { getTravelerVoucherDownloadDescriptor } from '@/lib/server/traveler-portal-service'
+import {
+  resolveVoucherEmailAssets,
+  toVoucherDocumentAssets,
+} from '@/lib/server/voucher-email-assets'
+import { collectVoucherDocumentAirlineCodes } from '@/lib/vouchers/document-model'
 import { requiresSanitizedVoucherRendering } from '@/lib/vouchers/presentation'
 
 export const runtime = 'nodejs'
@@ -41,7 +47,31 @@ export async function GET(
 
     if (requiresSanitizedVoucherRendering(descriptor.presentationSettings)) {
       if (!descriptor.voucher) return sanitizedArtifactUnavailable(guard.requestId)
-      const html = renderVoucherHtml(descriptor.voucher, true)
+      const { branding, logoDataUrl } = await runInApiGuardContext(
+        guard,
+        () => getCompanyDocumentBranding(guard.principal!, descriptor.voucher!.empresa_id),
+      )
+      const documentBranding = {
+        displayName: branding.displayName,
+        logoDataUrl: branding.sources.logoUrl === 'system' ? null : logoDataUrl,
+        primaryColor: branding.primaryColor,
+        accentColor: branding.accentColor,
+        documentLegalName: branding.documentLegalName,
+        documentNumber: branding.documentNumber,
+      }
+      const assets = await resolveVoucherEmailAssets({
+        corporateLogoDataUrl: documentBranding.logoDataUrl,
+        airlineIataCodes: collectVoucherDocumentAirlineCodes(descriptor.voucher),
+      })
+      const html = renderVoucherHtml(
+        descriptor.voucher,
+        true,
+        documentBranding,
+        toVoucherDocumentAssets(assets, 'data-uri', {
+          agencyLogoAlt: 'BBT Corporativo',
+          customerLogoAlt: branding.displayName,
+        }),
+      )
       const bytes = new TextEncoder().encode(html)
       await runInApiGuardContext(
         guard,
@@ -59,7 +89,7 @@ export async function GET(
           'Content-Length': String(bytes.byteLength),
           'Content-Disposition': contentDisposition(`voucher-${id}.html`),
           'Cache-Control': 'no-store, private',
-          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+          'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox",
           'X-Content-Type-Options': 'nosniff',
           'X-Request-Id': guard.requestId,
           'X-Voucher-Presentation': 'sanitized',

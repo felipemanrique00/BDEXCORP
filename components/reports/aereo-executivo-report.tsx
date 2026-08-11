@@ -32,13 +32,14 @@ import {
 } from 'lucide-react'
 
 import { AereoMap } from '@/components/reports/aereo-map'
-import { BBTLogo } from '@/components/branding/bbt-logo'
+import { EffectiveBrandLogo } from '@/components/branding/effective-brand-logo'
+import { useEffectiveBranding } from '@/components/branding/effective-branding-provider'
 import { DateInput } from '@/components/ui/date-input'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { canAccessCompanyPermission, getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
 import { buildCsv, downloadTextFile, imageUrlToDataUrl } from '@/lib/browser-download'
-import { BRAND_LOGO_DARK } from '@/lib/branding'
+import { BRAND_LOGO_DARK, SYSTEM_NAME } from '@/lib/branding'
 import { addDaysISODate, todayISODate } from '@/lib/date'
 import { getEmpresasDoGrupo, resolverEscopoGrupoUsuario } from '@/lib/grupos'
 import {
@@ -70,6 +71,7 @@ export function AereoExecutivoReport({
   userOverride,
   className,
 }: AereoExecutivoReportProps = {}) {
+  const { branding } = useEffectiveBranding()
   const searchParams = useSearchParams()
   const { empresas, funcionarios, gruposEmpresariais } = useStore()
   const { includesCompany } = useCorporateCompanyScope()
@@ -210,10 +212,18 @@ export function AereoExecutivoReport({
   async function exportarHTML() {
     if (!canExport) return
     let logoDataUrl = ''
+    let agencyLogoDataUrl = ''
     try {
-      logoDataUrl = await imageUrlToDataUrl(BRAND_LOGO_DARK)
+      logoDataUrl = await imageUrlToDataUrl(branding.isLogoFallback ? BRAND_LOGO_DARK : branding.logoUrl)
     } catch {
       logoDataUrl = ''
+    }
+    if (!branding.isLogoFallback) {
+      try {
+        agencyLogoDataUrl = await imageUrlToDataUrl(BRAND_LOGO_DARK)
+      } catch {
+        agencyLogoDataUrl = ''
+      }
     }
 
     const html = montarHtmlExportado({
@@ -230,6 +240,10 @@ export function AereoExecutivoReport({
       rotas: relatorio.topRotas.slice(0, 20),
       detalhes: relatorio.detalhes.slice(0, 300),
       logoDataUrl,
+      brandName: branding.isLogoFallback ? SYSTEM_NAME : branding.displayName,
+      agencyLogoDataUrl,
+      primaryColor: branding.primaryColor,
+      accentColor: branding.accentColor,
     })
     downloadTextFile(`relatorio-aereo-${dataInicio}-${dataFim}.html`, html, 'text/html;charset=utf-8')
   }
@@ -238,7 +252,7 @@ export function AereoExecutivoReport({
     <div className={cn('space-y-5 animate-fade-in', className)}>
       <div className="bbt-page-header">
         <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
-          <BBTLogo variant="full" tone="white" size={50} />
+          <EffectiveBrandLogo variant="full" tone="white" size={50} brandedSurface />
           <div>
             <p className="bbt-section-label">Modelo executivo · Aéreo</p>
             <h1 className="bbt-page-title mt-1 flex items-center gap-2">
@@ -569,6 +583,10 @@ function montarHtmlExportado(args: {
   rotas: RankingAereo[]
   detalhes: DetalheAereo[]
   logoDataUrl: string
+  brandName: string
+  agencyLogoDataUrl: string
+  primaryColor: string
+  accentColor: string
 }): string {
   const bars = (title: string, rows: RankingAereo[]) => `
     <section><h2>${title}</h2>${rows.map((row) => `
@@ -578,14 +596,16 @@ function montarHtmlExportado(args: {
   const tableRows = args.detalhes.map((item) => `
     <tr><td>${formatDateBR(item.data)}</td><td>${escapeHtml(item.empresa)}</td><td>${escapeHtml(item.passageiro)}</td><td>${escapeHtml(item.cia)}</td><td>${escapeHtml(item.rota)}</td><td>${formatCurrency(item.total)}</td></tr>
   `).join('')
+  const primaryColor = safeBrandColor(args.primaryColor, '#20265A')
+  const accentColor = safeBrandColor(args.accentColor, '#21BFC5')
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Relatório Aéreo</title><style>
     body{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f6fa;color:#172033}.page{max-width:1180px;margin:0 auto;padding:28px}
-    header{position:relative;overflow:hidden;background:#20265a;color:white;padding:22px;border-radius:8px;box-shadow:0 12px 30px rgba(32,38,90,.16)}header:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:linear-gradient(90deg,#45d0d4 0 38%,#4a3191 38% 76%,#d8a128 76% 100%)}.brand-logo{display:block;width:220px;max-width:100%;height:auto;margin-bottom:16px}h1{margin:0;font-size:30px}h2{font-size:18px;color:#20265a;text-decoration:underline;text-decoration-color:#21bfc5}
-    .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:18px 0}.kpi,section{background:white;border:1px solid #d9e0ea;border-radius:8px;padding:14px}.kpi span{display:block;color:#647084;font-size:12px}.kpi strong{font-size:22px;color:#20265a}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.bar-row{display:flex;justify-content:space-between;font-size:12px;margin-top:10px}.bar{height:12px;background:#e7eaf2;border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:#30377a}
+    header{position:relative;overflow:hidden;background:${primaryColor};color:white;padding:22px;border-radius:8px;box-shadow:0 12px 30px rgba(32,38,90,.16)}header:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:${accentColor}}.brand-logo{display:block;width:220px;max-width:100%;height:auto;margin-bottom:16px}h1{margin:0;font-size:30px}h2{font-size:18px;color:${primaryColor};text-decoration:underline;text-decoration-color:${accentColor}}
+    .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:18px 0}.kpi,section{background:white;border:1px solid #d9e0ea;border-radius:8px;padding:14px}.kpi span{display:block;color:#647084;font-size:12px}.kpi strong{font-size:22px;color:${primaryColor}}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.bar-row{display:flex;justify-content:space-between;font-size:12px;margin-top:10px}.bar{height:12px;background:#e7eaf2;border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:${primaryColor}}
     table{width:100%;border-collapse:collapse;margin-top:12px;background:white}td,th{border-bottom:1px solid #e2e8f0;padding:8px;text-align:left;font-size:12px}th{background:#f8fafc}
     .filters{font-size:12px;color:#475569;margin-top:8px}
-  </style></head><body><div class="page"><header>${args.logoDataUrl ? `<img class="brand-logo" src="${escapeHtml(args.logoDataUrl)}" alt="BBT Corporativo">` : ''}<p>MODELO EXECUTIVO · AÉREO</p><h1>Relatório Aéreo</h1><div class="filters">Periodo ${args.inicio} a ${args.fim}${args.filtros.length ? ' · ' + args.filtros.map(escapeHtml).join(' · ') : ''}</div></header>
+  </style></head><body><div class="page"><header>${args.logoDataUrl ? `<img class="brand-logo" src="${escapeHtml(args.logoDataUrl)}" alt="${escapeHtml(args.brandName)}">` : ''}${args.agencyLogoDataUrl ? '<p>Gestão de viagens por BBT Corporativo</p>' : ''}<p>MODELO EXECUTIVO · AÉREO</p><h1>Relatório Aéreo</h1><div class="filters">Periodo ${args.inicio} a ${args.fim}${args.filtros.length ? ' · ' + args.filtros.map(escapeHtml).join(' · ') : ''}</div></header>
   <div class="kpis"><div class="kpi"><span>Custo Total</span><strong>${formatCurrency(args.total)}</strong></div><div class="kpi"><span>Custo Médio</span><strong>${formatCurrency(args.custoMedio)}</strong></div><div class="kpi"><span>Taxas</span><strong>${formatCurrency(args.taxas)}</strong></div><div class="kpi"><span>Transações</span><strong>${args.transacoes}</strong></div><div class="kpi"><span>Viajantes</span><strong>${args.viajantes}</strong></div></div>
   <div class="grid">${bars('Custo por empresa', args.empresas)}${bars('Top companhias', args.cias)}${bars('Top rotas', args.rotas)}</div>
   <section style="margin-top:14px"><h2>Detalhamento</h2><table><thead><tr><th>Data</th><th>Empresa</th><th>Passageiro</th><th>Cia</th><th>Rota</th><th>Total</th></tr></thead><tbody>${tableRows}</tbody></table></section>
@@ -598,4 +618,9 @@ function escapeHtml(value: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+function safeBrandColor(value: string | null | undefined, fallback: string): string {
+  const normalized = String(value || '').trim().toUpperCase()
+  return /^#[0-9A-F]{6}$/.test(normalized) ? normalized : fallback
 }

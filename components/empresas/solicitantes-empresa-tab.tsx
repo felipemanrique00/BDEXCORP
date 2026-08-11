@@ -21,6 +21,7 @@ import {
 
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 import {
   aplicarSolicitantesEmpresaDoServidor,
   getSolicitantesPorEmpresa,
@@ -610,12 +611,11 @@ function SolicitanteForm({
             )}
           </Field>
           <Field label="Limite por solicitação (R$, 0 = sem limite)">
-            <input
-              type="number"
-              min={0}
+            <NumericDecimalInput
               value={limite}
-              onChange={(e) => setLimite(Number(e.target.value))}
-              className="bbt-input"
+              emptyValue={0}
+              minValue={0}
+              onNumberChange={(value) => setLimite(value ?? 0)}
             />
           </Field>
         </div>

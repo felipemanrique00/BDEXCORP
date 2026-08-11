@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { DateInput } from '@/components/ui/date-input'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 
 function NovoVoucherInner() {
   const router = useRouter()
@@ -346,7 +347,7 @@ function NovoVoucherInner() {
             <Field label="Check-in" htmlFor="voucher-new-checkin"><DateInput id="voucher-new-checkin" value={checkin} onChange={(e) => setCheckin(e.target.value)} className="bbt-input" /></Field>
             <Field label="Check-out" htmlFor="voucher-new-checkout"><DateInput id="voucher-new-checkout" value={checkout} onChange={(e) => setCheckout(e.target.value)} className="bbt-input" /></Field>
             <Field label="Noites"><input value={noites} readOnly className="bbt-input bg-slate-50 dark:bg-slate-800" /></Field>
-            <Field label="Valor Diária (R$)"><input type="number" step="0.01" value={valorDiaria} onChange={(e) => setValorDiaria(Number(e.target.value))} className="bbt-input" /></Field>
+            <Field label="Valor Diária (R$)"><NumericDecimalInput value={valorDiaria} emptyValue={0} onNumberChange={(value) => setValorDiaria(value ?? 0)} /></Field>
             <Field label="Regime de Alimentação">
               <select value={regime} onChange={(e) => setRegime(e.target.value)} className="bbt-input">
                 <option>CAFÉ DA MANHÃ</option>
@@ -419,10 +420,10 @@ function NovoVoucherInner() {
         <h2 className="font-semibold text-sm flex items-center gap-2"><DollarSign className="w-4 h-4 text-bbt-accent" /> Financeiro</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <Field label="Tarifa Total (R$)">
-            <input type="number" step="0.01" value={tarifaTotal} onChange={(e) => setTarifaTotal(Number(e.target.value))} className="bbt-input" />
+            <NumericDecimalInput value={tarifaTotal} emptyValue={0} onNumberChange={(value) => setTarifaTotal(value ?? 0)} />
           </Field>
           <Field label="Taxas (R$)">
-            <input type="number" step="0.01" value={taxas} onChange={(e) => setTaxas(Number(e.target.value))} className="bbt-input" />
+            <NumericDecimalInput value={taxas} emptyValue={0} onNumberChange={(value) => setTaxas(value ?? 0)} />
           </Field>
           <Field label="TOTAL">
             <input value={`R$ ${totalCalculado.toFixed(2)}`} readOnly className="bbt-input bg-bbt-accent/10 font-bold text-bbt-primary" />

@@ -8,6 +8,7 @@ import { minorUnitsToMoney, moneyToMinorUnits } from '@/lib/offline-travel/money
 import { calculateAirQuotePricing, type AirQuotePricing } from '@/lib/offline-travel/services/air/pricing'
 import type {
   OfflineAirQuoteListReadModel,
+  OfflineAirDemandPassengerReadModel,
   OfflineAirQuoteOptionReadModel,
   OfflineAirQuoteReadModel,
   OfflineAirQuoteSegmentReadModel,
@@ -54,6 +55,14 @@ interface AirDemandLegRow extends QueryResultRow {
   destination_code: string
   destination_name: string | null
   departure_date: string | Date
+}
+
+interface AirDemandPassengerRow extends QueryResultRow {
+  id: string
+  employee_id: string | null
+  name_snapshot: string
+  traveler_sequence: string | number | null
+  identification_code: string | null
 }
 
 interface PreparedAirOption {
@@ -123,8 +132,10 @@ interface AirQuoteRow extends QueryResultRow {
   equipment: string | null
   selection_id: string | null
   selection_status: string | null
+  selection_chosen_at: string | Date | null
   approval_instance_id: string | null
   approval_status: string | null
+  approval_completed_at: string | Date | null
 }
 
 export interface OfflineAirQuoteCreationResult {
@@ -265,14 +276,48 @@ export async function listOfflineAirQuotes(
     }
     await requireCompanyAccess(principal, demand.company_id, 'ver_reservas')
     await assertRequesterOwnsDemand(client, principal, demand)
-    const rows = await loadAirQuoteRows(client, principal.tenantId, normalizedDemandId)
+    const [rows, passengers] = await Promise.all([
+      loadAirQuoteRows(client, principal.tenantId, normalizedDemandId),
+      loadAirDemandPassengers(client, principal.tenantId, normalizedDemandId),
+    ])
     return {
       demandId: normalizedDemandId,
       lifecycleStatus: demand.lifecycle_status,
       lifecycleVersion: Number(demand.lifecycle_version),
+      passengers,
       quotes: mapAirQuoteRows(rows),
     }
   })
+}
+
+async function loadAirDemandPassengers(
+  client: PoolClient,
+  tenantId: string,
+  demandId: string,
+): Promise<OfflineAirDemandPassengerReadModel[]> {
+  const result = await client.query<AirDemandPassengerRow>(
+    `select traveler.id, traveler.employee_id, traveler.name_snapshot,
+            traveler.traveler_sequence,
+            coalesce(nullif(employee.identification_code, ''), nullif(employee.registration_code, ''))
+              as identification_code
+     from demand_travelers traveler
+     left join employees employee
+       on employee.tenant_id = traveler.tenant_id
+      and employee.id = traveler.employee_id
+      and employee.company_id = traveler.company_id
+     where traveler.tenant_id = $1 and traveler.demand_id = $2
+       and traveler.deleted_at is null
+     order by traveler.traveler_sequence nulls last,
+              traveler.is_primary desc, traveler.created_at, traveler.id`,
+    [tenantId, demandId],
+  )
+  return result.rows.map((passenger, index) => ({
+    demandTravelerId: passenger.id,
+    employeeId: passenger.employee_id,
+    name: passenger.name_snapshot,
+    sequence: Number(passenger.traveler_sequence) || index + 1,
+    identificationCode: passenger.identification_code,
+  }))
 }
 
 async function prepareAirQuote(
@@ -598,7 +643,9 @@ async function loadAirQuoteRows(
             segment.destination_code, segment.destination_name,
             segment.departs_at, segment.arrives_at, segment.equipment,
             selection.id as selection_id, selection.status as selection_status,
-            selection.approval_instance_id, approval.status as approval_status
+            selection.chosen_at as selection_chosen_at,
+            selection.approval_instance_id, approval.status as approval_status,
+            approval.completed_at as approval_completed_at
      from travel_quotes quote
      join demands demand
        on demand.tenant_id = quote.tenant_id and demand.id = quote.demand_id
@@ -678,8 +725,10 @@ function mapAirQuoteRows(rows: AirQuoteRow[]): OfflineAirQuoteReadModel[] {
         selected: Boolean(row.selection_id),
         selectionId: row.selection_id,
         selectionStatus: row.selection_status,
+        selectedAt: dateTimeOrNull(row.selection_chosen_at),
         approvalInstanceId: row.approval_instance_id,
         approvalStatus: row.approval_status,
+        approvedAt: dateTimeOrNull(row.approval_completed_at),
       }
       options.set(row.option_id, option)
       quote.options.push(option)

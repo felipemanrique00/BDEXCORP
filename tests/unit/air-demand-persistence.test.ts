@@ -76,4 +76,107 @@ describe('air demand relational persistence', () => {
     })
     expect(query).toHaveBeenCalledTimes(1)
   })
+
+  it('canonicalizes and persists every explicitly selected passenger', async () => {
+    const query = vi.fn(async (sqlValue: unknown, _values?: unknown[]) => {
+      const sql = String(sqlValue)
+      if (sql.includes('from demands')) return { rows: [{ exists: 1 }] }
+      if (sql.includes('from employees employee')) {
+        return {
+          rows: [
+            {
+              id: 'employee-a',
+              full_name: 'Maria da Silva',
+              document_number: '52998224725',
+              email: 'maria@example.com',
+              phone: '5511999999999',
+              metadata: { birthDate: '1990-05-20' },
+            },
+            {
+              id: 'employee-b',
+              full_name: 'Joao Souza',
+              document_number: '11144477735',
+              email: 'joao@example.com',
+              phone: null,
+              metadata: { birthDate: '1985-02-10' },
+            },
+          ],
+        }
+      }
+      if (sql.includes('select traveler.id')) {
+        return {
+          rows: [{
+            id: '017e8372-a4bb-4c91-a174-f2320a0e0daa',
+            employee_id: 'employee-a',
+            deleted_at: null,
+          }],
+        }
+      }
+      return { rows: [], rowCount: 1 }
+    })
+    const client = { query } as unknown as PoolClient
+
+    await persistAirDemandDetailsInTransaction(client, {
+      tenantId: 'tenant-a',
+      demandId: 'demand-a',
+      companyId: 'company-a',
+      actorUserId: 'user-a',
+      details: {
+        ...details,
+        passengers: [
+          { employeeId: 'employee-a', name: 'Maria da Silva' },
+          { employeeId: 'employee-b', name: 'Joao Souza' },
+        ],
+      },
+    })
+
+    const statements = query.mock.calls.map(([sql]) => String(sql))
+    expect(statements.some((sql) => sql.includes('update demand_travelers set'))).toBe(true)
+    expect(statements.some((sql) => sql.includes('traveler_sequence = $8'))).toBe(true)
+    expect(statements.some((sql) => sql.includes('first_name_snapshot = $10'))).toBe(true)
+    expect(statements.some((sql) => sql.includes('insert into demand_travelers'))).toBe(true)
+    expect(query.mock.calls.flatMap((call) => call[1] || [])).toContain('52998224725')
+    expect(query.mock.calls.flatMap((call) => call[1] || [])).toEqual(expect.arrayContaining([1, 2]))
+  })
+
+  it('blocks air use when a selected employee lacks the mandatory profile fields', async () => {
+    const query = vi.fn(async (sqlValue: unknown, _values?: unknown[]) => {
+      const sql = String(sqlValue)
+      if (sql.includes('from demands')) return { rows: [{ exists: 1 }] }
+      if (sql.includes('from employees employee')) {
+        return {
+          rows: [{
+            id: 'employee-a',
+            full_name: 'Mononimo',
+            document_number: null,
+            email: null,
+            phone: null,
+            metadata: {},
+          }],
+        }
+      }
+      return { rows: [], rowCount: 1 }
+    })
+    const client = { query } as unknown as PoolClient
+
+    await expect(persistAirDemandDetailsInTransaction(client, {
+      tenantId: 'tenant-a',
+      demandId: 'demand-a',
+      companyId: 'company-a',
+      actorUserId: 'user-a',
+      details: {
+        ...details,
+        passengers: [{ employeeId: 'employee-a', name: 'Mononimo' }],
+      },
+    })).rejects.toMatchObject({
+      code: 'AIR_DEMAND_PASSENGER_PROFILE_INCOMPLETE',
+      status: 422,
+      details: {
+        passengers: [{
+          employeeId: 'employee-a',
+          fields: ['cpf', 'birth_date', 'last_name'],
+        }],
+      },
+    })
+  })
 })

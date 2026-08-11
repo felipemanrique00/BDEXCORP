@@ -8,6 +8,7 @@ import type {
   OfflineAirQuoteReadModel as ServerAirQuote,
   OfflineAirQuoteSegmentReadModel as ServerAirQuoteSegment,
 } from '@/lib/offline-travel/services/air/read-model'
+import { formatDecimalInput } from '@/lib/decimal-input'
 
 import { airQuoteTotalMinor } from './pricing'
 import type {
@@ -48,6 +49,7 @@ export function toOfflineAirQuoteRoundReadModel(quote: ServerAirQuote): OfflineA
   return {
     id: quote.id,
     demandId: quote.demandId,
+    createdAt: quote.createdAt,
     expiresAt: quote.expiresAt,
     options: quote.options.map((option, index) => toUiOption(option, index)),
   }
@@ -125,7 +127,7 @@ function toUiOption(option: ServerAirQuoteOption, index: number): OfflineAirQuot
       taxes: moneyInput(option.pricing.taxes),
       rav: moneyInput(option.pricing.rav),
       rac: moneyInput(option.pricing.rac),
-      exchangeRate: String(option.pricing.exchangeRate),
+      exchangeRate: formatDecimalInput(option.pricing.exchangeRate, 4),
       referenceFare: moneyInput(option.pricing.referenceFare),
       mileage: String(option.pricing.mileage),
     },
@@ -139,6 +141,8 @@ function toUiOption(option: ServerAirQuoteOption, index: number): OfflineAirQuot
     id: option.id,
     optionNumber: index + 1,
     totalMinor: airQuoteTotalMinor(draft.pricing),
+    validatingAirlineCode: option.airlineCode,
+    validatingAirlineName: option.airlineName,
     ...draft,
   }
 }
@@ -212,5 +216,5 @@ function localDateTimeValue(value: string | null | undefined): string {
 }
 
 function moneyInput(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(2) : '0.00'
+  return Number.isFinite(value) ? value.toFixed(2).replace('.', ',') : '0,00'
 }

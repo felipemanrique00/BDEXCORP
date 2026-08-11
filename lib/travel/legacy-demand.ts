@@ -1,7 +1,8 @@
 import { z } from 'zod'
 
+import { DEMAND_BOOKING_MODES } from '@/lib/demands/booking-mode'
 import type { TravelLifecycleStatus } from '@/lib/travel-lifecycle/types'
-import type { Prioridade } from '@/types'
+import type { DemandBookingMode, Prioridade } from '@/types'
 
 const legacyDemandSchema = z.object({
   id: z.string().trim().min(1).max(200),
@@ -15,6 +16,8 @@ const legacyDemandSchema = z.object({
   agente_user_id: z.string().trim().max(200).optional(),
   solicitante_id: z.string().trim().max(200).optional(),
   solicitante_nome: z.string().trim().max(300).optional(),
+  agency_assisted: z.boolean().optional(),
+  booking_mode: z.enum(DEMAND_BOOKING_MODES).optional(),
   cost_center_id: z.string().uuid().nullable().optional(),
   centro_custo: z.string().trim().max(300).optional(),
   projeto_obra: z.string().trim().max(300).optional(),
@@ -39,6 +42,8 @@ export interface RelationalDemandSnapshot {
   id: string
   companyId: string
   requesterId: string | null
+  agencyAssisted: boolean
+  bookingMode: DemandBookingMode | null
   employeeId: string | null
   assignedToUserId: string | null
   demandNumber: string
@@ -121,6 +126,8 @@ function toRelationalDemand(input: z.infer<typeof legacyDemandSchema>): Relation
     id: input.id,
     companyId: input.empresa_id,
     requesterId: input.solicitante_id || null,
+    agencyAssisted: input.agency_assisted === true,
+    bookingMode: input.booking_mode || null,
     employeeId: input.funcionario_id || null,
     assignedToUserId: uuidOrNull(input.agente_user_id),
     demandNumber: input.serial_os || input.id,
@@ -153,6 +160,8 @@ function toRelationalDemand(input: z.infer<typeof legacyDemandSchema>): Relation
       legacySnapshot: input,
       serialOs: input.serial_os || null,
       requesterName: input.solicitante_nome || null,
+      agencyAssisted: input.agency_assisted === true,
+      bookingMode: input.booking_mode || null,
       identityHints: {
         identificationCode: firstText(input.funcionario_codigo, wintour.codigo_identificacao, wintour.codigo_funcionario),
         documentNumber: firstText(input.funcionario_documento, wintour.cpf, wintour.documento),

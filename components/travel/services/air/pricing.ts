@@ -1,4 +1,5 @@
 import { formatMinorUnits, moneyToMinorUnits } from '@/lib/offline-travel/money'
+import { decimalInputToCanonical } from '@/lib/decimal-input'
 
 import type {
   OfflineAirPriceDraft,
@@ -71,11 +72,11 @@ export function createEmptyAirQuoteOption(
     pricing: {
       currency: 'BRL',
       fare: '',
-      taxes: '0',
-      rav: '0',
-      rac: '0',
-      exchangeRate: '1',
-      referenceFare: '0',
+      taxes: '0,00',
+      rav: '0,00',
+      rac: '0,00',
+      exchangeRate: '1,0000',
+      referenceFare: '0,00',
       mileage: '0',
     },
     fareRules: '',
@@ -93,6 +94,15 @@ export function isValidMoneyInput(value: string, required = false): boolean {
   } catch {
     return false
   }
+}
+
+export function isValidDecimalInput(value: string, scale: number, required = false): boolean {
+  const source = String(value || '').trim()
+  if (!source) return !required
+  const canonical = decimalInputToCanonical(source, scale)
+  if (!canonical) return false
+  const parsed = Number(canonical)
+  return Number.isFinite(parsed) && parsed >= 0
 }
 
 function moneyMinorOrZero(value: string): number {

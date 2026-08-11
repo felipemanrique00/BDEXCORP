@@ -4,7 +4,12 @@ import { randomUUID } from 'node:crypto'
 
 import type { PoolClient, QueryResultRow } from 'pg'
 
-import { sha256, type PolicyEvaluationResult, type PolicyScopeContext } from '@/lib/policy'
+import {
+  sha256,
+  type PolicyEvaluationResult,
+  type PolicyResultItem,
+  type PolicyScopeContext,
+} from '@/lib/policy'
 import {
   offlineSegmentType,
   offlineServiceFromDemand,
@@ -12,6 +17,7 @@ import {
   offlineVoucherType,
 } from '@/lib/offline-travel/catalog'
 import { formatMinorUnits, minorUnitsToMoney, moneyToMinorUnits } from '@/lib/offline-travel/money'
+import { offlinePolicyCoverageFingerprint } from '@/lib/offline-travel/policy-coverage'
 import {
   OFFLINE_TRAVEL_SERVICES,
   OFFLINE_TRAVEL_PROVIDER,
@@ -81,6 +87,7 @@ interface DemandRow extends QueryResultRow {
   employee_name: string | null
   employee_department: string | null
   employee_cost_center: string | null
+  metadata: Record<string, unknown>
 }
 
 interface ReservationRow extends QueryResultRow {
@@ -151,6 +158,9 @@ interface OfflineBudgetCommitment extends OfflineBudgetHold {
 interface PolicyEvaluation {
   id: string
   result: PolicyEvaluationResult
+  evaluationRefs: OfflinePolicyEvaluationRef[]
+  policyCoverageFingerprint: string | null
+  approvalIntentHash: string
   approvalInstanceId: string | null
   approvalStatus: string | null
   approvalsSatisfied: boolean
@@ -159,6 +169,37 @@ interface PolicyEvaluation {
   budgetSatisfied: boolean
   budget: OfflineBudgetCandidate | null
   budgetCommitment: OfflineBudgetCommitment | null
+}
+
+interface OfflinePolicyTraveler {
+  demandTravelerId: string | null
+  employeeId: string | null
+  name: string
+  department: string | null
+  costCenter: string | null
+  sequence: number
+}
+
+interface OfflinePolicyEvaluationRef {
+  databaseEvaluationId: string
+  demandTravelerId: string | null
+  employeeId: string | null
+  sequence: number
+}
+
+interface OfflinePolicyTravelerRow extends QueryResultRow {
+  id: string
+  employee_id: string | null
+  name_snapshot: string
+  traveler_sequence: string | number | null
+  is_primary: boolean
+}
+
+interface OfflinePolicyEmployeeRow extends QueryResultRow {
+  id: string
+  full_name: string
+  department: string | null
+  cost_center: string | null
 }
 
 type OfflineApprovalCheckpoint = 'merit' | 'cost' | 'issuance'
@@ -214,6 +255,8 @@ interface OfflineApprovalPreparation {
   employeeId: string | null
   reservationId?: string
   policyEvaluationId: string
+  policyEvaluationRefs: OfflinePolicyEvaluationRef[]
+  policyCoverageFingerprint: string | null
   intentHash: string
   subject: Record<string, unknown>
   requirements: TravelTransitionRequirements
@@ -1276,58 +1319,95 @@ async function evaluateOfflinePolicy(
   reservationId?: string,
   approvalOverride?: OfflineApprovalOverride | null,
 ): Promise<PolicyEvaluation> {
-  const result = await evaluateAndPersistPoliciesInTransaction(client, principal, {
-    companyId: demand.company_id,
-    employeeId: demand.employee_id,
-    demandId: demand.id,
-    reservationId,
-    context: {
-      checkpoint,
-      evaluatedAt: new Date().toISOString(),
-      mode: 'enforce',
-      scopes: policyScopes(demand),
-      facts: policyFacts(demand, checkpoint, payload),
-    },
-  })
-  if (!result.result.passed || result.result.blocks.length) {
+  const travelers = await loadOfflinePolicyTravelers(client, principal.tenantId, demand, checkpoint, payload)
+  const evaluatedAt = new Date().toISOString()
+  const evaluations: Array<{
+    databaseEvaluationId: string
+    result: PolicyEvaluationResult
+    traveler: OfflinePolicyTraveler
+  }> = []
+  for (const traveler of travelers) {
+    const evaluation = await evaluateAndPersistPoliciesInTransaction(client, principal, {
+      companyId: demand.company_id,
+      employeeId: traveler.employeeId,
+      demandId: demand.id,
+      reservationId,
+      context: {
+        checkpoint,
+        evaluatedAt,
+        mode: 'enforce',
+        scopes: policyScopes(demand, traveler),
+        facts: policyFacts(demand, checkpoint, payload, traveler),
+      },
+    })
+    evaluations.push({ ...evaluation, traveler })
+  }
+  const primaryEvaluation = evaluations[0]
+  const policyResult = mergeOfflinePolicyResults(
+    evaluations.map((evaluation) => evaluation.result),
+    checkpoint,
+    evaluatedAt,
+  )
+  const evaluationRefs = evaluations.map((evaluation) => ({
+    databaseEvaluationId: evaluation.databaseEvaluationId,
+    demandTravelerId: evaluation.traveler.demandTravelerId,
+    employeeId: evaluation.traveler.employeeId,
+    sequence: evaluation.traveler.sequence,
+  }))
+  const policyCoverageFingerprint = travelers.every((traveler) => traveler.demandTravelerId)
+    && policyResult.approvalsRequired.length
+      ? offlinePolicyCoverageFingerprint(
+        travelers.map((traveler) => traveler.demandTravelerId as string),
+        policyResult.approvalsRequired,
+      )
+    : null
+  const approvalIntentHash = policyCoverageFingerprint
+    ? sha256({ intentHash, policyCoverageFingerprint })
+    : intentHash
+
+  if (!policyResult.passed || policyResult.blocks.length) {
     throw new OfflineTravelError(
       'OFFLINE_POLICY_BLOCKED',
       'A politica vigente bloqueia esta operacao offline.',
       422,
       {
-        policyEvaluationId: result.databaseEvaluationId,
-        blocks: result.result.blocks.map((item) => ({ code: item.policyCode, message: item.message })),
+        policyEvaluationId: primaryEvaluation.databaseEvaluationId,
+        policyEvaluationIds: evaluationRefs,
+        blocks: policyResult.blocks.map((item) => ({ code: item.policyCode, message: item.message })),
       },
     )
   }
-  if (result.result.justificationsRequired.length && !justification?.trim()) {
+  if (policyResult.justificationsRequired.length && !justification?.trim()) {
     throw new OfflineTravelError(
       'OFFLINE_POLICY_JUSTIFICATION_REQUIRED',
       'Informe a justificativa exigida pela politica.',
       422,
-      { policies: result.result.justificationsRequired.map((item) => item.policyCode) },
+      { policies: policyResult.justificationsRequired.map((item) => item.policyCode) },
     )
   }
-  if (result.result.justificationsRequired.length && justification?.trim()) {
-    await client.query(
-      `insert into travel_policy_justifications (
-         tenant_id, demand_id, company_id, reservation_id, policy_evaluation_id,
-         checkpoint, justification, submitted_by
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8)
-       on conflict (tenant_id, policy_evaluation_id, checkpoint) do update set
-         justification = excluded.justification,
-         submitted_by = excluded.submitted_by`,
-      [
-        principal.tenantId,
-        demand.id,
-        demand.company_id,
-        reservationId || null,
-        result.databaseEvaluationId,
-        checkpoint,
-        justification.trim(),
-        principal.user.id,
-      ],
-    )
+  if (policyResult.justificationsRequired.length && justification?.trim()) {
+    for (const evaluation of evaluations) {
+      if (!evaluation.result.justificationsRequired.length) continue
+      await client.query(
+        `insert into travel_policy_justifications (
+           tenant_id, demand_id, company_id, reservation_id, policy_evaluation_id,
+           checkpoint, justification, submitted_by
+         ) values ($1, $2, $3, $4, $5, $6, $7, $8)
+         on conflict (tenant_id, policy_evaluation_id, checkpoint) do update set
+           justification = excluded.justification,
+           submitted_by = excluded.submitted_by`,
+        [
+          principal.tenantId,
+          demand.id,
+          demand.company_id,
+          reservationId || null,
+          evaluation.databaseEvaluationId,
+          checkpoint,
+          justification.trim(),
+          principal.user.id,
+        ],
+      )
+    }
   }
 
   const expectedApprovalType = checkpoint === 'quotation' ? 'merit' : checkpoint === 'reservation' ? 'cost' : 'issuance'
@@ -1340,19 +1420,58 @@ async function evaluateOfflinePolicy(
     expectedApprovalType,
     demand.id,
     reservationId,
-    intentHash,
+    approvalIntentHash,
+    policyCoverageFingerprint,
   )
-  const documentsSatisfied = result.result.requiredDocuments.length === 0
-    || await demandHasDocuments(client, principal.tenantId, demand)
+  if (approval.coverageMismatch && demand.active_approval_instance_id) {
+    if (demand.active_approval_instance_id !== approval.instanceId) {
+      throw new OfflineTravelError(
+        'OFFLINE_APPROVAL_POLICY_COVERAGE_CHANGED',
+        'Existe outra aprovacao ativa para esta demanda. Atualize a pagina antes de continuar.',
+        409,
+      )
+    }
+    await supersedeOfflineApprovalCoverage(
+      client,
+      principal,
+      demand,
+      approval.instanceId,
+      policyCoverageFingerprint,
+    )
+  }
+  const effectiveApproval = approval.coverageMismatch
+    ? { satisfied: false, status: null, instanceId: null }
+    : approval
+  const missingDocumentEvaluations: typeof evaluations = []
+  for (const evaluation of evaluations) {
+    if (!evaluation.result.requiredDocuments.length) continue
+    const satisfied = await demandHasDocuments(
+      client,
+      principal.tenantId,
+      demand,
+      evaluation.traveler.employeeId,
+    )
+    if (!satisfied) missingDocumentEvaluations.push(evaluation)
+  }
+  const documentsSatisfied = missingDocumentEvaluations.length === 0
   if (!documentsSatisfied) {
     throw new OfflineTravelError(
       'OFFLINE_DOCUMENTS_REQUIRED',
       'Existem documentos obrigatorios pendentes para esta operacao.',
       422,
-      { policies: result.result.requiredDocuments.map((item) => item.policyCode) },
+      {
+        policies: mergePolicyResultItems(
+          missingDocumentEvaluations.flatMap((evaluation) => evaluation.result.requiredDocuments),
+        ).map((item) => item.policyCode),
+        passengers: missingDocumentEvaluations.map((evaluation) => ({
+          demandTravelerId: evaluation.traveler.demandTravelerId,
+          employeeId: evaluation.traveler.employeeId,
+          sequence: evaluation.traveler.sequence,
+        })),
+      },
     )
   }
-  const budgetRequired = result.result.requiredActions.some((item) => item.action === 'require_budget')
+  const budgetRequired = policyResult.requiredActions.some((item) => item.action === 'require_budget')
   const amounts = objectValue(payload.amounts)
   const total = numberValue(amounts.total)
   const currency = String(amounts.currency || 'BRL').trim().toUpperCase()
@@ -1386,13 +1505,16 @@ async function evaluateOfflinePolicy(
     )
   }
   return {
-    id: result.databaseEvaluationId,
-    result: result.result,
-    approvalInstanceId: approval.instanceId,
-    approvalStatus: approval.status,
-    approvalsSatisfied: approval.instanceId
-      ? approval.satisfied
-      : result.result.approvalsRequired.length === 0,
+    id: primaryEvaluation.databaseEvaluationId,
+    result: policyResult,
+    evaluationRefs,
+    policyCoverageFingerprint,
+    approvalIntentHash,
+    approvalInstanceId: effectiveApproval.instanceId,
+    approvalStatus: effectiveApproval.status,
+    approvalsSatisfied: effectiveApproval.instanceId
+      ? effectiveApproval.satisfied
+      : policyResult.approvalsRequired.length === 0,
     documentsSatisfied,
     budgetRequired,
     budgetSatisfied,
@@ -1464,7 +1586,9 @@ async function prepareOfflineApproval(
     employeeId: demand.employee_id,
     reservationId: options.reservationId,
     policyEvaluationId: policy.id,
-    intentHash,
+    policyEvaluationRefs: policy.evaluationRefs,
+    policyCoverageFingerprint: policy.policyCoverageFingerprint,
+    intentHash: policy.approvalIntentHash,
     subject: offlineApprovalSubject(demand, policy, checkpoint, intentHash, payload),
     requirements: options.requirements || policyRequirements(demand, policy, {
       companySelected: true,
@@ -1786,6 +1910,75 @@ async function clearConsumedApproval(
   )
 }
 
+async function supersedeOfflineApprovalCoverage(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demand: DemandRow,
+  approvalInstanceId: string | null,
+  nextCoverageFingerprint: string | null,
+): Promise<void> {
+  if (!approvalInstanceId) return
+  const superseded = await client.query(
+    `update approval_instances set
+       status = 'superseded', completed_at = coalesce(completed_at, now()),
+       version = version + 1, updated_at = now()
+     where tenant_id = $1 and id = $2 and demand_id = $3
+       and status in ('pending', 'in_progress', 'approved')`,
+    [principal.tenantId, approvalInstanceId, demand.id],
+  )
+  if (superseded.rowCount !== 1) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVAL_POLICY_COVERAGE_CHANGED',
+      'A aprovacao anterior mudou durante a reavaliacao. Atualize a pagina e tente novamente.',
+      409,
+    )
+  }
+  await client.query(
+    `update approval_steps set status = 'cancelled', completed_at = now(), version = version + 1
+     where tenant_id = $1 and approval_instance_id = $2
+       and status in ('waiting', 'pending')`,
+    [principal.tenantId, approvalInstanceId],
+  )
+  await client.query(
+    `update approval_assignments assignment set status = 'cancelled', responded_at = now()
+     from approval_steps step
+     where assignment.tenant_id = $1 and step.tenant_id = assignment.tenant_id
+       and step.id = assignment.approval_step_id and step.approval_instance_id = $2
+       and assignment.status = 'pending'`,
+    [principal.tenantId, approvalInstanceId],
+  )
+  await client.query(
+    `update approval_escalations set status = 'cancelled',
+            result = jsonb_build_object('reason', 'policy_coverage_superseded')
+     where tenant_id = $1 and approval_instance_id = $2 and status = 'scheduled'`,
+    [principal.tenantId, approvalInstanceId],
+  )
+  await client.query(
+    `update demands set active_approval_instance_id = null,
+       updated_by = $4, updated_at = now()
+     where tenant_id = $1 and id = $2 and active_approval_instance_id = $3`,
+    [principal.tenantId, demand.id, approvalInstanceId, principal.user.id],
+  )
+  demand.active_approval_instance_id = null
+  await client.query(
+    `insert into approval_events (
+       tenant_id, approval_instance_id, actor_user_id, event_type, payload
+     ) values ($1, $2, $3, 'offline_policy_coverage_superseded', $4::jsonb)`,
+    [
+      principal.tenantId,
+      approvalInstanceId,
+      principal.user.id,
+      JSON.stringify({ demandId: demand.id, nextCoverageFingerprint }),
+    ],
+  )
+  await insertOfflineAudit(client, principal, {
+    action: 'approval.offline.policy_coverage_superseded',
+    entityType: 'approval_instance',
+    entityId: approvalInstanceId,
+    metadata: { demandId: demand.id, nextCoverageFingerprint },
+  })
+}
+
 async function moveOfflineDemandToMeritApproval(
   principal: RequestPrincipal,
   preparation: OfflineApprovalPreparation,
@@ -2009,7 +2202,7 @@ function offlineApprovalSubject(
   demand: DemandRow,
   policy: PolicyEvaluation,
   checkpoint: OfflineApprovalCheckpoint,
-  intentHash: string,
+  businessIntentHash: string,
   payload: Record<string, unknown>,
 ): Record<string, unknown> {
   const amounts = objectValue(payload.amounts)
@@ -2025,7 +2218,10 @@ function offlineApprovalSubject(
     budgetId: policy.budget?.id ?? policy.budgetCommitment?.budgetId ?? null,
     offlineOperation: true,
     offlineCheckpoint: checkpoint,
-    offlineIntentHash: intentHash,
+    offlineIntentHash: policy.approvalIntentHash,
+    offlineBusinessIntentHash: businessIntentHash,
+    offlinePolicyCoverageFingerprint: policy.policyCoverageFingerprint,
+    offlinePolicyEvaluations: policy.evaluationRefs,
   }
 }
 
@@ -2039,6 +2235,7 @@ function offlineApprovalIdempotencyKey(
     reservationId: preparation.reservationId || null,
     workflowCode: preparation.workflowCode,
     intentHash: preparation.intentHash,
+    policyCoverageFingerprint: preparation.policyCoverageFingerprint,
   }).slice(0, 64)}`
 }
 
@@ -2346,8 +2543,8 @@ function approvedAirSelection(
     )
   }
   for (const [index, segment] of segments.entries()) {
-    const departureAt = dateTimeOrNull(segment.departureAt)
-    const arrivalAt = dateTimeOrNull(segment.arrivalAt)
+    const departureAt = approvedAirSegmentDepartureAt(segment)
+    const arrivalAt = approvedAirSegmentArrivalAt(segment)
     if (
       !String(segment.originCode || segment.originName || '').trim()
       || !String(segment.destinationCode || segment.destinationName || '').trim()
@@ -2365,8 +2562,8 @@ function approvedAirSelection(
   }
   const firstSegment = segments[0]
   const lastSegment = segments[segments.length - 1]
-  const startsAt = dateTimeOrNull(snapshotOption.startsAt || firstSegment.departureAt)
-  const endsAt = dateTimeOrNull(snapshotOption.endsAt || lastSegment.arrivalAt)
+  const startsAt = dateTimeOrNull(snapshotOption.startsAt) || approvedAirSegmentDepartureAt(firstSegment)
+  const endsAt = dateTimeOrNull(snapshotOption.endsAt) || approvedAirSegmentArrivalAt(lastSegment)
   if (!startsAt || !endsAt || Date.parse(endsAt) <= Date.parse(startsAt)) {
     throw new OfflineTravelError(
       'OFFLINE_APPROVED_SELECTION_DATES_INVALID',
@@ -2398,6 +2595,15 @@ function approvedAirSelection(
     .filter(Boolean)
   const cabinClass = textValue(firstSegment.cabinClass || firstSegment.className || air.cabinClass)
   const baggagePieces = Number(firstSegment.baggagePieces)
+  const approvedPassengers = (Array.isArray(snapshotDemand.passengers) ? snapshotDemand.passengers : [])
+    .flatMap((item) => {
+      const passenger = objectValue(item)
+      const name = textValue(passenger.name)
+      return name ? [name] : []
+    })
+  const passengerNames = approvedPassengers.length
+    ? approvedPassengers
+    : [demand.passenger_name_snapshot].filter(Boolean)
   const details: OfflineReservationCreateInput['details'] = {
     origin: textValue(firstSegment.originName || firstSegment.originCode) || undefined,
     destination: destination || undefined,
@@ -2405,7 +2611,7 @@ function approvedAirSelection(
     serviceNumber: flightNumbers.join(' / ') || undefined,
     className: cabinClass || undefined,
     category: Number.isFinite(baggagePieces) ? `${baggagePieces} bagagem(ns)` : undefined,
-    passengers: [demand.passenger_name_snapshot].filter(Boolean),
+    passengers: passengerNames,
     evidence: {
       approvedAirQuote: {
         airlineName,
@@ -2454,6 +2660,14 @@ function approvedAirSelection(
       ? air.refundable
       : typeof snapshotOption.refundable === 'boolean' ? snapshotOption.refundable : null,
   }
+}
+
+function approvedAirSegmentDepartureAt(segment: Record<string, unknown>): string | null {
+  return dateTimeOrNull(segment.departsAt || segment.departureAt)
+}
+
+function approvedAirSegmentArrivalAt(segment: Record<string, unknown>): string | null {
+  return dateTimeOrNull(segment.arrivesAt || segment.arrivalAt)
 }
 
 function suppliersDiffer(quoted: string, operational: string): boolean {
@@ -2716,36 +2930,46 @@ async function persistAirEmissionTickets(
       422,
     )
   }
-  const fareMinor = moneyToMinorUnits(reservation.gross_amount)
-  const taxMinor = moneyToMinorUnits(reservation.tax_amount)
   const issuedAt = dateTimeOrNull(input.issuedAt) || new Date().toISOString()
+  const registeredPassengers = (await client.query<{
+    id: string
+    name_snapshot: string
+    traveler_sequence: string | number | null
+  }>(
+    `select id, name_snapshot, traveler_sequence
+     from demand_travelers
+     where tenant_id = $1 and demand_id = $2 and deleted_at is null
+     order by is_primary desc, traveler_sequence nulls last, created_at, id`,
+    [principal.tenantId, demand.id],
+  )).rows
+  const ticketsWithTraveler = matchAirTicketsToTravelers(tickets, registeredPassengers)
 
-  for (const [index, ticket] of tickets.entries()) {
-    const passengerFareMinor = distributedMinorAmount(fareMinor, tickets.length, index)
-    const passengerTaxMinor = distributedMinorAmount(taxMinor, tickets.length, index)
+  for (const ticket of ticketsWithTraveler) {
     await client.query(
       `insert into air_emission_tickets (
-         tenant_id, emission_id, reservation_id, passenger_name, ticket_number,
+         tenant_id, emission_id, reservation_id, demand_traveler_id,
+         passenger_name, ticket_number,
          issuing_airline_code, issuing_airline_name, fare_amount_minor,
          tax_amount_minor, total_amount_minor, currency, status, metadata,
          issued_at, created_by
        ) values (
-         $1, $2, $3, $4, $5,
-         $6, $7, $8,
-         $9, $10, $11, 'issued', $12::jsonb,
-         $13::timestamptz, $14
+         $1, $2, $3, $4::uuid, $5, $6,
+         $7, $8, $9,
+         $10, $11, $12, 'issued', $13::jsonb,
+         $14::timestamptz, $15
        )`,
       [
         principal.tenantId,
         emissionId,
         reservation.id,
+        ticket.demandTravelerId,
         ticket.passengerName,
         ticket.ticketNumber,
         airline.airline_code,
         airline.airline_name,
-        passengerFareMinor,
-        passengerTaxMinor,
-        passengerFareMinor + passengerTaxMinor,
+        0,
+        0,
+        0,
         reservation.currency,
         JSON.stringify({ source: 'offline', documentReference: input.document.reference }),
         issuedAt,
@@ -2761,10 +2985,71 @@ async function persistAirEmissionTickets(
   )
 }
 
+function matchAirTicketsToTravelers(
+  tickets: Array<{ passengerName: string; ticketNumber: string; demandTravelerId: string | null }>,
+  registeredPassengers: Array<{
+    id: string
+    name_snapshot: string
+    traveler_sequence: string | number | null
+  }>,
+): Array<{ passengerName: string; ticketNumber: string; demandTravelerId: string | null }> {
+  if (!registeredPassengers.length) {
+    if (tickets.some((ticket) => ticket.demandTravelerId)) {
+      throw new OfflineTravelError(
+        'OFFLINE_AIR_TICKET_TRAVELER_INVALID',
+        'A demanda legada nao possui identificadores relacionais de passageiros.',
+        422,
+      )
+    }
+    return tickets.map((ticket) => ({ ...ticket, demandTravelerId: null }))
+  }
+  if (tickets.length !== registeredPassengers.length) {
+    throw new OfflineTravelError(
+      'OFFLINE_AIR_TICKETS_PASSENGER_COUNT_MISMATCH',
+      'Informe exatamente um bilhete para cada passageiro da demanda aerea.',
+      422,
+      { passengerCount: registeredPassengers.length, ticketCount: tickets.length },
+    )
+  }
+  if (tickets.some((ticket) => !ticket.demandTravelerId)) {
+    throw new OfflineTravelError(
+      'OFFLINE_AIR_TICKET_TRAVELER_REQUIRED',
+      'Vincule cada bilhete ao passageiro correspondente da demanda.',
+      422,
+    )
+  }
+  const available = new Map(registeredPassengers.map((traveler) => [traveler.id, traveler]))
+  return tickets.map((ticket) => {
+    const traveler = available.get(ticket.demandTravelerId as string)
+    if (!traveler) {
+      throw new OfflineTravelError(
+        'OFFLINE_AIR_TICKET_PASSENGER_MISMATCH',
+        'O identificador do passageiro informado no bilhete nao pertence a demanda aerea ou foi repetido.',
+        422,
+        { demandTravelerId: ticket.demandTravelerId },
+      )
+    }
+    if (normalizePassengerName(traveler.name_snapshot) !== normalizePassengerName(ticket.passengerName)) {
+      throw new OfflineTravelError(
+        'OFFLINE_AIR_TICKET_PASSENGER_NAME_MISMATCH',
+        'O nome informado no bilhete nao corresponde ao passageiro selecionado.',
+        422,
+        { demandTravelerId: traveler.id, passengerName: ticket.passengerName },
+      )
+    }
+    available.delete(traveler.id)
+    return { ...ticket, passengerName: traveler.name_snapshot, demandTravelerId: traveler.id }
+  })
+}
+
+function normalizePassengerName(value: string): string {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
 function airTicketsFromIssue(
   input: OfflineIssueCreateInput,
   fallbackPassengerName: string,
-): Array<{ passengerName: string; ticketNumber: string }> {
+): Array<{ passengerName: string; ticketNumber: string; demandTravelerId: string | null }> {
   const details = objectValue(input.details)
   const rawTickets = Array.isArray(details.airTickets)
     ? details.airTickets
@@ -2772,26 +3057,40 @@ function airTicketsFromIssue(
   const tickets = rawTickets.flatMap((raw) => {
     const ticket = objectValue(raw)
     const passengerName = textValue(ticket.passengerName || ticket.passenger_name)
-    const ticketNumber = textValue(ticket.ticketNumber || ticket.ticket_number)
-    return passengerName && ticketNumber ? [{ passengerName, ticketNumber }] : []
+    const ticketNumber = canonicalAirTicketNumber(ticket.ticketNumber || ticket.ticket_number)
+    const demandTravelerId = textValue(ticket.demandTravelerId || ticket.demand_traveler_id)
+    return passengerName && ticketNumber ? [{
+      passengerName,
+      ticketNumber,
+      demandTravelerId: demandTravelerId || null,
+    }] : []
   })
   if (!tickets.length) {
     const ticketNumber = textValue(input.document.ticketNumber)
       || (input.document.kind === 'bilhete' ? textValue(input.document.reference) : null)
-    if (ticketNumber) tickets.push({ passengerName: fallbackPassengerName, ticketNumber })
+    if (ticketNumber) tickets.push({
+      passengerName: fallbackPassengerName,
+      ticketNumber: canonicalAirTicketNumber(ticketNumber),
+      demandTravelerId: null,
+    })
   }
   const uniqueNumbers = new Set<string>()
-  return tickets.filter((ticket) => {
-    const normalized = ticket.ticketNumber.toLocaleUpperCase('pt-BR')
-    if (uniqueNumbers.has(normalized)) return false
-    uniqueNumbers.add(normalized)
-    return true
-  })
+  for (const ticket of tickets) {
+    if (uniqueNumbers.has(ticket.ticketNumber)) {
+      throw new OfflineTravelError(
+        'OFFLINE_AIR_TICKET_DUPLICATE',
+        'O mesmo numero de bilhete foi informado mais de uma vez.',
+        422,
+        { ticketNumber: ticket.ticketNumber },
+      )
+    }
+    uniqueNumbers.add(ticket.ticketNumber)
+  }
+  return tickets
 }
 
-function distributedMinorAmount(totalMinor: number, count: number, index: number): number {
-  const base = Math.floor(totalMinor / count)
-  return base + (index < totalMinor % count ? 1 : 0)
+function canonicalAirTicketNumber(value: unknown): string {
+  return (textValue(value) || '').toLocaleUpperCase('pt-BR').replace(/\s+/g, '')
 }
 
 async function insertOfflineSegment(
@@ -2864,6 +3163,8 @@ interface AirVoucherSegmentRow extends QueryResultRow {
 
 interface AirVoucherTicketRow extends QueryResultRow {
   passenger_name: string
+  traveler_sequence: string | number | null
+  identification_code: string | null
   ticket_number: string
   issuing_airline_code: string
   issuing_airline_name: string
@@ -2898,11 +3199,23 @@ async function loadAirVoucherData(
       [tenantId, reservationId],
     ),
     client.query<AirVoucherTicketRow>(
-      `select passenger_name, ticket_number, issuing_airline_code, issuing_airline_name
-       from air_emission_tickets
-       where tenant_id = $1 and reservation_id = $2 and emission_id = $3
-         and status = 'issued'
-       order by passenger_name, ticket_number`,
+      `select ticket.passenger_name, traveler.traveler_sequence,
+              coalesce(nullif(employee.identification_code, ''), nullif(employee.registration_code, ''))
+                as identification_code,
+              ticket.ticket_number,
+              ticket.issuing_airline_code, ticket.issuing_airline_name
+       from air_emission_tickets ticket
+       left join demand_travelers traveler
+        on traveler.tenant_id = ticket.tenant_id
+        and traveler.id = ticket.demand_traveler_id
+       left join employees employee
+         on employee.tenant_id = traveler.tenant_id
+        and employee.id = traveler.employee_id
+        and employee.company_id = traveler.company_id
+       where ticket.tenant_id = $1 and ticket.reservation_id = $2
+         and ticket.emission_id = $3 and ticket.status = 'issued'
+       order by traveler.traveler_sequence nulls last,
+                ticket.passenger_name, ticket.ticket_number`,
       [tenantId, reservationId, emissionId],
     ),
   ])
@@ -3005,8 +3318,10 @@ async function createOfflineVoucher(
       saida_em: new Date(segment.departs_at).toISOString(),
       chegada_em: new Date(segment.arrives_at).toISOString(),
     })),
-    bilhetes_aereos: airVoucherData?.tickets.map((ticket) => ({
+    bilhetes_aereos: airVoucherData?.tickets.map((ticket, index) => ({
       passageiro_nome: ticket.passenger_name,
+      passageiro_ordem: Number(ticket.traveler_sequence) || index + 1,
+      passageiro_codigo: ticket.identification_code || undefined,
       numero_bilhete: ticket.ticket_number,
       companhia_codigo: ticket.issuing_airline_code,
       companhia_nome: ticket.issuing_airline_name,
@@ -3561,6 +3876,184 @@ function assertServiceMatchesDemand(demand: DemandRow, serviceKey: OfflineTravel
   )
 }
 
+async function loadOfflinePolicyTravelers(
+  client: PoolClient,
+  tenantId: string,
+  demand: DemandRow,
+  checkpoint: 'quotation' | 'reservation' | 'issuance',
+  payload: Record<string, unknown>,
+): Promise<OfflinePolicyTraveler[]> {
+  const primary: OfflinePolicyTraveler = {
+    demandTravelerId: null,
+    employeeId: demand.employee_id,
+    name: demand.employee_name || demand.passenger_name_snapshot,
+    department: demand.employee_department,
+    costCenter: demand.employee_cost_center || demand.cost_center,
+    sequence: 1,
+  }
+  const service = offlineServiceFromDemand(String(payload.serviceKey || demand.service_type))
+  if (service !== 'aereo' || checkpoint === 'quotation') return [primary]
+
+  const travelers = (await client.query<OfflinePolicyTravelerRow>(
+    `select traveler.id, traveler.employee_id, traveler.name_snapshot,
+            traveler.traveler_sequence, traveler.is_primary
+     from demand_travelers traveler
+     where traveler.tenant_id = $1 and traveler.demand_id = $2
+       and traveler.company_id = $3 and traveler.deleted_at is null
+     order by traveler.is_primary desc,
+              traveler.traveler_sequence nulls last,
+              traveler.created_at, traveler.id
+     for share of traveler`,
+    [tenantId, demand.id, demand.company_id],
+  )).rows
+
+  if (!travelers.length) {
+    if (demandDeclaresAirPassengerContract(demand)) {
+      throw new OfflineTravelError(
+        'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
+        'A demanda aerea multipassageiro nao possui passageiros ativos para avaliacao das politicas.',
+        409,
+      )
+    }
+    if (!demand.employee_id) {
+      throw new OfflineTravelError(
+        'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
+        'A demanda aerea legada nao possui um passageiro principal cadastrado e ativo.',
+        409,
+      )
+    }
+    const legacyEmployee = (await client.query<OfflinePolicyEmployeeRow>(
+      `select employee.id, employee.full_name, employee.department, employee.cost_center
+       from employees employee
+       where employee.tenant_id = $1 and employee.company_id = $2
+         and employee.id = $3 and employee.status = 'active'
+         and employee.deleted_at is null
+       for share of employee`,
+      [tenantId, demand.company_id, demand.employee_id],
+    )).rows[0]
+    if (!legacyEmployee) {
+      throw new OfflineTravelError(
+        'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
+        'O passageiro principal da demanda aerea legada nao esta ativo nesta empresa.',
+        409,
+      )
+    }
+    return [{
+      ...primary,
+      employeeId: legacyEmployee.id,
+      name: demand.passenger_name_snapshot || legacyEmployee.full_name,
+      department: legacyEmployee.department,
+      costCenter: legacyEmployee.cost_center || demand.cost_center,
+    }]
+  }
+
+  const sequences = travelers.map((traveler) => Number(traveler.traveler_sequence))
+  const employeeIds = travelers.flatMap((traveler) => traveler.employee_id ? [traveler.employee_id] : [])
+  const primaryTravelers = travelers.filter((traveler) => traveler.is_primary)
+  if (
+    employeeIds.length !== travelers.length
+    || sequences.some((sequence) => !Number.isInteger(sequence) || sequence < 1)
+    || new Set(sequences).size !== sequences.length
+    || primaryTravelers.length !== 1
+    || primaryTravelers[0].employee_id !== demand.employee_id
+  ) {
+    throw new OfflineTravelError(
+      'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
+      'Os passageiros da demanda aerea estao incompletos ou fora de ordem para avaliacao das politicas.',
+      409,
+    )
+  }
+
+  const employeeRows = (await client.query<OfflinePolicyEmployeeRow>(
+    `select employee.id, employee.full_name, employee.department, employee.cost_center
+     from employees employee
+     where employee.tenant_id = $1 and employee.company_id = $2
+       and employee.id = any($3::text[])
+       and employee.status = 'active' and employee.deleted_at is null
+     for share of employee`,
+    [tenantId, demand.company_id, employeeIds],
+  )).rows
+  const employees = new Map(employeeRows.map((employee) => [employee.id, employee]))
+  const missingEmployeeIds = employeeIds.filter((employeeId) => !employees.has(employeeId))
+  if (missingEmployeeIds.length) {
+    throw new OfflineTravelError(
+      'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
+      'Um ou mais passageiros nao estao ativos na empresa para avaliacao das politicas.',
+      409,
+      { employeeIds: missingEmployeeIds },
+    )
+  }
+
+  return travelers.map((traveler) => {
+    const employee = employees.get(traveler.employee_id as string)!
+    return {
+      demandTravelerId: traveler.id,
+      employeeId: employee.id,
+      name: traveler.name_snapshot || employee.full_name,
+      department: employee.department,
+      costCenter: employee.cost_center || demand.cost_center,
+      sequence: Number(traveler.traveler_sequence),
+    }
+  })
+}
+
+function demandDeclaresAirPassengerContract(demand: DemandRow): boolean {
+  const metadata = objectValue(demand.metadata)
+  const serviceAir = objectValue(objectValue(metadata.serviceDetails).air)
+  const legacy = objectValue(metadata.legacySnapshot)
+  const legacyAir = objectValue(legacy.detalhes_aereo || legacy.airDetails)
+  return [serviceAir.passengers, legacyAir.passengers].some((value) => (
+    Array.isArray(value) && value.length > 0
+  ))
+}
+
+function mergeOfflinePolicyResults(
+  results: PolicyEvaluationResult[],
+  checkpoint: string,
+  evaluatedAt: string,
+): PolicyEvaluationResult {
+  const primary = results[0]
+  if (!primary) {
+    throw new OfflineTravelError(
+      'OFFLINE_POLICY_EVALUATION_MISSING',
+      'Nao foi possivel avaliar as politicas desta operacao offline.',
+      500,
+    )
+  }
+  const resultCore = {
+    passed: results.every((result) => result.passed),
+    errors: mergePolicyResultItems(results.flatMap((result) => result.errors)),
+    warnings: mergePolicyResultItems(results.flatMap((result) => result.warnings)),
+    justificationsRequired: mergePolicyResultItems(
+      results.flatMap((result) => result.justificationsRequired),
+    ),
+    approvalsRequired: mergePolicyResultItems(results.flatMap((result) => result.approvalsRequired)),
+    blocks: mergePolicyResultItems(results.flatMap((result) => result.blocks)),
+    requiredDocuments: mergePolicyResultItems(results.flatMap((result) => result.requiredDocuments)),
+    requiredActions: mergePolicyResultItems(results.flatMap((result) => result.requiredActions)),
+    applicablePolicies: Array.from(new Set(results.flatMap((result) => result.applicablePolicies))),
+    policyVersions: Array.from(new Set(results.flatMap((result) => result.policyVersions))),
+    alternatives: Array.from(new Set(results.flatMap((result) => result.alternatives))),
+    remediation: Array.from(new Set(results.flatMap((result) => result.remediation))),
+    evaluationId: primary.evaluationId,
+    factsHash: sha256(results.map((result) => result.factsHash)),
+    evaluatedAt,
+    checkpoint,
+    mode: primary.mode,
+    decisions: results.flatMap((result) => result.decisions),
+  }
+  return { ...resultCore, resultHash: sha256(resultCore) }
+}
+
+function mergePolicyResultItems(items: PolicyResultItem[]): PolicyResultItem[] {
+  const unique = new Map<string, PolicyResultItem>()
+  for (const item of items) {
+    const key = `${item.policyVersionId}:${item.policyCode}:${item.action}`
+    if (!unique.has(key)) unique.set(key, item)
+  }
+  return Array.from(unique.values())
+}
+
 function policyRequirements(
   demand: DemandRow,
   policy: PolicyEvaluation,
@@ -3578,14 +4071,17 @@ function policyRequirements(
   }
 }
 
-function policyScopes(demand: DemandRow): PolicyScopeContext[] {
+function policyScopes(demand: DemandRow, traveler?: OfflinePolicyTraveler): PolicyScopeContext[] {
+  const employeeId = traveler ? traveler.employeeId : demand.employee_id
+  const department = traveler ? traveler.department : demand.employee_department
+  const costCenter = traveler ? traveler.costCenter : demand.cost_center
   return [
     { type: 'tenant', id: null },
     ...(demand.group_id ? [{ type: 'group' as const, id: demand.group_id }] : []),
     { type: 'company', id: demand.company_id },
-    ...(demand.employee_department ? [{ type: 'department' as const, id: demand.employee_department }] : []),
-    ...(demand.cost_center ? [{ type: 'cost_center' as const, id: demand.cost_center }] : []),
-    ...(demand.employee_id ? [{ type: 'traveler' as const, id: demand.employee_id }] : []),
+    ...(department ? [{ type: 'department' as const, id: department }] : []),
+    ...(costCenter ? [{ type: 'cost_center' as const, id: costCenter }] : []),
+    ...(employeeId ? [{ type: 'traveler' as const, id: employeeId }] : []),
     ...(demand.requester_id ? [{ type: 'requester' as const, id: demand.requester_id }] : []),
   ]
 }
@@ -3594,22 +4090,34 @@ function policyFacts(
   demand: DemandRow,
   checkpoint: string,
   payload: Record<string, unknown>,
+  traveler?: OfflinePolicyTraveler,
 ): Record<string, unknown> {
   const service = String(payload.serviceKey || demand.service_type)
   const amounts = objectValue(payload.amounts)
   const details = objectValue(payload.details)
+  const employeeId = traveler ? traveler.employeeId : demand.employee_id
+  const employeeName = traveler?.name || demand.employee_name || demand.passenger_name_snapshot
+  const department = traveler ? traveler.department : demand.employee_department
+  const costCenter = traveler
+    ? traveler.costCenter
+    : demand.employee_cost_center ?? demand.cost_center
   return {
     tenant: { id: demand.tenant_id },
     organization: { groupId: demand.group_id, companyId: demand.company_id },
     company: { id: demand.company_id, name: demand.company_name, groupId: demand.group_id },
     employee: {
-      id: demand.employee_id,
-      name: demand.employee_name || demand.passenger_name_snapshot,
-      department: demand.employee_department,
-      costCenter: demand.employee_cost_center || demand.cost_center,
-      registered: Boolean(demand.employee_id),
+      id: employeeId,
+      name: employeeName,
+      department,
+      costCenter,
+      registered: Boolean(employeeId),
     },
-    traveler: { id: demand.employee_id, name: demand.employee_name || demand.passenger_name_snapshot },
+    traveler: {
+      id: employeeId,
+      demandTravelerId: traveler?.demandTravelerId || null,
+      name: employeeName,
+      sequence: traveler?.sequence || 1,
+    },
     request: {
       id: demand.id,
       number: demand.demand_number,
@@ -3728,6 +4236,11 @@ function normalizeOfflineAuditValue(value: unknown): unknown {
   return String(value)
 }
 
+function approvalPolicyCoverageFingerprintFromSubject(subject: Record<string, unknown>): string | null {
+  const explicit = textValue(subject.offlinePolicyCoverageFingerprint)
+  return explicit || null
+}
+
 async function approvalState(
   client: PoolClient,
   tenantId: string,
@@ -3736,7 +4249,13 @@ async function approvalState(
   demandId: string,
   reservationId?: string,
   intentHash?: string,
-): Promise<{ satisfied: boolean; status: string | null; instanceId: string | null }> {
+  policyCoverageFingerprint?: string | null,
+): Promise<{
+  satisfied: boolean
+  status: string | null
+  instanceId: string | null
+  coverageMismatch?: boolean
+}> {
   if (!approvalInstanceId) return { satisfied: false, status: null, instanceId: null }
   const result = await client.query<{
     status: string
@@ -3760,6 +4279,17 @@ async function approvalState(
   }
   const subject = objectValue(instance.subject_snapshot)
   if (
+    policyCoverageFingerprint
+    && approvalPolicyCoverageFingerprintFromSubject(subject) !== policyCoverageFingerprint
+  ) {
+    return {
+      satisfied: false,
+      status: instance.status,
+      instanceId: approvalInstanceId,
+      coverageMismatch: true,
+    }
+  }
+  if (
     subject.offlineOperation === true
     && (!intentHash || subject.offlineIntentHash !== intentHash)
   ) {
@@ -3772,8 +4302,13 @@ async function approvalState(
   }
 }
 
-async function demandHasDocuments(client: PoolClient, tenantId: string, demand: DemandRow): Promise<boolean> {
-  const entityIds = [demand.id, demand.employee_id].filter((value): value is string => Boolean(value))
+async function demandHasDocuments(
+  client: PoolClient,
+  tenantId: string,
+  demand: DemandRow,
+  employeeId: string | null = demand.employee_id,
+): Promise<boolean> {
+  const entityIds = [demand.id, employeeId].filter((value): value is string => Boolean(value))
   const result = await client.query(
     `select 1
      from stored_file_links link

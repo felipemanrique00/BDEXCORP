@@ -16,6 +16,10 @@ import {
   registrarLog,
 } from '@/lib/atendimentos-storage'
 import { persistNewDemandWithCompatibility } from '@/lib/demand-persistence-client'
+import {
+  MANUAL_DEMAND_BOOKING_MODE,
+  shouldSubmitDemandOnCreate,
+} from '@/lib/travel/demand-booking-mode'
 import { dispararAlertaNovaDemanda } from '@/lib/notificacoes'
 import {
   arquivoParaBase64,
@@ -445,9 +449,10 @@ export default function CaixaEntradaPage() {
       funcionario_id: funcionarioId,
       passageiro_nome: passageiroNome.trim(),
       tipo_servico: tipoServico,
+      booking_mode: MANUAL_DEMAND_BOOKING_MODE,
       valor_cotacao: 0,
       agente_user_id: user.id,
-      status: 'em_andamento',
+      status: 'pendente',
       prioridade,
       origem: origemDetectada,
       observacoes: obsPartes,
@@ -471,7 +476,10 @@ export default function CaixaEntradaPage() {
 
     try {
       const preparada = criarAtendimentoParaLista(payload, getAllAtendimentos())
-      const persistida = await persistNewDemandWithCompatibility(preparada)
+      const persistida = await persistNewDemandWithCompatibility(
+        preparada,
+        shouldSubmitDemandOnCreate(MANUAL_DEMAND_BOOKING_MODE),
+      )
       const nova = persistida.demand
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'criar',
@@ -482,10 +490,10 @@ export default function CaixaEntradaPage() {
       setDemandaCriada(nova)
       if (persistida.governance?.policy.blocked) {
         toast.warning(`Demanda ${nova.serial_os || nova.id} criada e bloqueada pela política corporativa.`)
-      } else if (persistida.governance?.approval.required) {
-        toast.info(`Demanda ${nova.serial_os || nova.id} enviada para aprovação.`)
+      } else if (persistida.governance?.policy.requiresAction) {
+        toast.warning(`Demanda ${nova.serial_os || nova.id} criada e mantida pendente por requisitos da política.`)
       } else {
-        toast.success(`Demanda ${nova.serial_os || nova.id} criada!`)
+        toast.success(`Demanda ${nova.serial_os || nova.id} criada e encaminhada para cotação do consultor.`)
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao confirmar a demanda no servidor.')

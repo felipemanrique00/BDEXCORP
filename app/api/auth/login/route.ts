@@ -87,7 +87,12 @@ export async function POST(request: Request) {
       requestId: guard.requestId,
       ipAddress: metadata.ipAddress,
       userAgent: metadata.userAgent,
-      metadata: { authenticationLevel: 'password' },
+      metadata: {
+        authenticationLevel: 'password',
+        mfaBypass: mfa.required === false && mfa.bypassed === 'explicit_local'
+          ? 'explicit_local_loopback'
+          : null,
+      },
     })
     const response = NextResponse.json(
       {

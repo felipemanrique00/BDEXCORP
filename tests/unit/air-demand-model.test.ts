@@ -15,6 +15,10 @@ function roundTrip() {
     flexible_dates: false,
     flexible_times: true,
     internacional: false,
+    passengers: [
+      { employee_id: 'employee-a', name: 'Maria da Silva' },
+      { employee_id: 'employee-b', name: 'Joao Souza' },
+    ],
     trechos: [
       {
         sequence: 1,
@@ -46,6 +50,10 @@ describe('air demand model', () => {
       preferredAirlineCodes: ['LATAM', 'GOL'],
       directOnly: true,
       baggageRequired: true,
+      passengers: [
+        { employeeId: 'employee-a', name: 'Maria da Silva' },
+        { employeeId: 'employee-b', name: 'Joao Souza' },
+      ],
     })
     expect(parsed?.legs).toEqual([
       expect.objectContaining({ sequence: 1, originCode: 'REC', originName: 'Recife', destinationCode: 'GYN' }),
@@ -85,6 +93,16 @@ describe('air demand model', () => {
     expect(airDemandDetailsIssues(invalid)).toContainEqual({
       path: 'trechos',
       message: expect.stringContaining('Somente ida'),
+    })
+  })
+
+  it('rejects a duplicated employee in the passenger list', () => {
+    const invalid = roundTrip()
+    invalid.passengers[1] = { employee_id: 'employee-a', name: 'Maria da Silva' }
+
+    expect(airDemandDetailsIssues(invalid)).toContainEqual({
+      path: 'passengers',
+      message: expect.stringContaining('somente uma vez'),
     })
   })
 })

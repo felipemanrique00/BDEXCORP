@@ -291,6 +291,7 @@ const RESOURCE_POLICIES: Record<AuthorizationResource, ResourcePolicy> = {
   },
   settings: {
     read: 'alterar_configuracoes',
+    create: 'alterar_configuracoes',
     update: 'alterar_configuracoes',
     manage: 'alterar_configuracoes',
   },
@@ -589,6 +590,7 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/auth/mfa')) return 'account'
   if (path.startsWith('/api/auth/logout')) return 'session'
   if (path.startsWith('/api/me/corporate-contexts')) return 'corporate_context'
+  if (path.startsWith('/api/me/effective-branding') || path.startsWith('/api/me/branding-logo')) return 'navigation'
   if (path.startsWith('/api/navigation-summary')) return 'navigation'
   if (path.startsWith('/api/users/directory')) return 'approvals'
   if (path.startsWith('/api/users/') && path.includes('/access')) return 'access_grants'
@@ -615,6 +617,7 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/travel/operations')) return 'integrations'
   if (path.startsWith('/api/emissions')) return 'emissions'
   if (path.startsWith('/api/voucher-presentation-settings')) return 'settings'
+  if (path.startsWith('/api/brand-identity-settings')) return 'settings'
   if (path.startsWith('/api/vouchers')) return 'vouchers'
   if (path.startsWith('/api/finance') || path.startsWith('/api/reconciliation')) return 'finance'
   if (path.startsWith('/api/report-snapshots')) return 'reports'

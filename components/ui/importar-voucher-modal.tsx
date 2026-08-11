@@ -34,6 +34,7 @@ import { formatCurrency } from '@/lib/utils'
 import { reportClientFailure } from '@/lib/client-observability'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 
 interface Props {
   open: boolean
@@ -475,10 +476,10 @@ export function ImportarVoucherModal({ open, onClose, onSaved }: Props) {
           {podeVerFinanceiro && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Campo label="Custo (R$)">
-                <input type="number" step="0.01" value={valorCusto || ''} onChange={(e) => setValorCusto(parseFloat(e.target.value) || 0)} className="bbt-input" />
+                <NumericDecimalInput value={valorCusto} emptyValue={0} blankWhenZero onNumberChange={(value) => setValorCusto(value ?? 0)} />
               </Campo>
               <Campo label="Venda (R$)">
-                <input type="number" step="0.01" value={valorVenda || ''} onChange={(e) => setValorVenda(parseFloat(e.target.value) || 0)} className="bbt-input" />
+                <NumericDecimalInput value={valorVenda} emptyValue={0} blankWhenZero onNumberChange={(value) => setValorVenda(value ?? 0)} />
               </Campo>
             </div>
           )}

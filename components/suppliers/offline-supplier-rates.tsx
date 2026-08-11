@@ -16,6 +16,7 @@ import {
 import { toast } from 'sonner'
 
 import { DateInput } from '@/components/ui/date-input'
+import { DecimalInput } from '@/components/ui/decimal-input'
 import {
   createHotelSupplierRate,
   listHotelSupplierLinks,
@@ -523,10 +524,7 @@ function GridLabel({ label, children, asDiv = false }: { label: string; children
 function GridMoneyInput({ dataField, label, value, currency, onChange, disabled, required = false }: { dataField: keyof RateDraft; label: string; value: string; currency: string; onChange: (value: string) => void; disabled: boolean; required?: boolean }) {
   return (
     <GridLabel label={label}>
-      <div className="relative">
-        <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold text-slate-400">{currency || 'BRL'}</span>
-        <input data-rate-field={dataField} className="bbt-input min-w-0 pl-10 text-right tabular-nums" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} inputMode="decimal" placeholder="0,00" required={required} />
-      </div>
+      <DecimalInput data-rate-field={dataField} value={value} onValueChange={onChange} prefix={currency || 'BRL'} className="min-w-0 text-right" disabled={disabled} placeholder="0,00" required={required} />
     </GridLabel>
   )
 }

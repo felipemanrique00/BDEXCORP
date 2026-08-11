@@ -20,6 +20,7 @@ import { PageHero } from '@/components/ui/page-hero'
 import { FORMAS_PAGAMENTO_LABEL } from '@/types'
 import { getRankingHoteisByEmpresa } from '@/lib/emissoes-storage'
 import { RegistrarEmissaoModal } from '@/components/ui/registrar-emissao-modal'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
 import {
   buscarHoteisComIA,
@@ -928,14 +929,14 @@ function HotelModal({ open, onClose, editing, prefill, onSave }: any) {
 
         <Field label="Observações"><textarea value={form.observacoes || ''} onChange={(e) => setForm({ ...form, observacoes: e.target.value })} rows={2} className="bbt-input" /></Field>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-          <Field label="Tarifa SGL (R$)"><input type="number" step="0.01" value={form.tarifa_sgl ?? ''} onChange={(e) => setForm({ ...form, tarifa_sgl: parseFloat(e.target.value) || null })} className="bbt-input" /></Field>
-          <Field label="Tarifa DBL (R$)"><input type="number" step="0.01" value={form.tarifa_dbl ?? ''} onChange={(e) => setForm({ ...form, tarifa_dbl: parseFloat(e.target.value) || null })} className="bbt-input" /></Field>
-          <Field label="Tarifa TPL (R$)"><input type="number" step="0.01" value={form.tarifa_tpl ?? ''} onChange={(e) => setForm({ ...form, tarifa_tpl: parseFloat(e.target.value) || null })} className="bbt-input" /></Field>
+          <Field label="Tarifa SGL (R$)"><NumericDecimalInput value={form.tarifa_sgl} onNumberChange={(value) => setForm({ ...form, tarifa_sgl: value })} /></Field>
+          <Field label="Tarifa DBL (R$)"><NumericDecimalInput value={form.tarifa_dbl} onNumberChange={(value) => setForm({ ...form, tarifa_dbl: value })} /></Field>
+          <Field label="Tarifa TPL (R$)"><NumericDecimalInput value={form.tarifa_tpl} onNumberChange={(value) => setForm({ ...form, tarifa_tpl: value })} /></Field>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           <Field label="Café da Manhã"><select value={form.cafe_manha || ''} onChange={(e) => setForm({ ...form, cafe_manha: e.target.value })} className="bbt-input"><option value="">—</option><option>SIM</option><option>NÃO</option></select></Field>
           <Field label="Bebedouro"><select value={form.bebedouro || ''} onChange={(e) => setForm({ ...form, bebedouro: e.target.value })} className="bbt-input"><option value="">—</option><option>SIM</option><option>NÃO</option></select></Field>
-          <Field label="Valor Água (R$)"><input type="number" step="0.01" value={form.valor_agua ?? ''} onChange={(e) => setForm({ ...form, valor_agua: parseFloat(e.target.value) || null })} className="bbt-input" /></Field>
+          <Field label="Valor Água (R$)"><NumericDecimalInput value={form.valor_agua} onNumberChange={(value) => setForm({ ...form, valor_agua: value })} /></Field>
         </div>
         <Field label="Estacionamento"><input value={form.estacionamento || ''} onChange={(e) => setForm({ ...form, estacionamento: e.target.value })} className="bbt-input" /></Field>
         <div className="flex items-center gap-2">

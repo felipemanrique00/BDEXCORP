@@ -17,6 +17,7 @@ export interface DemandUpdateSnapshot {
   project: string | null
   paymentMethod: string | null
   passengerName: string
+  passengerIds: string[]
 }
 
 export interface DemandUpdateAssessment {
@@ -43,6 +44,7 @@ export function assessDemandUpdate(
       projectId: previous.project,
       paymentMethodId: previous.paymentMethod,
       passengerName: previous.passengerName,
+      passengerIds: previous.passengerIds,
     },
     {
       companyId: current.companyId,
@@ -56,9 +58,10 @@ export function assessDemandUpdate(
       projectId: current.project,
       paymentMethodId: current.paymentMethod,
       passengerName: current.passengerName,
+      passengerIds: current.passengerIds,
     },
     {
-      extraCriticalFields: ['companyId', 'passengerName'],
+      extraCriticalFields: ['companyId', 'passengerName', 'passengerIds'],
     },
   )
 

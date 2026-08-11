@@ -38,6 +38,7 @@ const environmentSchema = z.object({
   AUTH_SESSION_HOURS: positiveInteger.max(24 * 30).default(12),
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('bbt_session'),
   MFA_ADMIN_REQUIRED: optionalBooleanValue.default(true),
+  MFA_LOCAL_BYPASS: optionalBooleanValue.default(false),
   MFA_ENCRYPTION_KEY: optionalTrimmedString,
   MFA_ISSUER: z.string().trim().min(2).max(80).default('BBT Corporativo'),
   MFA_CHALLENGE_MINUTES: positiveInteger.min(2).max(30).default(10),
@@ -83,6 +84,7 @@ export function getServerEnvironment(): ServerEnvironment {
     throw new Error(`Configuracao de ambiente invalida: ${parsed.error.issues.map((issue) => issue.path.join('.')).join(', ')}`)
   }
 
+  validateLocalMfaBypassEnvironment(parsed.data)
   validateProductionEnvironment(parsed.data)
   cachedEnvironment = parsed.data
   return cachedEnvironment
@@ -94,6 +96,33 @@ export function validateServerEnvironment(): void {
 
 export function resetEnvironmentCacheForTests(): void {
   if (process.env.NODE_ENV === 'test') cachedEnvironment = null
+}
+
+export function isLocalMfaBypassEnabled(): boolean {
+  const environment = getServerEnvironment()
+  return environment.MFA_LOCAL_BYPASS === true &&
+    environment.MFA_ADMIN_REQUIRED === true &&
+    environment.ALLOW_INSECURE_LOCALHOST === true &&
+    Boolean(environment.APP_URL && isLoopbackHttpUrl(environment.APP_URL))
+}
+
+function validateLocalMfaBypassEnvironment(environment: ServerEnvironment): void {
+  if (!environment.MFA_LOCAL_BYPASS) return
+
+  const errors: string[] = []
+  if (!environment.MFA_ADMIN_REQUIRED) {
+    errors.push('MFA_ADMIN_REQUIRED deve permanecer habilitado')
+  }
+  if (!environment.ALLOW_INSECURE_LOCALHOST) {
+    errors.push('ALLOW_INSECURE_LOCALHOST deve estar explicitamente habilitado')
+  }
+  if (!environment.APP_URL || !isLoopbackHttpUrl(environment.APP_URL)) {
+    errors.push('APP_URL deve usar HTTP e apontar estritamente para localhost ou loopback')
+  }
+
+  if (errors.length) {
+    throw new Error(`MFA_LOCAL_BYPASS bloqueado: ${errors.join('; ')}`)
+  }
 }
 
 function validateProductionEnvironment(environment: ServerEnvironment): void {
@@ -159,7 +188,10 @@ function isSecurePublicUrl(value: string): boolean {
 function isLoopbackHttpUrl(value: string): boolean {
   try {
     const url = new URL(value)
-    return url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname)
+    return url.protocol === 'http:' &&
+      !url.username &&
+      !url.password &&
+      ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname.toLowerCase())
   } catch {
     return false
   }

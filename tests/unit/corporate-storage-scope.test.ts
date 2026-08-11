@@ -76,6 +76,46 @@ function internalUser(profile: PerfilBBT, overrides: Partial<Permissoes> = {}): 
 }
 
 describe('corporate storage scope', () => {
+  it('entrega a empresa autorizada a um solicitante com grant direto', () => {
+    const requesterPermissions = permissionsForCorporateProfile('requester', {})
+    const requester = corporateUser()
+    requester.role = 'colaborador'
+    requester.role_key = 'requester'
+    requester.corporate_profile = 'requester'
+    requester.company_id = 'company-a'
+    requester.empresa_ids = ['company-a']
+    requester.permissoes = requesterPermissions
+    requester.corporate_access = {
+      ...requester.corporate_access!,
+      tenantWide: false,
+      companyIds: ['company-a'],
+      companies: [{
+        companyId: 'company-a',
+        companyName: 'Empresa A',
+        groupId: null,
+        groupName: null,
+        sources: ['direct'],
+        profiles: ['requester'],
+        permissions: requesterPermissions,
+      }],
+      defaultContext: { type: 'company', id: 'company-a' },
+    }
+
+    const visible = scopeStorageEntriesForRead({
+      'bbt-data-v4': {
+        state: {
+          empresas,
+          gruposEmpresariais: [],
+          funcionarios: [],
+          hoteis: [],
+          politicas: [],
+        },
+      },
+    }, requester) as any
+
+    expect(visible['bbt-data-v4'].state.empresas).toEqual([empresas[0]])
+  })
+
   it('distingue uma mutacao aceita de um lote totalmente filtrado', () => {
     expect(hasAcceptedStorageMutation('bbt-data-v4', {
       state: {

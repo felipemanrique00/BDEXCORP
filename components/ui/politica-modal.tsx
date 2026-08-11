@@ -4,6 +4,7 @@ import { Modal } from '@/components/ui/modal'
 import { toast } from 'sonner'
 import { Plane, Hotel as HotelIcon, Star, Clock, DollarSign, CheckCircle2 } from 'lucide-react'
 import type { PoliticaCargo, ClasseAerea, Cargo } from '@/types'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 
 interface Props {
   open: boolean
@@ -141,7 +142,7 @@ export function PoliticaModal({ open, onClose, politica, novaParaEmpresa, onSave
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <Field label="Limite de Diária (R$) *" icon={DollarSign}>
-                <input type="number" step="0.01" value={form.limite_diaria_hotel || 0} onChange={(e) => setForm({ ...form, limite_diaria_hotel: parseFloat(e.target.value) || 0 })} className="bbt-input" required />
+                <NumericDecimalInput value={form.limite_diaria_hotel || 0} emptyValue={0} onNumberChange={(value) => setForm({ ...form, limite_diaria_hotel: value ?? 0 })} required />
               </Field>
               <Field label="Máx. Estrelas" icon={Star}>
                 <select value={form.hoteis_max_estrelas || 3} onChange={(e) => setForm({ ...form, hoteis_max_estrelas: parseInt(e.target.value) })} className="bbt-input">
@@ -176,7 +177,7 @@ export function PoliticaModal({ open, onClose, politica, novaParaEmpresa, onSave
                 </select>
               </Field>
               <Field label="Valor Máx. Doméstico (R$)" icon={DollarSign}>
-                <input type="number" step="0.01" value={form.valor_maximo_aereo_domestico || 0} onChange={(e) => setForm({ ...form, valor_maximo_aereo_domestico: parseFloat(e.target.value) || 0 })} className="bbt-input" />
+                <NumericDecimalInput value={form.valor_maximo_aereo_domestico || 0} emptyValue={0} onNumberChange={(value) => setForm({ ...form, valor_maximo_aereo_domestico: value ?? 0 })} />
               </Field>
               <Field label="Antecedência Doméstico (dias)" icon={Clock}>
                 <input type="number" min={0} value={form.antecedencia_aereo_domestico_dias ?? 0} onChange={(e) => setForm({ ...form, antecedencia_aereo_domestico_dias: parseInt(e.target.value) || 0 })} className="bbt-input" />
@@ -191,7 +192,7 @@ export function PoliticaModal({ open, onClose, politica, novaParaEmpresa, onSave
                 </select>
               </Field>
               <Field label="Valor Máx. Internacional (R$)" icon={DollarSign}>
-                <input type="number" step="0.01" value={form.valor_maximo_aereo_internacional || 0} onChange={(e) => setForm({ ...form, valor_maximo_aereo_internacional: parseFloat(e.target.value) || 0 })} className="bbt-input" />
+                <NumericDecimalInput value={form.valor_maximo_aereo_internacional || 0} emptyValue={0} onNumberChange={(value) => setForm({ ...form, valor_maximo_aereo_internacional: value ?? 0 })} />
               </Field>
               <Field label="Antecedência Intl. (dias)" icon={Clock}>
                 <input type="number" min={0} value={form.antecedencia_aereo_internacional_dias ?? 0} onChange={(e) => setForm({ ...form, antecedencia_aereo_internacional_dias: parseInt(e.target.value) || 0 })} className="bbt-input" />

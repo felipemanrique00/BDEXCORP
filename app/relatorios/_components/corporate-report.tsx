@@ -22,7 +22,8 @@ import { formatCurrency, formatDate } from '@/lib/utils'
 import type { AnaliseRelatorio, EconomiaRelatorio, FonteReferenciaEconomia, RelatorioOperacional, VisaoRelatorio } from '@/lib/relatorios'
 import { buildCsv, downloadTextFile, imageUrlToDataUrl } from '@/lib/browser-download'
 import { BRAND_LOGO_REPORT, SYSTEM_NAME } from '@/lib/branding'
-import { BBTLogo } from '@/components/branding/bbt-logo'
+import { CoBrandedDocumentLogo } from '@/components/branding/effective-brand-logo'
+import { useEffectiveBranding } from '@/components/branding/effective-branding-provider'
 import { buildStandaloneReportHtml, type HtmlReportDetail, type HtmlReportPayload } from './export-html'
 
 type CategoryMetric = {
@@ -152,6 +153,7 @@ const CATEGORY_LABELS: Record<TipoServico, string> = {
 }
 
 export function CorporateReport(props: ReportProps) {
+  const { branding } = useEffectiveBranding()
   const canExport = props.canExport === true
   const isAgency = props.visao === 'agencia'
   const analise = props.analise
@@ -329,10 +331,18 @@ export function CorporateReport(props: ReportProps) {
 
   async function exportInteractiveHTML() {
     let brandLogoDataUrl = ''
+    let agencyLogoDataUrl = ''
     try {
-      brandLogoDataUrl = await imageUrlToDataUrl(BRAND_LOGO_REPORT)
+      brandLogoDataUrl = await imageUrlToDataUrl(branding.isLogoFallback ? BRAND_LOGO_REPORT : branding.logoUrl)
     } catch {
       brandLogoDataUrl = ''
+    }
+    if (!branding.isLogoFallback) {
+      try {
+        agencyLogoDataUrl = await imageUrlToDataUrl(BRAND_LOGO_REPORT)
+      } catch {
+        agencyLogoDataUrl = ''
+      }
     }
 
     const payload: HtmlReportPayload = {
@@ -348,6 +358,10 @@ export function CorporateReport(props: ReportProps) {
       generatedAt: new Date().toISOString(),
       totalDias: props.totalDias,
       brandLogoDataUrl,
+      brandName: branding.isLogoFallback ? SYSTEM_NAME : branding.displayName,
+      agencyLogoDataUrl,
+      brandPrimaryColor: branding.primaryColor,
+      brandAccentColor: branding.accentColor,
       detailCompanyColumn: Boolean(props.detailCompanyColumn),
       categoryLabels: CATEGORY_LABELS,
       statusLabels: STATUS_LABEL,
@@ -385,7 +399,7 @@ export function CorporateReport(props: ReportProps) {
       </div>}
       <article className="overflow-hidden rounded-md border border-[#cfd6e3] bg-white shadow-[0_12px_34px_rgba(32,38,90,0.09)] print:rounded-none print:border-0 print:shadow-none">
         <header className="bbt-report-brand-header">
-          <BBTLogo variant="full" tone="color" size={44} />
+          <CoBrandedDocumentLogo />
           <div className="bbt-report-brand-copy">
             <p className="text-[10px] font-semibold uppercase text-[#6f7885]">{props.eyebrow}</p>
             <h1 className="break-words text-xl font-bold leading-tight text-[#20265a] [overflow-wrap:anywhere] sm:text-[28px]" style={{ letterSpacing: 0 }}>

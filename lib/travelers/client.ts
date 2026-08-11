@@ -5,6 +5,7 @@ import type { TravelerDirectoryItem } from '@/lib/travelers/types'
 export async function searchTravelers(input: {
   companyId: string
   q?: string
+  ids?: string[]
   limit?: number
 }, signal?: AbortSignal): Promise<TravelerDirectoryItem[]> {
   const search = new URLSearchParams({
@@ -12,6 +13,7 @@ export async function searchTravelers(input: {
     limit: String(input.limit || 20),
   })
   if (input.q) search.set('q', input.q)
+  if (input.ids?.length) search.set('ids', input.ids.join(','))
   const response = await fetch(`/api/travelers?${search}`, { cache: 'no-store', signal })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok || payload?.ok !== true || !Array.isArray(payload?.items)) {

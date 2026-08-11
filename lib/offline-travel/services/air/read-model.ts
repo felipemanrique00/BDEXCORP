@@ -50,8 +50,10 @@ export interface OfflineAirQuoteOptionReadModel {
   selected: boolean
   selectionId: string | null
   selectionStatus: string | null
+  selectedAt: string | null
   approvalInstanceId: string | null
   approvalStatus: string | null
+  approvedAt: string | null
 }
 
 export interface OfflineAirQuoteReadModel {
@@ -68,9 +70,19 @@ export interface OfflineAirQuoteReadModel {
   updatedAt: string
 }
 
+export interface OfflineAirDemandPassengerReadModel {
+  demandTravelerId: string
+  employeeId: string | null
+  name: string
+  sequence: number
+  /** Código corporativo não sensível usado somente para distinguir homônimos. */
+  identificationCode: string | null
+}
+
 export interface OfflineAirQuoteListReadModel {
   demandId: string
   lifecycleStatus: string
   lifecycleVersion: number
+  passengers: OfflineAirDemandPassengerReadModel[]
   quotes: OfflineAirQuoteReadModel[]
 }

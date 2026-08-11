@@ -337,6 +337,7 @@ export async function enrichVouchersFromDatabase(
              nullif(traveler.metadata ->> 'codigo', '')
            ),
            'document', coalesce(
+             nullif(traveler.document_number_snapshot, ''),
              nullif(traveler_employee.document_number, ''),
              nullif(traveler.metadata ->> 'documentNumber', ''),
              nullif(traveler.metadata ->> 'documento', ''),
@@ -345,11 +346,16 @@ export async function enrichVouchersFromDatabase(
            'email', coalesce(traveler.email_snapshot::text, traveler_employee.email::text),
            'phone', coalesce(traveler.phone_snapshot, traveler_employee.phone),
            'roomNumber', room.room_sequence
-         ) order by traveler.is_primary desc, room.room_sequence nulls last, room_guest.slot_index nulls last, traveler.name_snapshot
+         ) order by traveler.is_primary desc,
+                    traveler.traveler_sequence nulls last,
+                    room.room_sequence nulls last,
+                    room_guest.slot_index nulls last,
+                    traveler.name_snapshot
        ) as items
        from demand_travelers traveler
        left join employees traveler_employee
          on traveler_employee.tenant_id = traveler.tenant_id
+        and traveler_employee.company_id = traveler.company_id
         and traveler_employee.id = traveler.employee_id
        left join hotel_demand_room_guests room_guest
          on room_guest.tenant_id = traveler.tenant_id

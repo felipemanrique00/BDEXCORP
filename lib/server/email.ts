@@ -12,11 +12,21 @@ export class EmailUnavailableError extends Error {
   }
 }
 
+export interface TransactionalEmailAttachment {
+  filename: string
+  content: string | Buffer
+  contentType: string
+  /** Content-ID used by HTML bodies through a `cid:` URL. */
+  cid?: string
+  contentDisposition?: 'attachment' | 'inline'
+}
+
 export interface TransactionalEmail {
-  to: string
+  to: string | string[]
   subject: string
   text: string
   html: string
+  attachments?: TransactionalEmailAttachment[]
 }
 
 export function emailConfigured(): boolean {
@@ -35,6 +45,7 @@ export async function sendTransactionalEmail(message: TransactionalEmail): Promi
     subject: message.subject,
     text: message.text,
     html: message.html,
+    attachments: message.attachments,
   })
   if (!result.accepted?.length) throw new Error('O servidor SMTP nao aceitou a mensagem.')
 }

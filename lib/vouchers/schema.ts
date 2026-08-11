@@ -50,6 +50,31 @@ const voucherRoomSchema = z.object({
   hospedes: z.array(z.string().trim().min(1).max(300)).max(12).optional(),
 }).strict()
 
+const voucherAirSegmentSchema = z.object({
+  sequencia: z.coerce.number().int().positive().max(100),
+  companhia_codigo: z.string().trim().min(1).max(10),
+  companhia_nome: z.string().trim().min(1).max(200),
+  numero_voo: z.string().trim().min(1).max(80),
+  classe_reserva: z.string().trim().min(1).max(40),
+  cabine: z.string().trim().min(1).max(80),
+  bagagens: z.coerce.number().int().min(0).max(20),
+  origem_codigo: z.string().trim().min(1).max(10),
+  origem_nome: optionalText(300),
+  destino_codigo: z.string().trim().min(1).max(10),
+  destino_nome: optionalText(300),
+  saida_em: z.string().trim().min(1).max(64),
+  chegada_em: z.string().trim().min(1).max(64),
+}).strict()
+
+const voucherAirTicketSchema = z.object({
+  passageiro_nome: z.string().trim().min(1).max(300),
+  passageiro_ordem: z.coerce.number().int().positive().max(100).optional(),
+  passageiro_codigo: optionalText(120),
+  numero_bilhete: z.string().trim().min(1).max(160),
+  companhia_codigo: z.string().trim().min(1).max(10),
+  companhia_nome: z.string().trim().min(1).max(200),
+}).strict()
+
 export const voucherIdentifierSchema = z.string().trim().min(1).max(160)
 export const voucherTypeSchema = z.enum([
   'Hotel',
@@ -136,6 +161,15 @@ export const voucherSchema = z.object({
   data_volta: optionalText(64),
   classe: optionalText(120),
   localizador: optionalText(160),
+  sistema_reserva: optionalText(120),
+  prazo_emissao: optionalText(64),
+  tarifa_referencia: optionalNonNegativeNumber,
+  rav: optionalNonNegativeNumber,
+  rac: optionalNonNegativeNumber,
+  cambio: optionalNonNegativeNumber,
+  milhagem: optionalNonNegativeNumber,
+  trechos_aereos: z.array(voucherAirSegmentSchema).max(100).optional(),
+  bilhetes_aereos: z.array(voucherAirTicketSchema).max(100).optional(),
   locadora: optionalText(200),
   categoria_carro: optionalText(160),
   retirada_local: optionalText(300),

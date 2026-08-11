@@ -3,6 +3,7 @@ import { todayISODate } from '@/lib/date'
 import { useState, useEffect, useMemo } from 'react'
 import { Modal } from '@/components/ui/modal'
 import { DateInput } from '@/components/ui/date-input'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 import { useStore } from '@/lib/store'
 import { useCorporateContext, useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import {
@@ -16,12 +17,23 @@ import {
   createDemandOnServer,
   DemandClientError,
   getDemandFromServer,
+  listAgencyDemandOptionsFromServer,
   updateDemandDetailsOnServer,
+  type AgencyDemandRequesterOption,
+  type AgencyDemandTravelerOption,
 } from '@/lib/demands-client'
 import { dispararAlertaNovaDemanda } from '@/lib/notificacoes'
-import { getCurrentUser, hasPermission } from '@/lib/auth'
+import { hasPermission } from '@/lib/auth'
 import { getAllSolicitantesEmpresa } from '@/lib/solicitantes-storage'
 import { requesterOwnsDemand } from '@/lib/demands/requester-ownership'
+import {
+  canCreateAgencyAssistedDemand,
+  shouldBlockAgencyAssistedLegacyFallback,
+} from '@/lib/demands/agency-assistance'
+import {
+  resolveDemandBookingMode,
+  shouldSubmitDemandOnCreate,
+} from '@/lib/travel/demand-booking-mode'
 import { isRequesterUser } from '@/lib/user-access-kind'
 import { travelLifecycleStatusLabel } from '@/lib/travel-lifecycle/presentation'
 import { toast } from 'sonner'
@@ -35,6 +47,12 @@ import { formatCurrency } from '@/lib/utils'
 import { PassageiroAutocomplete } from '@/components/ui/passageiro-autocomplete'
 import { HotelDemandConfigurator } from '@/components/travel/hotel-demand-configurator'
 import { AirDemandConfigurator } from '@/components/travel/air-demand-configurator'
+import {
+  airPassengerProfileIssueLabel,
+  airPassengersFromDetails,
+  withAirPassengers,
+  type AirPassengerValidationState,
+} from '@/lib/air-demand/passenger-selection'
 import { hotelDemandDetailsSchema } from '@/lib/hotel-demand/model'
 import { detalhesAereoSchema } from '@/lib/validators'
 import { isHotelDemandLockedForNormalEdit } from '@/lib/offline-travel/hotel-guests'
@@ -88,6 +106,9 @@ const PRIORIDADES: { value: Prioridade; label: string; color: string; icon: any 
   { value: 'urgente', label: 'Urgente', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300', icon: Zap },
 ]
 
+const AGENCY_ASSISTED_RELATIONAL_UNAVAILABLE =
+  'O atendimento assistido está temporariamente indisponível porque a gravação segura no servidor está desativada. Nenhum dado foi salvo; tente novamente mais tarde.'
+
 function diffDays(d1: string, d2: string): number {
   if (!d1 || !d2) return 0
   const a = new Date(d1 + 'T00:00:00')
@@ -107,14 +128,22 @@ export function NovaDemandaModal({
   readOnly = false,
 }: Props) {
   const { empresas, funcionarios, hoteis, addHotel } = useStore()
-  const { context } = useCorporateContext()
+  const { context, user } = useCorporateContext()
   const { includesCompany, isConsolidated } = useCorporateCompanyScope()
   const empresasNoContexto = useMemo(
     () => empresas.filter((empresa) => includesCompany(empresa.id, 'criar_demandas')),
     [empresas, includesCompany],
   )
-  const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const requesterView = isRequesterUser(user)
+  const bookingMode = resolveDemandBookingMode(editing?.booking_mode)
+  const agencyAssistedMode = Boolean(
+    user
+    && canCreateAgencyAssistedDemand({
+      platformAdmin: user.platform_admin === true,
+      roleKey: user.role_key || (user.role === 'master' ? 'tenant_admin' : null),
+    })
+    && (!editing || editing.agency_assisted === true),
+  )
   const requesterOwnershipFromDirectory = Boolean(editing && requesterOwnsDemand({
     user,
     demand: editing,
@@ -130,6 +159,20 @@ export function NovaDemandaModal({
   )
 
   const [empresaId, setEmpresaId] = useState('')
+  const [solicitanteId, setSolicitanteId] = useState('')
+  const [solicitanteNome, setSolicitanteNome] = useState('')
+  const [agencyRequesters, setAgencyRequesters] = useState<AgencyDemandRequesterOption[]>([])
+  const [agencyTravelers, setAgencyTravelers] = useState<AgencyDemandTravelerOption[]>([])
+  const [agencyRequesterSearch, setAgencyRequesterSearch] = useState('')
+  const [agencyTravelerSearch, setAgencyTravelerSearch] = useState('')
+  const [agencyRequesterLoading, setAgencyRequesterLoading] = useState(false)
+  const [agencyTravelerLoading, setAgencyTravelerLoading] = useState(false)
+  const [agencyRequesterError, setAgencyRequesterError] = useState('')
+  const [agencyTravelerError, setAgencyTravelerError] = useState('')
+  const [agencyRequesterTotal, setAgencyRequesterTotal] = useState(0)
+  const [agencyTravelerTotal, setAgencyTravelerTotal] = useState(0)
+  const [agencyRequesterLimit, setAgencyRequesterLimit] = useState(50)
+  const [agencyTravelerLimit, setAgencyTravelerLimit] = useState(50)
   const podeVerFinanceiro = !requesterView && hasPermission(user, 'ver_financeiro')
     && includesCompany(empresaId, 'ver_financeiro')
   const [funcionarioId, setFuncionarioId] = useState<string | null>(null)
@@ -167,6 +210,12 @@ export function NovaDemandaModal({
 
   // Detalhes
   const [detAereo, setDetAereo] = useState<DetalhesAereo>({})
+  const [airPassengerValidation, setAirPassengerValidation] = useState<AirPassengerValidationState>({
+    passengerCount: 0,
+    blockingIssues: [],
+    pendingVerificationIds: [],
+    lookupErrors: [],
+  })
   const [detHotel, setDetHotel] = useState<DetalhesHotel>({})
   const [detCarro, setDetCarro] = useState<DetalhesCarro>({})
   const [detPacote, setDetPacote] = useState<DetalhesPacote>({})
@@ -177,11 +226,24 @@ export function NovaDemandaModal({
   const empresaSelecionada = useMemo(() => empresasNoContexto.find((e) => e.id === empresaId), [empresasNoContexto, empresaId])
   const configEmpresa = empresaSelecionada?.config_cobranca || CONFIG_COBRANCA_PADRAO
   const ocupanteLabel = labelOcupante(tipoServico)
+  const legacyUnlinkedAirPassengerName = useMemo(() => {
+    if (
+      !editing
+      || editing.tipo_servico !== 'Aéreo'
+      || editing.funcionario_id
+      || airPassengersFromDetails(editing.detalhes_aereo || {}, null).length
+    ) return ''
+    return String(editing.passageiro_nome || '').trim()
+  }, [editing])
 
   useEffect(() => {
     if (!open) return
     if (editing) {
       setEmpresaId(editing.empresa_id)
+      setSolicitanteId(editing.solicitante_id || '')
+      setSolicitanteNome(editing.solicitante_nome || '')
+      setAgencyRequesterSearch('')
+      setAgencyTravelerSearch('')
       setFuncionarioId(editing.funcionario_id || null)
       setPassageiroNome(editing.passageiro_nome)
       setTipoServico(editing.tipo_servico)
@@ -199,6 +261,7 @@ export function NovaDemandaModal({
       setUsarTaxaFixa(!!(editing.taxa_valor_fixo && editing.taxa_valor_fixo > 0))
       setMarkupDesabilitado(editing.markup_desabilitado ?? false)
       setDetAereo(editing.detalhes_aereo || {})
+      setAirPassengerValidation({ passengerCount: 0, blockingIssues: [], pendingVerificationIds: [], lookupErrors: [] })
       setDetHotel(editing.detalhes_hotel || {})
       setDetCarro(editing.detalhes_carro || {})
       setDetPacote(editing.detalhes_pacote || {})
@@ -215,6 +278,10 @@ export function NovaDemandaModal({
         ? prefilledEmpresaId
         : context?.type === 'company' ? context.id : ''
       setEmpresaId(explicitCompanyId)
+      setSolicitanteId('')
+      setSolicitanteNome('')
+      setAgencyRequesterSearch('')
+      setAgencyTravelerSearch('')
       setFuncionarioId(prefilledFuncionarioId || null)
       setPassageiroNome(''); setTipoServico('Hotel')
       setPrioridade('media'); setOrigem('WhatsApp'); setObservacoes('')
@@ -224,11 +291,96 @@ export function NovaDemandaModal({
       setTaxaAtiva(true); setTaxaPercentual(10); setTaxaValorFixo(0); setUsarTaxaFixa(false)
       setMarkupDesabilitado(false)
       setDetAereo({}); setDetHotel({}); setDetCarro({}); setDetPacote({})
+      setAirPassengerValidation({ passengerCount: 0, blockingIssues: [], pendingVerificationIds: [], lookupErrors: [] })
       setFormaPagamento(''); setCostCenterId(null); setCentroCusto(''); setProjetoObra('')
       setNumeroSolicitacao(''); setAutorizadorNome(''); setContatoPassageiro('')
       setObservacoesInternas('')
     }
   }, [open, editing, context, includesCompany, prefilledEmpresaId, prefilledFuncionarioId])
+
+  useEffect(() => {
+    if (!open || !agencyAssistedMode || !empresaId) {
+      setAgencyRequesters([])
+      setAgencyRequesterLoading(false)
+      setAgencyRequesterError('')
+      setAgencyRequesterTotal(0)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setAgencyRequesterLoading(true)
+      setAgencyRequesterError('')
+      void listAgencyDemandOptionsFromServer(empresaId, {
+        requesterQ: agencyRequesterSearch,
+        participant: 'requesters',
+        limit: 50,
+      })
+        .then((result) => {
+          if (cancelled) return
+          if (result.companyId !== empresaId) return
+          setAgencyRequesters(result.requesters)
+          setAgencyRequesterTotal(result.requesterTotal)
+          setAgencyRequesterLimit(result.limit)
+        })
+        .catch((error) => {
+          if (cancelled) return
+          setAgencyRequesters([])
+          setAgencyRequesterTotal(0)
+          setAgencyRequesterError(error instanceof Error
+            ? error.message
+            : 'Nao foi possivel carregar os solicitantes da empresa.')
+        })
+        .finally(() => {
+          if (!cancelled) setAgencyRequesterLoading(false)
+        })
+    }, agencyRequesterSearch ? 250 : 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [agencyAssistedMode, agencyRequesterSearch, empresaId, open])
+
+  useEffect(() => {
+    if (!open || !agencyAssistedMode || !empresaId || tipoServico === 'Hotel' || tipoServico === 'Aéreo') {
+      setAgencyTravelers([])
+      setAgencyTravelerLoading(false)
+      setAgencyTravelerError('')
+      setAgencyTravelerTotal(0)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setAgencyTravelerLoading(true)
+      setAgencyTravelerError('')
+      void listAgencyDemandOptionsFromServer(empresaId, {
+        travelerQ: agencyTravelerSearch,
+        participant: 'travelers',
+        limit: 50,
+      })
+        .then((result) => {
+          if (cancelled) return
+          if (result.companyId !== empresaId) return
+          setAgencyTravelers(result.travelers)
+          setAgencyTravelerTotal(result.travelerTotal)
+          setAgencyTravelerLimit(result.limit)
+        })
+        .catch((error) => {
+          if (cancelled) return
+          setAgencyTravelers([])
+          setAgencyTravelerTotal(0)
+          setAgencyTravelerError(error instanceof Error
+            ? error.message
+            : 'Nao foi possivel carregar os viajantes da empresa.')
+        })
+        .finally(() => {
+          if (!cancelled) setAgencyTravelerLoading(false)
+        })
+    }, agencyTravelerSearch ? 250 : 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [agencyAssistedMode, agencyTravelerSearch, empresaId, open, tipoServico])
 
   // Quando empresa muda, aplicar config de cobrança
   useEffect(() => {
@@ -415,12 +567,28 @@ export function NovaDemandaModal({
     const hotelPrimaryGuest = detHotel.rooms
       ?.flatMap((room) => room.guests)
       .find((guest) => guest.role === 'responsible')
+    const airPassengers = airPassengersFromDetails(detAereo, funcionarioId ? {
+      employee_id: funcionarioId,
+      name: passageiroNome.trim() || undefined,
+    } : null)
+    const preservesLegacyUnlinkedAirPassenger = Boolean(
+      tipoServico === 'Aéreo'
+      && editing?.tipo_servico === 'Aéreo'
+      && editing.empresa_id === empresaId
+      && legacyUnlinkedAirPassengerName
+      && !airPassengers.length
+    )
+    const airPrimaryPassenger = airPassengers[0]
     const effectivePassengerName = tipoServico === 'Hotel'
       ? hotelPrimaryGuest?.name || ''
-      : passageiroNome.trim()
+      : tipoServico === 'Aéreo'
+        ? airPrimaryPassenger?.name || (preservesLegacyUnlinkedAirPassenger ? legacyUnlinkedAirPassengerName : passageiroNome.trim())
+        : passageiroNome.trim()
     const effectiveEmployeeId = tipoServico === 'Hotel'
       ? hotelPrimaryGuest?.employee_id || null
-      : funcionarioId
+      : tipoServico === 'Aéreo'
+        ? airPrimaryPassenger?.employee_id || null
+        : funcionarioId
     if (!user) { toast.error('Faça login.'); return }
     if (requesterAccessDenied) {
       toast.error('Você só pode abrir e editar demandas vinculadas ao seu cadastro de solicitante.')
@@ -428,6 +596,14 @@ export function NovaDemandaModal({
     }
     if (formReadOnly) {
       toast.error('Seu acesso permite consultar esta demanda, mas não alterá-la.')
+      return
+    }
+    if (agencyAssistedMode && !solicitanteId) {
+      toast.error('Selecione o solicitante que pediu a viagem para a empresa.')
+      return
+    }
+    if (agencyAssistedMode && !effectiveEmployeeId && !preservesLegacyUnlinkedAirPassenger) {
+      toast.error(`Selecione um ${ocupanteLabel.toLowerCase()} ativo da empresa.`)
       return
     }
     if (!empresaId || !effectivePassengerName) {
@@ -441,6 +617,24 @@ export function NovaDemandaModal({
       }
     }
     if (tipoServico === 'Aéreo') {
+      if (!airPassengers.length && !preservesLegacyUnlinkedAirPassenger) {
+        toast.error('Adicione ao menos um passageiro ativo da empresa.')
+        return
+      }
+      if (airPassengerValidation.pendingVerificationIds.length) {
+        toast.error('Aguarde a conferência cadastral de todos os passageiros antes de enviar.')
+        return
+      }
+      if (airPassengerValidation.blockingIssues.length) {
+        const firstIssue = airPassengerValidation.blockingIssues[0]
+        const fields = firstIssue.issues.map(airPassengerProfileIssueLabel).join(', ')
+        toast.error(`Complete o cadastro de ${firstIssue.name}: ${fields}.`)
+        return
+      }
+      if (airPassengerValidation.lookupErrors.length) {
+        toast.error(airPassengerValidation.lookupErrors[0].message)
+        return
+      }
       const airDemand = detalhesAereoSchema.safeParse(detAereo)
       if (!airDemand.success || !airDemand.data.trechos?.length) {
         toast.error(airDemand.success
@@ -459,10 +653,17 @@ export function NovaDemandaModal({
     }
 
     const detalhesHotelFinal = detHotel
+    const detalhesAereoFinal = preservesLegacyUnlinkedAirPassenger
+      ? Object.fromEntries(Object.entries(detAereo).filter(([key]) => key !== 'passengers')) as DetalhesAereo
+      : withAirPassengers(detAereo as DetalhesAereo & Record<string, unknown>, airPassengers)
     const demandAmount = tipoServico === 'Hotel' ? 0 : valorVenda || 0
 
     const payload: Omit<Atendimento, 'id' | 'created_at' | 'updated_at'> = {
       empresa_id: empresaId,
+      solicitante_id: solicitanteId || editing?.solicitante_id,
+      solicitante_nome: solicitanteNome || editing?.solicitante_nome,
+      agency_assisted: agencyAssistedMode || editing?.agency_assisted || undefined,
+      booking_mode: bookingMode,
       funcionario_id: effectiveEmployeeId,
       passageiro_nome: effectivePassengerName,
       tipo_servico: tipoServico,
@@ -483,7 +684,9 @@ export function NovaDemandaModal({
       observacoes: observacoes.trim(),
       data_atendimento: dataAtendimento,
       motivo: editing?.motivo,
-      detalhes_aereo: tipoServico === 'Aéreo' ? detAereo : undefined,
+      detalhes_aereo: tipoServico === 'Aéreo'
+        ? detalhesAereoFinal
+        : undefined,
       detalhes_hotel: tipoServico === 'Hotel' ? detalhesHotelFinal : undefined,
       detalhes_carro: tipoServico === 'Carro' ? detCarro : undefined,
       detalhes_pacote: tipoServico === 'Pacote' ? detPacote : undefined,
@@ -500,6 +703,7 @@ export function NovaDemandaModal({
     }
 
     if (editing) {
+      const editingIsAgencyAssisted = agencyAssistedMode || editing.agency_assisted === true
       const atualizada: Atendimento = {
         ...editing,
         ...payload,
@@ -545,6 +749,13 @@ export function NovaDemandaModal({
       } catch (error) {
         if (
           error instanceof DemandClientError
+          && shouldBlockAgencyAssistedLegacyFallback(error.code, editingIsAgencyAssisted)
+        ) {
+          toast.error(AGENCY_ASSISTED_RELATIONAL_UNAVAILABLE)
+          return
+        }
+        if (
+          error instanceof DemandClientError
           && ['DEMAND_NOT_FOUND', 'DEMAND_RELATIONAL_WRITE_DISABLED'].includes(error.code || '')
         ) {
           const atuais = getAllAtendimentos()
@@ -583,8 +794,15 @@ export function NovaDemandaModal({
       const preparada = criarAtendimentoParaLista(payload, getAllAtendimentos())
       let resultado
       try {
-        resultado = await createDemandOnServer(preparada, tipoServico !== 'Hotel')
+        resultado = await createDemandOnServer(preparada, shouldSubmitDemandOnCreate(bookingMode))
       } catch (error) {
+        if (
+          error instanceof DemandClientError
+          && shouldBlockAgencyAssistedLegacyFallback(error.code, agencyAssistedMode)
+        ) {
+          toast.error(AGENCY_ASSISTED_RELATIONAL_UNAVAILABLE)
+          return
+        }
         if (error instanceof DemandClientError && error.code === 'DEMAND_RELATIONAL_WRITE_DISABLED') {
           const atuais = getAllAtendimentos()
           if (!persistirAtendimentos([...atuais, preparada])) {
@@ -603,7 +821,9 @@ export function NovaDemandaModal({
             acao: 'criar',
             entidade: 'Atendimento',
             entidade_id: preparada.id,
-            descricao: `Criou demanda ${tipoServico} para ${effectivePassengerName}`,
+            descricao: agencyAssistedMode
+              ? `Criou demanda ${tipoServico} em nome de ${solicitanteNome} para ${effectivePassengerName}`
+              : `Criou demanda ${tipoServico} para ${effectivePassengerName}`,
           })
           dispararAlertaNovaDemanda(
             effectivePassengerName,
@@ -611,7 +831,7 @@ export function NovaDemandaModal({
             preparada.id,
             preparada.serial_os,
           )
-          toast.success(`Demanda ${preparada.serial_os || preparada.id} criada!`)
+          toast.success(`Demanda ${preparada.serial_os || preparada.id} criada e encaminhada para cotação.`)
           onSaved?.(preparada)
           onClose()
           return
@@ -630,7 +850,9 @@ export function NovaDemandaModal({
       registrarLog({
         user_id: user.id, user_name: user.name, acao: 'criar',
         entidade: 'Atendimento', entidade_id: nova.id,
-        descricao: `Criou demanda ${tipoServico} para ${effectivePassengerName}`,
+        descricao: agencyAssistedMode
+          ? `Criou demanda ${tipoServico} em nome de ${solicitanteNome} para ${effectivePassengerName}`
+          : `Criou demanda ${tipoServico} para ${effectivePassengerName}`,
       })
       // V9: Alerta sonoro + notificação
       dispararAlertaNovaDemanda(effectivePassengerName, empresaSelecionada?.nome || '', nova.id, nova.serial_os)
@@ -638,6 +860,8 @@ export function NovaDemandaModal({
         toast.warning(`Demanda ${nova.serial_os || nova.id} salva como pendente por politica corporativa.`)
       } else if (resultado.policy.requiresAction) {
         toast.warning(`Demanda ${nova.serial_os || nova.id} salva como pendente. Conclua os requisitos obrigatorios da politica.`)
+      } else if (bookingMode === 'offline') {
+        toast.success(`Demanda ${nova.serial_os || nova.id} criada e encaminhada para cotação do consultor.`)
       } else if (resultado.approval.required) {
         toast.info(resultado.approval.configured
           ? `Demanda ${nova.serial_os || nova.id} enviada para aprovacao.`
@@ -666,8 +890,35 @@ export function NovaDemandaModal({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={editing ? 'Editar Demanda' : 'Nova Demanda'} size="xl">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={editing ? 'Editar Demanda' : agencyAssistedMode ? 'Nova Demanda para Cliente' : 'Nova Demanda'}
+      size="xl"
+    >
       <form onSubmit={handleSubmit} className="space-y-5">
+        <div
+          role="status"
+          data-booking-mode={bookingMode}
+          className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-950 dark:border-indigo-900/60 dark:bg-indigo-950/30 dark:text-indigo-100"
+        >
+          <div className="font-semibold">
+            {bookingMode === 'offline' ? 'Modalidade offline' : 'Modalidade online existente'}
+          </div>
+          <p className="mt-1 text-xs opacity-80">
+            {bookingMode === 'offline'
+              ? 'A solicitação será encaminhada para cotação do consultor. A aprovação ocorrerá somente depois da escolha de uma opção.'
+              : 'A modalidade foi definida pela integração online que criou esta demanda e será preservada nesta edição.'}
+          </p>
+        </div>
+        {agencyAssistedMode && !editing && (
+          <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-3 text-sm text-cyan-950 dark:border-cyan-900/60 dark:bg-cyan-950/30 dark:text-cyan-100">
+            <div className="font-semibold">Atendimento assistido pela agência</div>
+            <p className="mt-1 text-xs opacity-80">
+              Selecione a empresa, o solicitante que fez o pedido e um viajante ativo. O sistema registrará o atendente responsável e seguirá o mesmo ciclo de cotação, escolha e aprovação do portal.
+            </p>
+          </div>
+        )}
         {formReadOnly && (
           <div role="status" className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
             {hotelDemandLocked
@@ -724,7 +975,17 @@ export function NovaDemandaModal({
               const nextCompanyId = e.target.value
               const nextCompany = empresasNoContexto.find((empresa) => empresa.id === nextCompanyId)
               setEmpresaId(nextCompanyId)
+              setSolicitanteId('')
+              setSolicitanteNome('')
               setFuncionarioId(null)
+              setPassageiroNome('')
+              setDetAereo((current) => withAirPassengers(
+                current as DetalhesAereo & Record<string, unknown>,
+                [],
+              ))
+              setAirPassengerValidation({ passengerCount: 0, blockingIssues: [], pendingVerificationIds: [], lookupErrors: [] })
+              setAgencyRequesterSearch('')
+              setAgencyTravelerSearch('')
               setDetHotel((current) => ({
                 ...current,
                 rooms: current.rooms?.map((room) => ({ ...room, guests: [] })),
@@ -757,30 +1018,127 @@ export function NovaDemandaModal({
               </div>
             )}
           </div>
-          {tipoServico !== 'Hotel' && <div>
+          {agencyAssistedMode && <div>
+            <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">
+              Solicitante do cliente *
+            </label>
+            <div className="space-y-2">
+              <input
+                value={agencyRequesterSearch}
+                onChange={(event) => setAgencyRequesterSearch(event.target.value)}
+                className="bbt-input"
+                placeholder="Buscar por nome, e-mail, departamento ou centro de custo..."
+                disabled={!empresaId}
+                aria-label="Buscar solicitante do cliente"
+              />
+              <select
+                value={solicitanteId}
+                onChange={(event) => {
+                  const requester = agencyRequesters.find((item) => item.id === event.target.value)
+                  setSolicitanteId(requester?.id || '')
+                  setSolicitanteNome(requester?.name || '')
+                }}
+                className="bbt-input"
+                required
+                disabled={!empresaId || agencyRequesterLoading}
+              >
+                <option value="">
+                  {!empresaId
+                    ? 'Selecione primeiro a empresa'
+                    : agencyRequesterLoading
+                      ? 'Carregando solicitantes...'
+                      : 'Selecione quem pediu a viagem'}
+                </option>
+                {solicitanteId && !agencyRequesters.some((item) => item.id === solicitanteId) && (
+                  <option value={solicitanteId}>{solicitanteNome || 'Solicitante vinculado'}</option>
+                )}
+                {agencyRequesters.map((requester) => (
+                  <option key={requester.id} value={requester.id}>
+                    {requester.name}{requester.email ? ` · ${requester.email}` : ''}
+                  </option>
+                ))}
+              </select>
+              {agencyRequesterTotal > agencyRequesters.length && (
+                <p className="text-[11px] text-slate-500">
+                  Exibindo {agencyRequesters.length} de {agencyRequesterTotal} (limite {agencyRequesterLimit}). Digite acima para localizar outro solicitante.
+                </p>
+              )}
+              {empresaId && !agencyRequesterLoading && agencyRequesters.length === 0 && !agencyRequesterError && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  {agencyRequesterSearch.trim()
+                    ? 'Nenhum solicitante ativo foi encontrado para essa busca.'
+                    : 'A empresa não possui solicitante ativo. Cadastre ou ative um solicitante antes de criar a demanda.'}
+                </p>
+              )}
+            </div>
+          </div>}
+          {tipoServico !== 'Hotel' && tipoServico !== 'Aéreo' && <div>
             <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">
               {ocupanteLabel} *
             </label>
-            <PassageiroAutocomplete
-              value={passageiroNome}
-              onChange={setPassageiroNome}
-              onSelectFuncionario={(funcId, nome) => {
-                setFuncionarioId(funcId)
-                setPassageiroNome(nome)
-                const funcionario = funcionarios.find((item) => item.id === funcId)
-                if (funcionario?.cost_center_id || funcionario?.centro_custo) {
-                  setCostCenterId(funcionario.cost_center_id || null)
-                  setCentroCusto(funcionario.centro_custo || '')
-                } else {
-                  setCostCenterId(empresaSelecionada?.centro_custo_padrao_id || null)
-                  setCentroCusto(empresaSelecionada?.centro_custo_padrao || '')
-                }
-              }}
-              empresaId={empresaId}
-              funcionarioIdAtual={funcionarioId}
-              placeholder={`Digite o nome do ${ocupanteLabel.toLowerCase()}...`}
-              required
-            />
+            {agencyAssistedMode ? (
+              <div className="space-y-2">
+                <input
+                  value={agencyTravelerSearch}
+                  onChange={(event) => setAgencyTravelerSearch(event.target.value)}
+                  className="bbt-input"
+                  placeholder="Buscar por nome, e-mail, matrícula ou código..."
+                  disabled={!empresaId}
+                  aria-label={`Buscar ${ocupanteLabel.toLowerCase()}`}
+                />
+                <select
+                  value={funcionarioId || ''}
+                  onChange={(event) => {
+                    const traveler = agencyTravelers.find((item) => item.id === event.target.value)
+                    setFuncionarioId(traveler?.id || null)
+                    setPassageiroNome(traveler?.name || '')
+                    setCostCenterId(traveler?.costCenterId || empresaSelecionada?.centro_custo_padrao_id || null)
+                    setCentroCusto(traveler?.costCenter || empresaSelecionada?.centro_custo_padrao || '')
+                  }}
+                  className="bbt-input"
+                  required
+                  disabled={!empresaId || agencyTravelerLoading}
+                >
+                  <option value="">
+                    {agencyTravelerLoading ? 'Carregando viajantes...' : `Selecione o ${ocupanteLabel.toLowerCase()}`}
+                  </option>
+                  {funcionarioId && !agencyTravelers.some((item) => item.id === funcionarioId) && (
+                    <option value={funcionarioId}>{passageiroNome || 'Viajante vinculado'}</option>
+                  )}
+                  {agencyTravelers.map((traveler) => (
+                    <option key={traveler.id} value={traveler.id}>
+                      {traveler.name}{traveler.identificationCode ? ` · ${traveler.identificationCode}` : ''}
+                    </option>
+                  ))}
+                </select>
+                {agencyTravelerTotal > agencyTravelers.length && (
+                  <p className="text-[11px] text-slate-500">
+                    Exibindo {agencyTravelers.length} de {agencyTravelerTotal} (limite {agencyTravelerLimit}). Digite acima para localizar outro viajante.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <PassageiroAutocomplete
+                value={passageiroNome}
+                onChange={setPassageiroNome}
+                onSelectFuncionario={(funcId, nome) => {
+                  setFuncionarioId(funcId)
+                  setPassageiroNome(nome)
+                  const funcionario = funcionarios.find((item) => item.id === funcId)
+                  if (funcionario?.cost_center_id || funcionario?.centro_custo) {
+                    setCostCenterId(funcionario.cost_center_id || null)
+                    setCentroCusto(funcionario.centro_custo || '')
+                  } else {
+                    setCostCenterId(empresaSelecionada?.centro_custo_padrao_id || null)
+                    setCentroCusto(empresaSelecionada?.centro_custo_padrao || '')
+                  }
+                }}
+                empresaId={empresaId}
+                funcionarioIdAtual={funcionarioId}
+                placeholder={`Digite o nome do ${ocupanteLabel.toLowerCase()}...`}
+                required
+              />
+            )}
           </div>}
           <div>
             <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-1.5 tracking-wider">Data do Atendimento</label>
@@ -792,6 +1150,11 @@ export function NovaDemandaModal({
               <option>WhatsApp</option><option>E-mail</option><option>Telefone</option><option>Indicação</option><option>Portal</option><option>Outro</option>
             </select>
           </div>
+          {agencyAssistedMode && (agencyRequesterError || agencyTravelerError) && (
+            <div role="alert" className="md:col-span-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-200">
+              {[agencyRequesterError, agencyTravelerError].filter(Boolean).join(' ')}
+            </div>
+          )}
         </div>
 
         {/* ===== DETALHES POR TIPO ===== */}
@@ -897,7 +1260,37 @@ export function NovaDemandaModal({
             <AirDemandConfigurator
               value={detAereo}
               onChange={setDetAereo}
-              disabled={readOnly}
+              companyId={empresaId}
+              legacyPrimaryPassenger={funcionarioId ? {
+                employee_id: funcionarioId,
+                name: passageiroNome.trim() || undefined,
+              } : null}
+              legacyUnlinkedPassengerName={editing?.empresa_id === empresaId
+                ? legacyUnlinkedAirPassengerName
+                : ''}
+              onPrimaryPassengerChange={(passenger, profile) => {
+                setFuncionarioId(passenger?.employee_id || null)
+                setPassageiroNome(passenger?.name || '')
+                const employee = funcionarios.find((item) => item.id === passenger?.employee_id)
+                if (passenger) {
+                  setCostCenterId(
+                    (profile
+                      ? profile.costCenterId
+                      : employee?.cost_center_id)
+                    || empresaSelecionada?.centro_custo_padrao_id
+                    || null,
+                  )
+                  setCentroCusto(
+                    (profile
+                      ? profile.costCenter
+                      : employee?.centro_custo)
+                    || empresaSelecionada?.centro_custo_padrao
+                    || '',
+                  )
+                }
+              }}
+              onPassengerValidationChange={setAirPassengerValidation}
+              disabled={formReadOnly}
             />
           </CampoBox>
         )}
@@ -937,21 +1330,19 @@ export function NovaDemandaModal({
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
               <Field label="Custo (o que pagamos) R$">
-                <input type="number" step="0.01" min={0} value={valorCusto || ''} onChange={(e) => setValorCusto(parseFloat(e.target.value) || 0)}
-                  className="bbt-input" placeholder="Ex: 250,00" />
+                <NumericDecimalInput value={valorCusto} emptyValue={0} blankWhenZero onNumberChange={(value) => setValorCusto(value ?? 0)}
+                  placeholder="Ex: 250,00" />
               </Field>
               <Field label={markupDesabilitado ? 'Venda = Custo (sem markup)' : 'Venda (o que cobramos) R$'}>
-                <input type="number" step="0.01" min={0} value={valorVenda || ''} onChange={(e) => setValorVenda(parseFloat(e.target.value) || 0)}
-                  className="bbt-input" placeholder="Ex: 350,00" disabled={markupDesabilitado} />
+                <NumericDecimalInput value={valorVenda} emptyValue={0} blankWhenZero onNumberChange={(value) => setValorVenda(value ?? 0)}
+                  placeholder="Ex: 350,00" disabled={markupDesabilitado} />
               </Field>
               <Field label="Valor comparativo R$">
-                <input
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  value={valorReferenciaEconomia || ''}
-                  onChange={(e) => setValorReferenciaEconomia(parseFloat(e.target.value) || 0)}
-                  className="bbt-input"
+                <NumericDecimalInput
+                  value={valorReferenciaEconomia}
+                  emptyValue={0}
+                  blankWhenZero
+                  onNumberChange={(value) => setValorReferenciaEconomia(value ?? 0)}
                   placeholder="Ex: 420,00"
                 />
               </Field>
@@ -1000,11 +1391,11 @@ export function NovaDemandaModal({
                 </div>
                 {usarTaxaFixa ? (
                   <Field label="Taxa fixa (R$)">
-                    <input type="number" step="0.01" min={0} value={taxaValorFixo || ''} onChange={(e) => setTaxaValorFixo(parseFloat(e.target.value) || 0)} className="bbt-input" />
+                    <NumericDecimalInput value={taxaValorFixo} emptyValue={0} blankWhenZero onNumberChange={(value) => setTaxaValorFixo(value ?? 0)} />
                   </Field>
                 ) : (
                   <Field label="Taxa % sobre a venda">
-                    <input type="number" step="0.5" min={0} max={100} value={taxaPercentual || ''} onChange={(e) => setTaxaPercentual(parseFloat(e.target.value) || 0)} className="bbt-input" />
+                    <NumericDecimalInput value={taxaPercentual} emptyValue={0} blankWhenZero minValue={0} maxValue={100} onNumberChange={(value) => setTaxaPercentual(value ?? 0)} />
                   </Field>
                 )}
               </div>
@@ -1138,7 +1529,7 @@ export function NovaDemandaModal({
               <span />
               <div className="flex gap-2">
                 <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
-                <button type="submit" className="bbt-button-primary">Criar Demanda</button>
+                <button type="submit" className="bbt-button-primary">Criar e enviar para cotação</button>
               </div>
             </>
           )}

@@ -27,6 +27,11 @@ const demandModal = readFileSync(
 )
 
 describe('requester demand governance UI', () => {
+  it('derives company visibility from the authoritative dashboard session', () => {
+    expect(requesterPortal).toContain('const { context: corporateContext, selectContext, user } = useCorporateContext()')
+    expect(requesterPortal).not.toContain("export default function PortalEmpresaPage() {\n  const user = typeof window !== 'undefined' ? getCurrentUser() : null")
+  })
+
   it('persists the authenticated requester identity in a new demand', () => {
     expect(requesterPortal).toContain('solicitanteAtual={solicitanteAtual}')
     expect(requesterPortal).not.toContain("(!isInternalUser ? authenticatedUser?.id : '')")
@@ -38,12 +43,13 @@ describe('requester demand governance UI', () => {
     expect(demandService).toContain('...(requester ? { solicitante_id: requester.id } : {})')
   })
 
-  it('reports whether the demand entered the governed approval queue', () => {
-    expect(requesterPortal).toContain('persistida.governance?.approval.required')
-    expect(requesterPortal).toContain('persistida.governance.approval.configured')
-    expect(requesterPortal).toContain('enviado para aprovação')
-    expect(requesterPortal).toContain('workflow de aprovação não está configurado')
+  it('keeps a manual demand in quotation before the governed approval queue', () => {
+    expect(requesterPortal).toContain('booking_mode: bookingMode')
+    expect(requesterPortal).toContain('shouldSubmitDemandOnCreate(bookingMode)')
+    expect(requesterPortal).toContain('enviado para cotação por serviço do consultor')
     expect(requesterPortal.indexOf('persistida.governance?.policy.blocked'))
+      .toBeLessThan(requesterPortal.indexOf("bookingMode === 'offline'"))
+    expect(requesterPortal.indexOf("bookingMode === 'offline'"))
       .toBeLessThan(requesterPortal.indexOf('persistida.governance?.approval.required'))
   })
 

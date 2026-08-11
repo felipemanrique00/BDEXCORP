@@ -3,7 +3,13 @@ import type { AirCabinClass } from '@/lib/offline-travel/services/air/schema'
 export type OfflineAirPassengerType = 'adulto' | 'crianca' | 'bebe'
 
 export interface OfflineAirPassengerSummary {
+  /** Stable compatibility identifier. New relational flows should prefer demandTravelerId. */
   id?: string
+  demandTravelerId?: string
+  employeeId?: string
+  sequence?: number
+  /** Código corporativo não sensível para distinguir passageiros homônimos. */
+  identificationCode?: string
   name: string
   type?: OfflineAirPassengerType
 }
@@ -81,11 +87,15 @@ export interface OfflineAirQuoteOptionReadModel extends Omit<OfflineAirQuoteOpti
   id: string
   optionNumber?: number
   totalMinor?: number
+  /** Validating carrier from the canonical quote option; it may differ from a segment operator. */
+  validatingAirlineCode?: string
+  validatingAirlineName?: string
 }
 
 export interface OfflineAirQuoteRoundReadModel {
   id: string
   demandId: string
+  createdAt?: string | null
   expiresAt?: string | null
   options: OfflineAirQuoteOptionReadModel[]
 }
@@ -99,6 +109,10 @@ export interface OfflineAirApprovedSnapshot {
 }
 
 export interface OfflineAirTicketDraft {
+  /** Stable UI identity; never derive ticket ownership from a possibly duplicated name. */
+  passengerId: string
+  /** Canonical relational identifier sent to the backend when available. */
+  demandTravelerId?: string
   passengerName: string
   ticketNumber: string
 }

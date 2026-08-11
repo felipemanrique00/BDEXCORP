@@ -3,8 +3,10 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
+  approvalPolicyLabel,
   buildApprovalSubjectPresentation,
   extractAirQuoteApprovalSummary,
+  extractHotelQuoteApprovalSummary,
 } from '@/lib/approvals/subject-presentation'
 
 const subject = {
@@ -28,9 +30,18 @@ const subject = {
     option: {
       id: 'private-option-id',
       supplierName: 'LATAM Airlines',
+      title: 'LATAM Airlines - REC - GYN',
       amount: 3804.70,
       currency: 'BRL',
       refundable: false,
+      breakdown: {
+        fare: 3678.74,
+        taxes: 110.96,
+        rav: 0,
+        rac: 15,
+        total: 3804.70,
+        currency: 'BRL',
+      },
       air: {
         airlineName: 'LATAM Airlines',
         airlineCode: 'LA',
@@ -108,6 +119,8 @@ describe('air quote approval presentation', () => {
 
     const presentation = buildApprovalSubjectPresentation(subject)
     expect(presentation.kind).toBe('air_quote')
+    expect(extractHotelQuoteApprovalSummary(subject)).toBeNull()
+    expect(approvalPolicyLabel('local-air-selection-approval')).toBe('Aprovação da cotação aérea escolhida')
     expect(JSON.stringify(presentation)).not.toMatch(/private-demand-id|private-quote-id|private-option-id/)
   })
 
@@ -116,7 +129,11 @@ describe('air quote approval presentation', () => {
     expect(component).toContain('Itinerário escolhido')
     expect(component).toContain('Prazo de emissão')
     expect(component).toContain('Regras tarifárias')
+    expect(component).toContain("if (presentation?.kind === 'air_quote')")
+    expect(component.indexOf('const airQuote = extractAirQuoteApprovalSummary(subject)'))
+      .toBeLessThan(component.indexOf('const hotelQuote = extractHotelQuoteApprovalSummary(subject)'))
     expect(component).not.toContain('JSON.stringify(subject)')
     expect(component).not.toContain('Object.entries(subject)')
   })
+
 })

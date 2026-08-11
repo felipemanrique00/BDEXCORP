@@ -14,14 +14,16 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 import { toast } from 'sonner'
 
 import { DateTimeInput } from '@/components/ui/date-input'
+import { DecimalInput } from '@/components/ui/decimal-input'
+import { formatDecimalInput } from '@/lib/decimal-input'
 import {
   correctOfflineReservationFromServer,
   createOfflineReservationFromServer,
   getOfflineReservationFromServer,
   issueOfflineReservationFromServer,
 } from '@/lib/offline-travel/client'
-import { offlineServiceLabel } from '@/lib/offline-travel/catalog'
-import { sumMoneyInputs } from '@/lib/offline-travel/money'
+import { offlineServiceFromDemand, offlineServiceLabel } from '@/lib/offline-travel/catalog'
+import { formatMinorUnits, moneyToMinorUnits, sumMoneyInputs } from '@/lib/offline-travel/money'
 import { isOfflineDemandEligibleForOperation } from '@/lib/offline-travel/operation-eligibility'
 import { hotelGuestNames } from '@/lib/offline-travel/hotel-guests'
 import { listOfflineAirQuotesFromServer } from '@/lib/offline-travel/services/air/client'
@@ -50,6 +52,7 @@ import {
   type OfflineAirApprovedSnapshot,
   type OfflineAirOperationDraft,
 } from '@/components/travel/services/air'
+import { createAirTicketDrafts } from '@/components/travel/services/air/ticket-drafts'
 
 export type OfflineOperation = 'reservation' | 'reservation_and_issue' | 'issue_existing' | 'correct_existing'
 
@@ -281,7 +284,7 @@ export function OfflineTravelOperationForm({
   const [startsAt, setStartsAt] = useState('')
   const [endsAt, setEndsAt] = useState('')
   const [grossAmount, setGrossAmount] = useState('')
-  const [taxAmount, setTaxAmount] = useState('0')
+  const [taxAmount, setTaxAmount] = useState('0,00')
   const [currency, setCurrency] = useState('BRL')
   const [details, setDetails] = useState<DetailState>({ ...EMPTY_DETAILS })
   const [reservationEvidence, setReservationEvidence] = useState<Record<string, unknown>>({
@@ -509,9 +512,11 @@ export function OfflineTravelOperationForm({
     const firstSegment = option.segments[0]
     const lastSegment = option.segments[option.segments.length - 1]
     const passengerNames = context.snapshot.demand.passengers.map((passenger) => passenger.name)
-    const taxesAndFees = Number(option.pricing.taxes || 0)
-      + Number(option.pricing.rav || 0)
-      + Number(option.pricing.rac || 0)
+    const taxesAndFees = formatMinorUnits(
+      moneyToMinorUnits(option.pricing.taxes || '0')
+      + moneyToMinorUnits(option.pricing.rav || '0')
+      + moneyToMinorUnits(option.pricing.rac || '0'),
+    )
     const operationalSupplierName = option.segments[0]?.airlineName || 'Companhia aérea'
     const initialOperation: OfflineAirOperationDraft = {
       reservationSystem: option.reservationSystem,
@@ -521,7 +526,7 @@ export function OfflineTravelOperationForm({
       issuedAt: operationRef.current === 'reservation_and_issue'
         ? toLocalDateTimeInput(new Date().toISOString())
         : '',
-      tickets: passengerNames.map((passengerName) => ({ passengerName, ticketNumber: '' })),
+      tickets: createAirTicketDrafts(context.snapshot.demand.passengers),
       paymentMethod: paymentMethod === 'dinheiro' ? 'outro' : paymentMethod,
       paymentReference: '',
       operationalNotes: String(demand.observacoes || ''),
@@ -533,7 +538,7 @@ export function OfflineTravelOperationForm({
     setStartsAt(firstSegment?.departureAt || '')
     setEndsAt(lastSegment?.arrivalAt || '')
     setGrossAmount(option.pricing.fare)
-    setTaxAmount(moneyInput(taxesAndFees))
+    setTaxAmount(formatDecimalInput(taxesAndFees))
     setCurrency(option.pricing.currency || 'BRL')
     setDetails({
       ...detailsFromDemand(demand),
@@ -592,20 +597,46 @@ export function OfflineTravelOperationForm({
         return
       }
       const companyName = companyById.get(demand.empresa_id)?.nome || 'Empresa não localizada'
+      const legacyDemandSummary = atendimentoToOfflineAirDemandSummary(demand, companyName)
+      const relationalPassengers = [...(Array.isArray(result.passengers) ? result.passengers : [])]
+        .sort((left, right) => left.sequence - right.sequence)
+        .map((passenger) => ({
+          id: passenger.demandTravelerId,
+          demandTravelerId: passenger.demandTravelerId,
+          employeeId: passenger.employeeId || undefined,
+          sequence: passenger.sequence,
+          identificationCode: passenger.identificationCode || undefined,
+          name: passenger.name,
+          type: 'adulto' as const,
+        }))
       const context: SelectedAirQuoteContext = {
         quoteId: quote.id,
         lifecycleStatus: result.lifecycleStatus || quote.lifecycleStatus,
         approvalInstanceId: serverOption.approvalInstanceId,
         approvalStatus: serverOption.approvalStatus,
         snapshot: {
-          demand: atendimentoToOfflineAirDemandSummary(demand, companyName),
+          demand: relationalPassengers.length
+            ? { ...legacyDemandSummary, passengers: relationalPassengers }
+            : legacyDemandSummary,
           quoteId: quote.id,
-          approvedAt: serverOption.approvalStatus === 'approved' ? new Date().toISOString() : null,
+          selectedAt: serverOption.selectedAt,
+          approvedAt: serverOption.approvedAt,
           option: toOfflineAirQuoteOptionReadModel(serverOption),
         },
       }
       setSelectedAirQuote(context)
-      if (operationRef.current !== 'correct_existing') {
+      if (operationRef.current === 'correct_existing') {
+        const option = context.snapshot.option
+        setAirOperation((current) => ({
+          ...current,
+          reservationSystem: current.reservationSystem || option.reservationSystem,
+          locator: current.locator || option.locator,
+          operationalSupplierName: current.operationalSupplierName
+            || option.segments[0]?.airlineName
+            || 'Companhia aérea',
+          tickets: createAirTicketDrafts(context.snapshot.demand.passengers, current.tickets),
+        }))
+      } else {
         applySelectedAirQuote(context, demand)
         if (operationRef.current === 'issue_existing') {
           const existing = reservations.find((reservation) => (
@@ -755,6 +786,23 @@ export function OfflineTravelOperationForm({
         ? detail.details.passengers.join('\n')
         : reservation.passengerName || '')
       setNotes(detail.notes || '')
+      if (detail.serviceKey === 'aereo') {
+        const evidence = detail.details.evidence || {}
+        const reservationSystem = typeof evidence.reservationSystem === 'string'
+          ? evidence.reservationSystem
+          : ''
+        const reservationConfirmedAt = typeof evidence.reservationConfirmedAt === 'string'
+          ? toLocalDateTimeInput(evidence.reservationConfirmedAt)
+          : ''
+        setAirOperation((current) => ({
+          ...current,
+          reservationSystem: reservationSystem || current.reservationSystem,
+          locator: detail.externalReference || current.locator,
+          operationalSupplierName: detail.supplierName || current.operationalSupplierName,
+          reservationConfirmedAt: reservationConfirmedAt || current.reservationConfirmedAt,
+          operationalNotes: detail.notes || '',
+        }))
+      }
     } catch (error) {
       setReservationId('')
       setReservationVersion(null)
@@ -1183,7 +1231,7 @@ export function OfflineTravelOperationForm({
             </div>
           )}
 
-          <div className="grid gap-4 md:grid-cols-2">
+          {!(serviceKey === 'aereo' && selectedAirQuote) && <div className="grid gap-4 md:grid-cols-2">
             <Field label="Serviço *">
               <select
                 value={serviceKey}
@@ -1213,7 +1261,7 @@ export function OfflineTravelOperationForm({
                 )}
               </div>
             </Field>
-          </div>
+          </div>}
 
           {showsReservationData && !(serviceKey === 'aereo' && selectedAirQuote) && (
             <section className="space-y-4 rounded-lg border border-bbt-gray-100 p-4 dark:border-slate-700" aria-labelledby="offline-reservation-data-title">
@@ -1280,13 +1328,13 @@ export function OfflineTravelOperationForm({
               )}
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 <Field label="Tarifa *">
-                  <input type="number" min="0" step="0.01" value={grossAmount} onChange={(event) => setGrossAmount(event.target.value)} className={`bbt-input ${locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}`} placeholder="0,00" required readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
+                  <DecimalInput value={grossAmount} onValueChange={setGrossAmount} prefix={currency || 'BRL'} className={locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''} placeholder="0,00" required readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
                 </Field>
                 <Field label="Taxas">
-                  <input type="number" min="0" step="0.01" value={taxAmount} onChange={(event) => setTaxAmount(event.target.value)} className={`bbt-input ${locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}`} placeholder="0,00" readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
+                  <DecimalInput value={taxAmount} onValueChange={setTaxAmount} prefix={currency || 'BRL'} className={locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''} placeholder="0,00" readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
                 </Field>
                 <Field label="Total *">
-                  <input type="text" value={totalAmount} className="bbt-input bg-slate-50 font-semibold dark:bg-slate-900/40" placeholder="Calculado automaticamente" readOnly aria-readonly="true" />
+                  <input type="text" value={formatDecimalInput(totalAmount)} className="bbt-input bg-slate-50 font-semibold tabular-nums dark:bg-slate-900/40" placeholder="Calculado automaticamente" readOnly aria-readonly="true" />
                 </Field>
                 <Field label="Moeda *">
                   <input value={currency} onChange={(event) => setCurrency(event.target.value.toUpperCase().slice(0, 3))} className={`bbt-input uppercase ${locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}`} maxLength={3} required readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
@@ -1412,38 +1460,44 @@ export function OfflineTravelOperationForm({
           )}
 
           {includesIssue && serviceKey === 'aereo' && selectedAirQuote && (
-            <section className="space-y-4 rounded-lg border border-indigo-200 bg-indigo-50/30 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/10" aria-labelledby="offline-air-document-title">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="h-4 w-4 text-indigo-600 dark:text-indigo-300" />
-                <h3 id="offline-air-document-title" className="font-semibold text-bbt-primary dark:text-white">
-                  Documento e voucher
-                </h3>
+            <section className="rounded-lg border border-indigo-200 bg-indigo-50/30 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/10" aria-labelledby="offline-air-document-title">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-indigo-600 dark:text-indigo-300" />
+                  <div>
+                    <h3 id="offline-air-document-title" className="font-semibold text-bbt-primary dark:text-white">
+                      Voucher aéreo
+                    </h3>
+                    <p className="mt-0.5 text-xs text-slate-500">O localizador e os bilhetes informados acima serão usados automaticamente.</p>
+                  </div>
+                </div>
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                  <input type="checkbox" checked={generateVoucher} onChange={(event) => setGenerateVoucher(event.target.checked)} className="h-4 w-4 accent-bbt-accent" />
+                  Gerar voucher completo
+                </label>
               </div>
-              <div className="grid gap-4 md:grid-cols-2">
-                <Field label="Referência da emissão *">
-                  <input value={documentReference} onChange={(event) => setDocumentReference(event.target.value)} className="bbt-input" placeholder="Localizador, ordem ou referência da emissão" required />
-                </Field>
-                <Field label="Canal da reserva *">
-                  <select value={channel} onChange={(event) => setChannel(event.target.value as OfflineTravelChannel)} className="bbt-input">
-                    {CHANNEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-                  </select>
-                </Field>
-              </div>
-              <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-                <input type="checkbox" checked={generateVoucher} onChange={(event) => setGenerateVoucher(event.target.checked)} className="h-4 w-4 accent-bbt-accent" />
-                Gerar voucher aéreo completo automaticamente
-              </label>
             </section>
           )}
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Justificativa de política">
-              <textarea value={policyJustification} onChange={(event) => setPolicyJustification(event.target.value)} className="bbt-input min-h-24 py-2" placeholder="Informe quando a política exigir justificativa" />
-            </Field>
-            <Field label="Observações operacionais">
-              <textarea value={notes} onChange={(event) => setNotes(event.target.value)} className="bbt-input min-h-24 py-2" placeholder="Detalhes internos e evidências adicionais" />
-            </Field>
-          </div>
+          {serviceKey === 'aereo' && selectedAirQuote ? (
+            <details className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-700 dark:bg-slate-900/40">
+              <summary className="cursor-pointer text-sm font-semibold text-bbt-primary dark:text-white">Justificativa de política, se exigida</summary>
+              <div className="mt-4">
+                <Field label="Justificativa de política">
+                  <textarea value={policyJustification} onChange={(event) => setPolicyJustification(event.target.value)} className="bbt-input min-h-24 py-2" placeholder="Preencha somente quando a política da empresa exigir" />
+                </Field>
+              </div>
+            </details>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Justificativa de política">
+                <textarea value={policyJustification} onChange={(event) => setPolicyJustification(event.target.value)} className="bbt-input min-h-24 py-2" placeholder="Informe quando a política exigir justificativa" />
+              </Field>
+              <Field label="Observações operacionais">
+                <textarea value={notes} onChange={(event) => setNotes(event.target.value)} className="bbt-input min-h-24 py-2" placeholder="Detalhes internos e evidências adicionais" />
+              </Field>
+            </div>
+          )}
 
           <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition ${
             confirmed
@@ -1618,18 +1672,7 @@ function submitLabel(operation: OfflineOperation): string {
 }
 
 function serviceFromDemand(demand: Atendimento): OfflineTravelService {
-  const normalized = normalizeText(String(demand.tipo_servico || ''))
-  if (normalized.includes('aereo')) return 'aereo'
-  if (normalized.includes('hotel')) return 'hotelaria'
-  if (normalized.includes('carro') || normalized.includes('locacao')) return 'locacao'
-  if (normalized.includes('rodovi') || normalized.includes('onibus')) return 'rodoviario'
-  if (normalized.includes('ferro') || normalized.includes('trem')) return 'ferroviario'
-  if (normalized.includes('transfer')) return 'transfer'
-  if (normalized.includes('seguro')) return 'seguro'
-  if (normalized.includes('lazer')) return 'lazer'
-  if (normalized.includes('marit') || normalized.includes('cruzeiro')) return 'maritimo'
-  if (normalized.includes('pacote')) return 'pacotes'
-  return 'outros'
+  return offlineServiceFromDemand(String(demand.tipo_servico || '')) || 'outros'
 }
 
 function normalizeService(value: string): OfflineTravelService {
@@ -1768,7 +1811,7 @@ function isSelectedHotelQuoteField(field: DetailKey): boolean {
 }
 
 function moneyInput(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(2) : '0.00'
+  return Number.isFinite(value) ? value.toFixed(2).replace('.', ',') : '0,00'
 }
 
 function formatQuoteMoney(value: number, currency: string): string {

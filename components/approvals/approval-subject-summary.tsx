@@ -22,6 +22,7 @@ import {
   type ApprovalBusinessSummary,
   type HotelQuoteApprovalSummary,
 } from '@/lib/approvals/subject-presentation'
+import { AirlineLogo } from '@/components/travel/services/air/airline-logo'
 
 export function ApprovalSubjectSummary({
   subject,
@@ -32,17 +33,21 @@ export function ApprovalSubjectSummary({
   context?: ApprovalPresentationContext
   presentation?: ApprovalSubjectPresentation | null
 }) {
-  const hotelQuote = presentation?.kind === 'hotel_quote'
-    ? presentation.hotelQuote
-    : extractHotelQuoteApprovalSummary(subject)
-  if (hotelQuote) return <HotelQuoteSummary summary={hotelQuote} context={context} />
-  const airQuote = presentation?.kind === 'air_quote'
-    ? presentation.airQuote
-    : extractAirQuoteApprovalSummary(subject)
+  if (presentation?.kind === 'air_quote') {
+    return <AirQuoteSummary summary={presentation.airQuote} context={context} />
+  }
+  if (presentation?.kind === 'hotel_quote') {
+    return <HotelQuoteSummary summary={presentation.hotelQuote} context={context} />
+  }
+  if (presentation?.kind === 'business') {
+    return <GenericSubjectSummary summary={presentation.business} />
+  }
+
+  const airQuote = extractAirQuoteApprovalSummary(subject)
   if (airQuote) return <AirQuoteSummary summary={airQuote} context={context} />
-  const business = presentation?.kind === 'business'
-    ? presentation.business
-    : extractApprovalBusinessSummary(subject, context)
+  const hotelQuote = extractHotelQuoteApprovalSummary(subject)
+  if (hotelQuote) return <HotelQuoteSummary summary={hotelQuote} context={context} />
+  const business = extractApprovalBusinessSummary(subject, context)
   return <GenericSubjectSummary summary={business} />
 }
 
@@ -62,9 +67,18 @@ function AirQuoteSummary({
               <ShieldCheck className="h-4 w-4" />
               Resumo para decisão
             </div>
-            <h4 className="mt-1 text-lg font-bold text-bbt-primary dark:text-white">
-              {summary.demandNumber} · {summary.airlineName}
-            </h4>
+            <div className="mt-1 flex min-w-0 items-center gap-3">
+              <AirlineLogo
+                iataCode={summary.segments[0]?.airlineCode}
+                airlineName={summary.airlineName}
+                size="sm"
+                decorative
+                className="rounded-md bg-white px-1 dark:bg-slate-900"
+              />
+              <h4 className="min-w-0 text-lg font-bold text-bbt-primary dark:text-white">
+                {summary.demandNumber} · {summary.airlineName}
+              </h4>
+            </div>
           </div>
           <div className="rounded-md bg-white px-3 py-2 text-right shadow-sm dark:bg-slate-900">
             <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total escolhido</div>
@@ -108,7 +122,12 @@ function AirQuoteSummary({
                   <tr key={`${segment.sequence}-${segment.flightNumber}`}>
                     <td className="whitespace-nowrap px-3 py-2"><strong>Sai:</strong> {formatDateTime(segment.departureAt)}<br /><strong>Chega:</strong> {formatDateTime(segment.arrivalAt)}</td>
                     <td className="px-3 py-2">{airLocation(segment.originCode, segment.originName)}<br />→ {airLocation(segment.destinationCode, segment.destinationName)}</td>
-                    <td className="px-3 py-2">{segment.airlineName}<br /><span className="text-slate-500">{segment.airlineCode} {segment.flightNumber}</span></td>
+                    <td className="px-3 py-2">
+                      <div className="flex min-w-40 items-center gap-2">
+                        <AirlineLogo iataCode={segment.airlineCode} airlineName={segment.airlineName} size="xs" decorative />
+                        <div>{segment.airlineName}<br /><span className="text-slate-500">{segment.airlineCode} {segment.flightNumber}</span></div>
+                      </div>
+                    </td>
                     <td className="px-3 py-2">{airCabinLabel(segment.cabinClass)} · {segment.bookingClass || 'Não informada'}</td>
                     <td className="px-3 py-2"><span className="inline-flex items-center gap-1"><Luggage className="h-3.5 w-3.5" />{segment.baggagePieces} volume(s)</span></td>
                   </tr>

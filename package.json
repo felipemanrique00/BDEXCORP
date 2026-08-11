@@ -13,6 +13,7 @@
     "db:migrate": "node scripts/migrate.mjs up",
     "db:status": "node scripts/migrate.mjs status",
     "db:bootstrap": "node scripts/bootstrap.mjs",
+    "db:seed:local-offline-approvals": "node scripts/seed-local-offline-approval-routing.mjs",
     "db:validate-migrations": "node scripts/validate-migrations.mjs",
     "db:data-inventory": "node scripts/data-migration.mjs inventory",
     "db:demands-dry-run": "node scripts/data-migration.mjs demands-dry-run",

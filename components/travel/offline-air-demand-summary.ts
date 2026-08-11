@@ -1,4 +1,5 @@
 import type { OfflineAirDemandSummary } from '@/components/travel/services/air'
+import { airPassengersFromDetails } from '@/lib/air-demand/passenger-selection'
 import type { Atendimento } from '@/types'
 
 export function atendimentoToOfflineAirDemandSummary(
@@ -47,6 +48,21 @@ export function atendimentoToOfflineAirDemandSummary(
     }
   }
 
+  const structuredPassengers = airPassengersFromDetails(details, demand.funcionario_id && demand.passageiro_nome ? {
+    employee_id: demand.funcionario_id,
+    name: demand.passageiro_nome,
+  } : null)
+  const passengers = structuredPassengers.length
+    ? structuredPassengers.map((passenger, index) => ({
+        id: passenger.employee_id,
+        employeeId: passenger.employee_id,
+        name: passenger.name || (index === 0 ? demand.passageiro_nome : '') || passenger.employee_id,
+        type: 'adulto' as const,
+      }))
+    : demand.passageiro_nome?.trim()
+      ? [{ name: demand.passageiro_nome.trim(), type: 'adulto' as const }]
+      : []
+
   return {
     id: demand.id,
     number: demand.serial_os || demand.id,
@@ -54,9 +70,7 @@ export function atendimentoToOfflineAirDemandSummary(
     requesterName: demand.solicitante_nome,
     requestedCabin: details.classe,
     preferredAirlines: details.preferred_airlines || [],
-    passengers: demand.passageiro_nome
-      ? [{ id: demand.funcionario_id || undefined, name: demand.passageiro_nome, type: 'adulto' }]
-      : [],
+    passengers,
     requestedSegments,
   }
 }

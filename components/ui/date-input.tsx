@@ -1,6 +1,6 @@
 'use client'
 
-import { CalendarDays, CalendarClock } from 'lucide-react'
+import { CalendarDays, CalendarClock, Clock3 } from 'lucide-react'
 import {
   forwardRef,
   useRef,
@@ -15,7 +15,7 @@ type TemporalInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | '
   pickerLabel?: string
 }
 
-type TemporalKind = 'date' | 'datetime-local'
+type TemporalKind = 'date' | 'datetime-local' | 'time'
 
 function assignRef<T>(ref: ForwardedRef<T>, value: T | null) {
   if (typeof ref === 'function') {
@@ -38,9 +38,13 @@ const BrowserSafeTemporalInput = forwardRef<HTMLInputElement, TemporalInputProps
 ) {
   const { temporalKind, ...inputProps } = props
   const inputRef = useRef<HTMLInputElement | null>(null)
-  const Icon = temporalKind === 'date' ? CalendarDays : CalendarClock
+  const Icon = temporalKind === 'date' ? CalendarDays : temporalKind === 'time' ? Clock3 : CalendarClock
   const resolvedPickerLabel = pickerLabel
-    || (temporalKind === 'date' ? 'Abrir calendário' : 'Abrir calendário e horário')
+    || (temporalKind === 'date'
+      ? 'Abrir calendário'
+      : temporalKind === 'time'
+        ? 'Abrir seletor de horário'
+        : 'Abrir calendário e horário')
 
   function openPicker() {
     const input = inputRef.current
@@ -70,7 +74,7 @@ const BrowserSafeTemporalInput = forwardRef<HTMLInputElement, TemporalInputProps
         autoComplete="off"
         disabled={disabled}
         readOnly={readOnly}
-        className={cn('bbt-input bbt-temporal-input pl-9 pr-10 tabular-nums', className)}
+        className={cn('bbt-input bbt-temporal-input pr-10 tabular-nums', className)}
       />
       <button
         type="button"
@@ -100,5 +104,11 @@ export const DateInput = forwardRef<HTMLInputElement, TemporalInputProps>(
 export const DateTimeInput = forwardRef<HTMLInputElement, TemporalInputProps>(
   function DateTimeInput(props, ref) {
     return <BrowserSafeTemporalInput {...props} temporalKind="datetime-local" ref={ref} />
+  },
+)
+
+export const TimeInput = forwardRef<HTMLInputElement, TemporalInputProps>(
+  function TimeInput(props, ref) {
+    return <BrowserSafeTemporalInput {...props} temporalKind="time" ref={ref} />
   },
 )

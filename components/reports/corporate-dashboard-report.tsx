@@ -31,8 +31,9 @@ import { useCorporateCompanyScope } from '@/components/corporate-context-provide
 import { getAtendimentosFiltro } from '@/lib/atendimentos-storage'
 import { canAccessCompanyPermission, getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
 import { buildCsv, downloadTextFile, imageUrlToDataUrl } from '@/lib/browser-download'
-import { BRAND_LOGO_DARK } from '@/lib/branding'
-import { BBTLogo } from '@/components/branding/bbt-logo'
+import { BRAND_LOGO_DARK, SYSTEM_NAME } from '@/lib/branding'
+import { CoBrandedDocumentLogo, EffectiveBrandLogo } from '@/components/branding/effective-brand-logo'
+import { useEffectiveBranding } from '@/components/branding/effective-branding-provider'
 import { addDaysISODate, todayISODate } from '@/lib/date'
 import { getEmpresasDoGrupo, resolverEscopoGrupoUsuario } from '@/lib/grupos'
 import { montarCorporateDashboardStandaloneHtml } from '@/lib/reporting/corporate-dashboard-html'
@@ -80,6 +81,7 @@ export function CorporateDashboardReport({
   className,
   embedded = false,
 }: Props = {}) {
+  const { branding } = useEffectiveBranding()
   const searchParams = useSearchParams()
   const { empresas, funcionarios, gruposEmpresariais } = useStore()
   const { includesCompany } = useCorporateCompanyScope()
@@ -230,10 +232,18 @@ export function CorporateDashboardReport({
   async function exportarHTML() {
     if (!canExport) return
     let brandLogoDataUrl = ''
+    let agencyLogoDataUrl = ''
     try {
-      brandLogoDataUrl = await imageUrlToDataUrl(BRAND_LOGO_DARK)
+      brandLogoDataUrl = await imageUrlToDataUrl(branding.isLogoFallback ? BRAND_LOGO_DARK : branding.logoUrl)
     } catch {
       brandLogoDataUrl = ''
+    }
+    if (!branding.isLogoFallback) {
+      try {
+        agencyLogoDataUrl = await imageUrlToDataUrl(BRAND_LOGO_DARK)
+      } catch {
+        agencyLogoDataUrl = ''
+      }
     }
 
     downloadTextFile(
@@ -245,7 +255,13 @@ export function CorporateDashboardReport({
         mes,
         query,
         focus,
-      }, brandLogoDataUrl),
+      }, {
+        logoDataUrl: brandLogoDataUrl,
+        brandName: branding.isLogoFallback ? SYSTEM_NAME : branding.displayName,
+        agencyLogoDataUrl,
+        primaryColor: branding.primaryColor,
+        accentColor: branding.accentColor,
+      }),
       'text/html;charset=utf-8',
     )
   }
@@ -275,7 +291,7 @@ export function CorporateDashboardReport({
       ) : (
         <div className="bbt-page-header">
           <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center">
-            <BBTLogo variant="full" tone="white" size={48} />
+            <EffectiveBrandLogo variant="full" tone="white" size={48} brandedSurface />
             <div>
               <p className="bbt-section-label">Dashboard executivo</p>
               <h1 className="bbt-page-title mt-1 flex items-center gap-2">
@@ -595,8 +611,7 @@ function Consolidado({ relatorio, onCategoria }: { relatorio: DashboardReport; o
   return (
     <section className="overflow-hidden rounded-lg border border-slate-300 bg-white shadow-[0_12px_34px_rgba(32,38,90,0.09)] dark:border-slate-700 dark:bg-slate-800">
       <header className="bbt-report-brand-header dark:border-slate-700 dark:bg-slate-800">
-        <BBTLogo variant="full" tone="color" size={44} className="justify-self-center dark:hidden lg:justify-self-start" />
-        <BBTLogo variant="full" tone="white" size={44} className="hidden justify-self-center dark:block lg:justify-self-start" />
+        <CoBrandedDocumentLogo className="justify-self-center lg:justify-self-start" />
         <div className="bbt-report-brand-copy">
           <p className="bbt-section-label">Visão executiva</p>
           <h2 className="text-2xl font-black text-bbt-primary dark:text-white sm:text-3xl">Relatório Consolidado Interativo</h2>

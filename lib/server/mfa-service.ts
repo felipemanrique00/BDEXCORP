@@ -15,7 +15,7 @@ import {
 } from '@/lib/server/auth-service'
 import { writeAuditEvent } from '@/lib/server/audit-log'
 import { withTenantTransaction } from '@/lib/server/database'
-import { getServerEnvironment } from '@/lib/server/environment'
+import { getServerEnvironment, isLocalMfaBypassEnabled } from '@/lib/server/environment'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import {
   buildTotpUri,
@@ -60,7 +60,7 @@ interface MfaChallengeRow {
 }
 
 export type MfaLoginRequirement =
-  | { required: false }
+  | { required: false; bypassed?: 'explicit_local' }
   | {
       required: true
       mode: 'verify' | 'enroll'
@@ -111,6 +111,9 @@ export async function beginMfaLogin(
   metadata: RequestSecurityMetadata = {},
 ): Promise<MfaLoginRequirement> {
   const environment = getServerEnvironment()
+  if (isLocalMfaBypassEnabled()) {
+    return { required: false, bypassed: 'explicit_local' }
+  }
   const enabled = await withTenantTransaction(principal.tenantId, async (client) => {
     const result = await client.query<{ status: string }>(
       `select status
@@ -425,7 +428,9 @@ export async function getMfaStatus(principal: RequestPrincipal): Promise<MfaStat
     )
     const row = result.rows[0]
     return {
-      required: getServerEnvironment().MFA_ADMIN_REQUIRED && requiresAdministrativeMfa(principal),
+      required: !isLocalMfaBypassEnabled() &&
+        getServerEnvironment().MFA_ADMIN_REQUIRED &&
+        requiresAdministrativeMfa(principal),
       enabled: row?.status === 'enabled',
       enabledAt: row?.enabled_at || null,
       remainingRecoveryCodes: Number(row?.recovery_codes || 0),

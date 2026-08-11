@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 
 import { QuickAIPopup } from '@/components/ai/quick-ai-popup'
+import { EffectiveBrandingProvider } from '@/components/branding/effective-branding-provider'
 import { CorporateContextProvider } from '@/components/corporate-context-provider'
 import { Header } from '@/components/header'
 import { Sidebar } from '@/components/sidebar'
@@ -26,6 +27,8 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
   const sessionUserRef = useRef(user)
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false)
   const [hydratedPath, setHydratedPath] = useState<string | null>(null)
+  const [hydrationFailedPath, setHydrationFailedPath] = useState<string | null>(null)
+  const [hydrationAttempt, setHydrationAttempt] = useState(0)
 
   useEffect(() => {
     sessionUserRef.current = user
@@ -75,13 +78,20 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
   useEffect(() => {
     let active = true
     const keys = storageKeysForDashboardPath(pathname)
+    setHydrationFailedPath(null)
 
     async function hydrate() {
-      await Promise.all([
+      const [applicationHydrated] = await Promise.all([
         hydrateApplicationData(false, keys),
         hydrateUserDirectory().catch(() => []),
       ])
-      if (active) setHydratedPath(pathname)
+      if (!active) return
+      if (applicationHydrated) {
+        setHydratedPath(pathname)
+        setHydrationFailedPath(null)
+        return
+      }
+      setHydrationFailedPath(pathname)
     }
 
     void hydrate()
@@ -89,33 +99,55 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
     return () => {
       active = false
     }
-  }, [pathname])
+  }, [hydrationAttempt, pathname])
 
   return (
     <CorporateContextProvider user={sessionUser}>
-      <div className="flex min-h-screen bg-[#f4f6fa] print:block print:min-h-0 print:bg-white dark:bg-[#10142b]">
-        <div className="contents print:hidden">
-          <Sidebar
-            user={sessionUser}
-            mobileOpen={mobileNavigationOpen}
-            onMobileClose={() => setMobileNavigationOpen(false)}
-          />
-        </div>
-        <div className="flex min-w-0 flex-1 flex-col print:block">
-          <div className="print:hidden">
-            <Header user={sessionUser} onOpenNavigation={() => setMobileNavigationOpen(true)} />
+      <EffectiveBrandingProvider>
+        <div className="flex min-h-screen bg-[#f4f6fa] print:block print:min-h-0 print:bg-white dark:bg-[#10142b]">
+          <div className="contents print:hidden">
+            <Sidebar
+              user={sessionUser}
+              mobileOpen={mobileNavigationOpen}
+              onMobileClose={() => setMobileNavigationOpen(false)}
+            />
           </div>
-          <main className="min-w-0 flex-1 overflow-x-hidden p-4 pb-24 print:overflow-visible print:p-0 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24">
-            {hydratedPath === pathname ? children : <RouteLoadingState />}
-          </main>
-          {hydratedPath === pathname && (
+          <div className="flex min-w-0 flex-1 flex-col print:block">
             <div className="print:hidden">
-              <QuickAIPopup />
+              <Header user={sessionUser} onOpenNavigation={() => setMobileNavigationOpen(true)} />
             </div>
-          )}
+            <main className="min-w-0 flex-1 overflow-x-hidden p-4 pb-24 print:overflow-visible print:p-0 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24">
+              {hydratedPath === pathname
+                ? children
+                : hydrationFailedPath === pathname
+                  ? <RouteHydrationError onRetry={() => setHydrationAttempt((value) => value + 1)} />
+                  : <RouteLoadingState />}
+            </main>
+            {hydratedPath === pathname && (
+              <div className="print:hidden">
+                <QuickAIPopup />
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      </EffectiveBrandingProvider>
     </CorporateContextProvider>
+  )
+}
+
+function RouteHydrationError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex min-h-[45vh] items-center justify-center" role="alert">
+      <div className="max-w-md rounded-md border border-amber-200 bg-white px-6 py-5 text-center shadow-sm dark:border-amber-900 dark:bg-slate-900">
+        <h1 className="text-base font-bold text-bbt-primary dark:text-white">Não foi possível carregar os dados</h1>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          A conexão local demorou mais do que o esperado. Seus acessos não foram alterados.
+        </p>
+        <button type="button" onClick={onRetry} className="bbt-button-primary mt-4">
+          Tentar novamente
+        </button>
+      </div>
+    </div>
   )
 }
 

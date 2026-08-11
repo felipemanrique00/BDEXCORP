@@ -275,6 +275,8 @@ describe('voucher enrichment service', () => {
 
     expect(query).toHaveBeenCalledTimes(1)
     expect(query.mock.calls[0]?.[1]).toEqual(['tenant-01', ['H-1', 'H-2']])
+    expect(String(query.mock.calls[0]?.[0])).toContain("nullif(traveler.document_number_snapshot, '')")
+    expect(String(query.mock.calls[0]?.[0])).toContain('traveler_employee.company_id = traveler.company_id')
     expect(enriched.map((voucher) => voucher.id)).toEqual(['H-1', 'H-2'])
     expect(enriched[0]).toEqual(first)
     expect(enriched[0]).not.toBe(first)

@@ -631,6 +631,7 @@ export const PRIORIDADE_LABEL: Record<Prioridade, string> = {
 
 export type TipoServico = 'Aéreo' | 'Hotel' | 'Carro' | 'Pacote' | 'Outro'
 export type OrigemAtendimento = 'WhatsApp' | 'E-mail' | 'Telefone' | 'Indicação' | 'Portal' | 'Outro'
+export type DemandBookingMode = 'offline' | 'online'
 export type FonteReferenciaEconomiaAtendimento =
   | 'preco_sem_agencia'
   | 'cotacao_original'
@@ -672,6 +673,13 @@ export interface DetalhesAereo {
   baggage_pieces?: number
   flexible_dates?: boolean
   flexible_times?: boolean
+  /** Passageiros selecionados na base ativa da empresa; o primeiro e o principal. */
+  passengers?: AirDemandPassenger[]
+}
+
+export interface AirDemandPassenger {
+  employee_id: string
+  name: string
 }
 
 export interface AirDemandLeg {
@@ -752,6 +760,10 @@ export interface Atendimento {
   serial_os?: string
   empresa_id: string
   solicitante_id?: string
+  /** Demanda registrada pela equipe da agencia em nome de um solicitante do cliente. */
+  agency_assisted?: boolean
+  /** Modalidade de atendimento; offline aguarda cotacao antes de qualquer aprovacao. */
+  booking_mode?: DemandBookingMode
   funcionario_id: string | null
   passageiro_nome: string
   tipo_servico: TipoServico
@@ -961,6 +973,10 @@ export interface VoucherTrechoAereo {
 
 export interface VoucherBilheteAereo {
   passageiro_nome: string
+  /** Ordem do passageiro na demanda, útil para distinguir homônimos. */
+  passageiro_ordem?: number
+  /** Código corporativo não sensível; nunca contém CPF ou data de nascimento. */
+  passageiro_codigo?: string
   numero_bilhete: string
   companhia_codigo: string
   companhia_nome: string

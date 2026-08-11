@@ -11,6 +11,17 @@ import {
   parseAirDemandDetails,
   type AirDemandDetailsInput,
 } from '@/lib/air-demand/model'
+import {
+  canCreateAgencyAssistedDemand,
+  resolveAgencyAssistedDemandMode,
+  resolveAgencyAssistedDemandUpdateMode,
+  validateAgencyAssistedDemandParticipants,
+} from '@/lib/demands/agency-assistance'
+import {
+  resolveDemandCreationSubmission,
+  shouldStartDemandApprovalAtCreation,
+  type DemandCreationSubmissionDecision,
+} from '@/lib/demands/booking-mode'
 import { applyLegacyDemandAssignment } from '@/lib/demands/operational-mutations'
 import {
   assessDemandUpdate,
@@ -25,6 +36,7 @@ import {
   hotelDemandPrimaryGuest,
   type HotelDemandDetailsInput,
 } from '@/lib/hotel-demand/model'
+import { offlineLegacyServiceType } from '@/lib/offline-travel/catalog'
 import { mergeStorageValues } from '@/lib/storage-merge'
 import {
   parseLegacyDemands,
@@ -114,14 +126,6 @@ const COMPLETION_REQUIRED_ACTIONS = new Set([
   'prevent_issuance',
 ])
 
-const INTERNAL_AGENCY_ROLE_KEYS = new Set([
-  'tenant_admin',
-  'financial_manager',
-  'supervisor',
-  'agent',
-  'operator',
-])
-
 interface CompanyRow extends QueryResultRow {
   id: string
   group_id: string | null
@@ -136,6 +140,36 @@ interface CompanyRow extends QueryResultRow {
 interface RequesterRow extends QueryResultRow {
   id: string
   user_id: string | null
+  name: string
+  email: string
+}
+
+interface DemandTravelerPolicyRow extends QueryResultRow {
+  id: string
+  employee_id: string | null
+  name_snapshot: string
+  traveler_sequence: string | number | null
+  is_primary: boolean
+}
+
+interface DemandPolicyEmployeeRow extends QueryResultRow {
+  id: string
+  company_id: string
+  identification_code: string
+  full_name: string
+  document_number: string | null
+  email: string | null
+  phone: string | null
+  job_title: string | null
+  department: string | null
+  cost_center: string | null
+  registration_code: string | null
+  metadata: Record<string, unknown>
+}
+
+interface DemandPolicyTraveler {
+  sequence: number
+  identity: ResolvedEmployeeIdentityProfile
 }
 
 interface ReferenceContext {
@@ -290,6 +324,9 @@ export interface DemandDetailsUpdateResult extends DemandMutationResult {
 export interface DemandPolicyCheckpointSummary {
   checkpoint: string
   databaseEvaluationId: string
+  travelerId?: string | null
+  travelerName?: string | null
+  travelerSequence?: number
   passed: boolean
   blocks: Array<{ code: string; message: string }>
   warnings: Array<{ code: string; message: string }>
@@ -492,11 +529,12 @@ export async function updateDemandDetails(
   }
   const hotelDetails = normalizedHotelDetails(parsedSnapshot)
   const airDetails = normalizedAirDetails(parsedSnapshot)
-  const snapshot = hotelDetails
+  const normalizedSnapshot = hotelDetails
     ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
     : airDetails
       ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
       : parsedSnapshot
+  let snapshot = normalizedSnapshot
   if (snapshot.id !== demandId) {
     throw new DemandServiceError(
       'DEMAND_ID_MISMATCH',
@@ -514,6 +552,19 @@ export async function updateDemandDetails(
 
   const prepared = await withTenantTransaction(principal.tenantId, async (client) => {
     const current = await loadDemandForMutation(client, principal.tenantId, demandId)
+    const existingAirTravelers = current.service_type === 'air' || snapshot.serviceType === 'air'
+      ? await loadDemandTravelerPolicyRows(client, principal.tenantId, demandId, true)
+      : []
+    const currentMetadata = recordValue(current.metadata)
+    const currentLegacy = recordValue(currentMetadata.legacySnapshot)
+    const existingAgencyAssisted = recordValue(currentMetadata.creationContext).mode === 'agency_assisted'
+      || currentLegacy.agency_assisted === true
+    snapshot = {
+      ...snapshot,
+      agencyAssisted: resolveAgencyAssistedDemandUpdateMode({
+        existingAgencyAssisted,
+      }),
+    }
     await requireCompanyAccess(principal, current.company_id, 'criar_demandas')
     await requireRelationalDemandWrite(client, principal.tenantId, current.company_id)
     if (
@@ -537,6 +588,34 @@ export async function updateDemandDetails(
         'Uma demanda aerea normalizada nao pode voltar ao formato legado nem trocar de servico por esta edicao.',
         422,
       )
+    }
+    if (snapshot.serviceType === 'air' && airDetails && !airDetails.passengers?.length) {
+      if (current.service_type !== 'air') {
+        throw new DemandServiceError(
+          'AIR_DEMAND_PASSENGERS_REQUIRED',
+          'Selecione ao menos um passageiro cadastrado para criar uma demanda aerea.',
+          422,
+        )
+      }
+      const primaryTraveler = existingAirTravelers.find((traveler) => traveler.is_primary)
+        || existingAirTravelers[0]
+      if (primaryTraveler) {
+        if (
+          (snapshot.employeeId && snapshot.employeeId !== primaryTraveler.employee_id)
+          || normalizeComparableName(snapshot.passengerName) !== normalizeComparableName(primaryTraveler.name_snapshot)
+        ) {
+          throw new DemandServiceError(
+            'AIR_DEMAND_PASSENGERS_REQUIRED_FOR_PRIMARY_CHANGE',
+            'Envie a lista completa de passageiros para alterar o passageiro principal.',
+            422,
+          )
+        }
+        snapshot = {
+          ...snapshot,
+          employeeId: primaryTraveler.employee_id,
+          passengerName: primaryTraveler.name_snapshot,
+        }
+      }
     }
     if (snapshot.companyId !== current.company_id) {
       await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
@@ -604,6 +683,19 @@ export async function updateDemandDetails(
         name: snapshot.passengerName,
       },
     )
+    const agencyAssistanceIssue = validateAgencyAssistedDemandParticipants(principal, {
+      agencyAssisted: snapshot.agencyAssisted,
+      existingAgencyAssisted,
+      requesterId: requester?.id || null,
+      employeeId: identity.resolution.employeeId,
+    })
+    if (agencyAssistanceIssue) {
+      throw new DemandServiceError(
+        agencyAssistanceIssue.code,
+        agencyAssistanceIssue.message,
+        agencyAssistanceIssue.status,
+      )
+    }
     const references = await loadReferenceContext(
       client,
       principal.tenantId,
@@ -612,14 +704,29 @@ export async function updateDemandDetails(
       snapshot.costCenter || company.default_cost_center,
       textValue(snapshot.metadata.project),
     )
-    const previousSnapshot = relationalDemandUpdateSnapshot(current)
+    const previousPassengerIds = orderedEmployeeIds(existingAirTravelers)
+    const nextPassengerIds = airDetails?.passengers?.map((passenger) => passenger.employeeId)
+      || (snapshot.serviceType === 'air' ? previousPassengerIds : [])
+    const previousSnapshot = relationalDemandUpdateSnapshot(current, previousPassengerIds)
     const nextSnapshot = parsedDemandUpdateSnapshot(
       snapshot,
       identity.resolution.employeeId,
       references.costCenterCode,
       references.costCenterId,
+      nextPassengerIds,
     )
     const reapproval = assessDemandUpdate(previousSnapshot, nextSnapshot)
+    if (
+      reapproval.changedFields.includes('passengerIds')
+      && current.lifecycle_status !== 'draft'
+    ) {
+      throw new DemandServiceError(
+        'AIR_DEMAND_PASSENGERS_EDIT_LOCKED',
+        'A lista de passageiros nao pode ser alterada depois que a demanda foi enviada.',
+        409,
+        { lifecycleStatus: current.lifecycle_status },
+      )
+    }
     if (reapproval.material && !lifecycleAllowsMaterialDemandEdit(current.lifecycle_status)) {
       throw new DemandServiceError(
         'DEMAND_MATERIAL_EDIT_LOCKED',
@@ -633,19 +740,22 @@ export async function updateDemandDetails(
     }
 
     const now = new Date().toISOString()
-    const facts = buildDemandPolicyFacts(
-      principal,
-      snapshot,
-      company,
+    const policyPassengers = snapshot.serviceType === 'air'
+      ? airDetails?.passengers?.map((passenger) => ({
+          employeeId: passenger.employeeId,
+          name: passenger.name,
+        })) || existingAirTravelers.map((traveler) => ({
+          employeeId: traveler.employee_id,
+          name: traveler.name_snapshot,
+        }))
+      : []
+    const policyTravelers = await loadDemandPolicyTravelers(
+      client,
+      principal.tenantId,
+      snapshot.companyId,
+      policyPassengers,
       identity,
-      requester,
-      references,
-      demandId,
-      current.demand_number,
-      now,
-      null,
     )
-    const scopes = demandPolicyScopes(principal, snapshot, company, identity, requester, references)
     const checkpoints = current.lifecycle_status === 'draft'
       ? ['profile', 'request']
       : ['profile', 'request', 'submission']
@@ -653,29 +763,52 @@ export async function updateDemandDetails(
     const fullResults: PolicyEvaluationResult[] = []
     let lastEvaluationId: string | null = null
     for (const checkpoint of checkpoints) {
-      const evaluation = await evaluateAndPersistPoliciesInTransaction(client, principal, {
-        companyId: snapshot.companyId,
-        employeeId: identity.resolution.employeeId,
-        demandId,
-        context: {
-          checkpoint,
-          evaluatedAt: now,
-          mode: 'enforce',
-          scopes,
-          facts: {
-            ...facts,
-            operation: {
-              checkpoint,
-              requestedAt: now,
-              source: 'api:demands:update',
-              reason: input.reason,
+      for (const traveler of policyTravelers) {
+        const facts = buildDemandPolicyFacts(
+          principal,
+          snapshot,
+          company,
+          traveler.identity,
+          requester,
+          references,
+          demandId,
+          current.demand_number,
+          now,
+          null,
+        )
+        const scopes = demandPolicyScopes(
+          principal,
+          snapshot,
+          company,
+          traveler.identity,
+          requester,
+          references,
+        )
+        const evaluation = await evaluateAndPersistPoliciesInTransaction(client, principal, {
+          companyId: snapshot.companyId,
+          employeeId: traveler.identity.resolution.employeeId,
+          demandId,
+          context: {
+            checkpoint,
+            evaluatedAt: now,
+            mode: 'enforce',
+            scopes,
+            facts: {
+              ...facts,
+              operation: {
+                checkpoint,
+                requestedAt: now,
+                source: 'api:demands:update',
+                reason: input.reason,
+                travelerSequence: traveler.sequence,
+              },
             },
           },
-        },
-      })
-      lastEvaluationId = evaluation.databaseEvaluationId
-      fullResults.push(evaluation.result)
-      evaluations.push(policySummary(checkpoint, evaluation.databaseEvaluationId, evaluation.result))
+        })
+        if (traveler.sequence === 1) lastEvaluationId = evaluation.databaseEvaluationId
+        fullResults.push(evaluation.result)
+        evaluations.push(policySummary(checkpoint, evaluation.databaseEvaluationId, evaluation.result, traveler))
+      }
     }
     const blocked = fullResults.some((result) => result.blocks.length > 0 || !result.passed)
     const requiresAction = fullResults.some((result) => (
@@ -722,12 +855,14 @@ export async function updateDemandDetails(
       ? Number(current.lifecycle_version) + 1
       : Number(current.lifecycle_version)
     const nextOperationalStatus = operationalStatusFromLifecycle(nextLifecycleStatus)
-    const currentLegacy = recordValue(recordValue(current.metadata).legacySnapshot)
     const nextLegacy = legacyDemandSnapshot(
       {
         ...currentLegacy,
         ...input.demand,
         empresa_id: snapshot.companyId,
+        ...(requester ? { solicitante_id: requester.id } : {}),
+        ...(requester ? { solicitante_nome: requester.name } : {}),
+        agency_assisted: snapshot.agencyAssisted || undefined,
         passageiro_nome: snapshot.passengerName,
         tipo_servico: input.demand.tipo_servico,
         ...(hotelDetails ? { detalhes_hotel: hotelDetails } : {}),
@@ -1147,13 +1282,47 @@ export async function createRelationalDemand(
   }
   const hotelDetails = normalizedHotelDetails(parsedSnapshot)
   const airDetails = normalizedAirDetails(parsedSnapshot)
-  const snapshot = hotelDetails
+  if (airDetails && !airDetails.passengers?.length) {
+    throw new DemandServiceError(
+      'AIR_DEMAND_PASSENGERS_REQUIRED',
+      'Selecione ao menos um passageiro cadastrado para criar uma demanda aerea.',
+      422,
+    )
+  }
+  const normalizedSnapshot = hotelDetails
     ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
     : airDetails
       ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
       : parsedSnapshot
+  const snapshot = {
+    ...normalizedSnapshot,
+    agencyAssisted: resolveAgencyAssistedDemandMode(principal, {
+      declaredAgencyAssisted: normalizedSnapshot.agencyAssisted,
+      requesterId: normalizedSnapshot.requesterId,
+    }),
+  }
+  const submission = resolveDemandCreationSubmission({
+    bookingMode: snapshot.bookingMode,
+    requestedSubmit: input.submit,
+  })
   const idempotencyKey = normalizeIdempotencyKey(rawIdempotencyKey)
-  const inputHash = sha256({ tenantId: principal.tenantId, demand: input.demand, submit: input.submit })
+  const inputHash = sha256({
+    tenantId: principal.tenantId,
+    demand: input.demand,
+    submit: submission.effectiveSubmit,
+  })
+  const agencyAssistanceIssue = validateAgencyAssistedDemandParticipants(principal, {
+    agencyAssisted: snapshot.agencyAssisted,
+    requesterId: snapshot.requesterId,
+    employeeId: snapshot.employeeId,
+  })
+  if (agencyAssistanceIssue) {
+    throw new DemandServiceError(
+      agencyAssistanceIssue.code,
+      agencyAssistanceIssue.message,
+      agencyAssistanceIssue.status,
+    )
+  }
   await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
 
   const createAttempt = () => withTenantTransaction(principal.tenantId, async (client) => {
@@ -1164,7 +1333,7 @@ export async function createRelationalDemand(
       principal,
       snapshot,
       input.demand,
-      input.submit,
+      submission,
       idempotencyKey,
       inputHash,
       hotelDetails,
@@ -1201,11 +1370,12 @@ export async function createRelationalDemand(
     }
   }
 
-  if (
-    preparation.approval.required
-    && preparation.approval.workflowCode
-    && preparation.policy.submissionAllowed
-  ) {
+  if (shouldStartDemandApprovalAtCreation({
+    submission,
+    approvalRequired: preparation.approval.required,
+    workflowCode: preparation.approval.workflowCode,
+    submissionAllowed: preparation.policy.submissionAllowed,
+  })) {
     preparation = await startDemandApproval(principal, preparation, idempotencyKey)
   }
 
@@ -1222,6 +1392,11 @@ export async function createRelationalDemand(
       policyBlocked: preparation.policy.blocked,
       policyRequiresAction: preparation.policy.requiresAction,
       approvalRequired: preparation.approval.required,
+      creationMode: snapshot.agencyAssisted ? 'agency_assisted' : 'self_service',
+      bookingMode: snapshot.bookingMode || 'legacy',
+      requestedSubmit: submission.requestedSubmit,
+      effectiveSubmit: submission.effectiveSubmit,
+      requesterId: snapshot.requesterId,
       replayed: preparation.replayed,
     },
   })
@@ -1235,7 +1410,7 @@ async function createDemandInTransaction(
   principal: RequestPrincipal,
   snapshot: RelationalDemandSnapshot,
   rawDemand: Record<string, unknown>,
-  submit: boolean,
+  submission: DemandCreationSubmissionDecision,
   idempotencyKey: string,
   inputHash: string,
   hotelDetails: HotelDemandDetailsInput | null,
@@ -1278,6 +1453,9 @@ async function createDemandInTransaction(
   const initialLegacy = legacyDemandSnapshot({
     ...rawDemand,
     ...(requester ? { solicitante_id: requester.id } : {}),
+    ...(requester ? { solicitante_nome: requester.name } : {}),
+    agency_assisted: snapshot.agencyAssisted || undefined,
+    booking_mode: snapshot.bookingMode || undefined,
     passageiro_nome: snapshot.passengerName,
     ...(hotelDetails ? { detalhes_hotel: hotelDetails } : {}),
     cost_center_id: references.costCenterId,
@@ -1287,7 +1465,7 @@ async function createDemandInTransaction(
     serial: demandNumber,
     employeeId: identity.resolution.employeeId,
     assignedTo,
-    status: submit ? 'em_andamento' : 'pendente',
+    status: submission.effectiveSubmit ? 'em_andamento' : 'pendente',
     createdAt: now,
     updatedAt: now,
   })
@@ -1299,6 +1477,16 @@ async function createDemandInTransaction(
     sourceUpdatedAt: now,
     legacySnapshot: initialLegacy,
     identityResolution: identityEvidence(identity),
+    creationContext: {
+      mode: snapshot.agencyAssisted ? 'agency_assisted' : 'self_service',
+      bookingMode: snapshot.bookingMode || 'legacy',
+      requestedSubmit: submission.requestedSubmit,
+      effectiveSubmit: submission.effectiveSubmit,
+      actorUserId: principal.user.id,
+      requesterId: requester?.id || null,
+      employeeId: identity.resolution.employeeId,
+      channel: textValue(rawDemand.origem),
+    },
   }
 
   await client.query(
@@ -1327,7 +1515,7 @@ async function createDemandInTransaction(
       demandNumber,
       snapshot.serviceType,
       snapshot.passengerName,
-      submit ? 'em_andamento' : 'pendente',
+      submission.effectiveSubmit ? 'em_andamento' : 'pendente',
       snapshot.priority,
       snapshot.travelStartDate,
       snapshot.travelEndDate,
@@ -1373,47 +1561,83 @@ async function createDemandInTransaction(
       principal.tenantId,
       demandId,
       principal.user.id,
-      JSON.stringify({ source: 'api:demands', demandNumber, idempotencyKey }),
+      JSON.stringify({
+        source: 'api:demands',
+        demandNumber,
+        idempotencyKey,
+        creationMode: snapshot.agencyAssisted ? 'agency_assisted' : 'self_service',
+        bookingMode: snapshot.bookingMode || 'legacy',
+        requestedSubmit: submission.requestedSubmit,
+        effectiveSubmit: submission.effectiveSubmit,
+        requesterId: requester?.id || null,
+        employeeId: identity.resolution.employeeId,
+      }),
     ],
   )
 
-  const facts = buildDemandPolicyFacts(
-    principal,
-    snapshot,
-    company,
+  const policyTravelers = await loadDemandPolicyTravelers(
+    client,
+    principal.tenantId,
+    snapshot.companyId,
+    airDetails?.passengers?.map((passenger) => ({
+      employeeId: passenger.employeeId,
+      name: passenger.name,
+    })) || [],
     identity,
-    requester,
-    references,
-    demandId,
-    demandNumber,
-    now,
-    principal.user.id,
   )
-  const scopes = demandPolicyScopes(principal, snapshot, company, identity, requester, references)
-  const checkpoints = submit ? ['profile', 'request', 'submission'] : ['profile', 'request']
+  const checkpoints = submission.effectiveSubmit
+    ? ['profile', 'request', 'submission']
+    : ['profile', 'request']
   const evaluations: DemandPolicyCheckpointSummary[] = []
   const fullResults: PolicyEvaluationResult[] = []
   let lastEvaluationId: string | null = null
 
   for (const checkpoint of checkpoints) {
-    const evaluation = await evaluateAndPersistPoliciesInTransaction(client, principal, {
-      companyId: snapshot.companyId,
-      employeeId: identity.resolution.employeeId,
-      demandId,
-      context: {
-        checkpoint,
-        evaluatedAt: now,
-        mode: 'enforce',
-        scopes,
-        facts: {
-          ...facts,
-          operation: { checkpoint, requestedAt: now, source: 'api:demands' },
+    for (const traveler of policyTravelers) {
+      const facts = buildDemandPolicyFacts(
+        principal,
+        snapshot,
+        company,
+        traveler.identity,
+        requester,
+        references,
+        demandId,
+        demandNumber,
+        now,
+        principal.user.id,
+      )
+      const scopes = demandPolicyScopes(
+        principal,
+        snapshot,
+        company,
+        traveler.identity,
+        requester,
+        references,
+      )
+      const evaluation = await evaluateAndPersistPoliciesInTransaction(client, principal, {
+        companyId: snapshot.companyId,
+        employeeId: traveler.identity.resolution.employeeId,
+        demandId,
+        context: {
+          checkpoint,
+          evaluatedAt: now,
+          mode: 'enforce',
+          scopes,
+          facts: {
+            ...facts,
+            operation: {
+              checkpoint,
+              requestedAt: now,
+              source: 'api:demands',
+              travelerSequence: traveler.sequence,
+            },
+          },
         },
-      },
-    })
-    lastEvaluationId = evaluation.databaseEvaluationId
-    fullResults.push(evaluation.result)
-    evaluations.push(policySummary(checkpoint, evaluation.databaseEvaluationId, evaluation.result))
+      })
+      if (traveler.sequence === 1) lastEvaluationId = evaluation.databaseEvaluationId
+      fullResults.push(evaluation.result)
+      evaluations.push(policySummary(checkpoint, evaluation.databaseEvaluationId, evaluation.result, traveler))
+    }
   }
 
   const blocked = fullResults.some((result) => result.blocks.length > 0 || !result.passed)
@@ -1422,7 +1646,7 @@ async function createDemandInTransaction(
     || result.requiredDocuments.length > 0
     || result.requiredActions.some((item) => requiresCompletionBeforeSubmission(item.action))
   ))
-  const submissionAllowed = submit && !blocked && !requiresAction
+  const submissionAllowed = submission.effectiveSubmit && !blocked && !requiresAction
   const approvals = fullResults.flatMap((result) => result.approvalsRequired)
   const workflowCode = approvals.length
     ? await resolveApprovalWorkflowCode(client, principal.tenantId, fullResults)
@@ -1496,6 +1720,9 @@ async function createDemandInTransaction(
     blocked,
     requiresAction,
     submissionAllowed,
+    bookingMode: snapshot.bookingMode || 'legacy',
+    requestedSubmit: submission.requestedSubmit,
+    effectiveSubmit: submission.effectiveSubmit,
     checkpoints: evaluations,
     approvalRequired,
     approvalWorkflowCode: workflowCode,
@@ -1735,7 +1962,7 @@ async function loadRequesterForCreate(
 ): Promise<RequesterRow | null> {
   if (!requesterId) {
     const linked = await client.query<RequesterRow>(
-      `select id, user_id
+      `select id, user_id, name, email::text
        from requesters
        where tenant_id = $1 and company_id = $2 and user_id = $3
          and status = 'active' and deleted_at is null
@@ -1762,7 +1989,7 @@ async function loadRequesterForUpdate(
   if (!currentRequesterId) return null
 
   const current = await client.query<RequesterRow>(
-    `select id, user_id
+    `select id, user_id, name, email::text
      from requesters
      where tenant_id = $1 and company_id = $2 and id = $3`,
     [principal.tenantId, companyId, currentRequesterId],
@@ -1784,7 +2011,7 @@ async function loadExplicitRequester(
   requesterId: string,
 ): Promise<RequesterRow> {
   const result = await client.query<RequesterRow>(
-    `select id, user_id
+    `select id, user_id, name, email::text
      from requesters
      where tenant_id = $1 and company_id = $2 and id = $3
        and status = 'active' and deleted_at is null`,
@@ -1863,8 +2090,11 @@ function demandSnapshotWithAirItinerary(
 ): RelationalDemandSnapshot {
   const firstLeg = details.legs[0]
   const lastLeg = details.legs[details.legs.length - 1]
+  const primaryPassenger = details.passengers?.[0]
   return {
     ...snapshot,
+    employeeId: primaryPassenger?.employeeId || snapshot.employeeId,
+    passengerName: primaryPassenger?.name || snapshot.passengerName,
     travelStartDate: firstLeg.departureDate,
     travelEndDate: lastLeg.departureDate,
     destination: firstLeg.destinationName || firstLeg.destinationCode,
@@ -1922,13 +2152,13 @@ export function canSelectExplicitDemandRequester(
   requesterUserId: string | null,
 ): boolean {
   if (requesterUserId === principal.user.id) return true
-  return principal.platformAdmin || INTERNAL_AGENCY_ROLE_KEYS.has(principal.roleKey)
+  return canCreateAgencyAssistedDemand(principal)
 }
 
 export function resolveInitialDemandAssignee(
   principal: Pick<RequestPrincipal, 'platformAdmin' | 'roleKey' | 'user'>,
 ): string | null {
-  return principal.platformAdmin || INTERNAL_AGENCY_ROLE_KEYS.has(principal.roleKey)
+  return canCreateAgencyAssistedDemand(principal)
     ? principal.user.id
     : null
 }
@@ -2145,6 +2375,68 @@ function buildDemandPolicyFacts(
   }
 }
 
+async function loadDemandPolicyTravelers(
+  client: PoolClient,
+  tenantId: string,
+  companyId: string,
+  passengers: Array<{ employeeId: string | null; name: string }>,
+  primaryIdentity: ResolvedEmployeeIdentityProfile,
+): Promise<DemandPolicyTraveler[]> {
+  if (!passengers.length) return [{ sequence: 1, identity: primaryIdentity }]
+  if (passengers.some((passenger) => !passenger.employeeId)) {
+    throw new DemandServiceError(
+      'AIR_DEMAND_PASSENGER_POLICY_UNCOVERED',
+      'Todos os passageiros aereos precisam estar vinculados a um funcionario para avaliacao das politicas.',
+      422,
+    )
+  }
+  const employeeIds = passengers.map((passenger) => passenger.employeeId as string)
+  const result = await client.query<DemandPolicyEmployeeRow>(
+    `select employee.id, employee.company_id, employee.identification_code,
+            employee.full_name, employee.document_number, employee.email::text,
+            employee.phone, employee.job_title, employee.department,
+            employee.cost_center, employee.registration_code, employee.metadata
+     from employees employee
+     where employee.tenant_id = $1 and employee.company_id = $2
+       and employee.id = any($3::text[])
+       and employee.status = 'active' and employee.deleted_at is null
+     for share of employee`,
+    [tenantId, companyId, employeeIds],
+  )
+  const employees = new Map(result.rows.map((employee) => [employee.id, employee]))
+  const missingEmployeeIds = employeeIds.filter((employeeId) => !employees.has(employeeId))
+  if (missingEmployeeIds.length) {
+    throw new DemandServiceError(
+      'AIR_DEMAND_PASSENGER_POLICY_UNCOVERED',
+      'Um ou mais passageiros nao puderam ser avaliados pelas politicas da empresa.',
+      422,
+      { employeeIds: missingEmployeeIds },
+    )
+  }
+  return passengers.map((passenger, index) => {
+    if (
+      passenger.employeeId === primaryIdentity.resolution.employeeId
+      && primaryIdentity.employee
+    ) {
+      return { sequence: index + 1, identity: primaryIdentity }
+    }
+    const employee = employees.get(passenger.employeeId as string)!
+    return {
+      sequence: index + 1,
+      identity: {
+        resolution: {
+          employeeId: employee.id,
+          status: 'exact',
+          confidence: 1,
+          method: 'employee_id',
+          candidates: [],
+        },
+        employee: { ...employee, aliases: [] },
+      },
+    }
+  })
+}
+
 function demandPolicyScopes(
   principal: RequestPrincipal,
   snapshot: RelationalDemandSnapshot,
@@ -2173,10 +2465,16 @@ function policySummary(
   checkpoint: string,
   databaseEvaluationId: string,
   result: PolicyEvaluationResult,
+  traveler?: DemandPolicyTraveler,
 ): DemandPolicyCheckpointSummary {
   return {
     checkpoint,
     databaseEvaluationId,
+    ...(traveler ? {
+      travelerId: traveler.identity.resolution.employeeId,
+      travelerName: traveler.identity.employee?.full_name || null,
+      travelerSequence: traveler.sequence,
+    } : {}),
     passed: result.passed,
     blocks: result.blocks.map((item) => ({ code: item.policyCode, message: item.message })),
     warnings: result.warnings.map((item) => ({ code: item.policyCode, message: item.message })),
@@ -2298,7 +2596,39 @@ async function persistLegacyDemandCompatibility(
   )
 }
 
-function relationalDemandUpdateSnapshot(row: DemandListRow): DemandUpdateSnapshot {
+async function loadDemandTravelerPolicyRows(
+  client: PoolClient,
+  tenantId: string,
+  demandId: string,
+  lock = false,
+): Promise<DemandTravelerPolicyRow[]> {
+  const result = await client.query<DemandTravelerPolicyRow>(
+    `select traveler.id, traveler.employee_id, traveler.name_snapshot,
+            traveler.traveler_sequence, traveler.is_primary
+     from demand_travelers traveler
+     where traveler.tenant_id = $1 and traveler.demand_id = $2
+       and traveler.deleted_at is null
+     order by traveler.is_primary desc,
+              traveler.traveler_sequence nulls last,
+              traveler.created_at, traveler.id
+     ${lock ? 'for update of traveler' : ''}`,
+    [tenantId, demandId],
+  )
+  return result.rows
+}
+
+function orderedEmployeeIds(rows: DemandTravelerPolicyRow[]): string[] {
+  return rows.flatMap((traveler) => traveler.employee_id ? [traveler.employee_id] : [])
+}
+
+function normalizeComparableName(value: string): string {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function relationalDemandUpdateSnapshot(
+  row: DemandListRow,
+  passengerIds: string[] = [],
+): DemandUpdateSnapshot {
   const legacy = recordValue(recordValue(row.metadata).legacySnapshot)
   const parsed = parseLegacyDemands([{
     ...legacy,
@@ -2333,9 +2663,16 @@ function relationalDemandUpdateSnapshot(row: DemandListRow): DemandUpdateSnapsho
       project: null,
       paymentMethod: null,
       passengerName: row.passenger_name_snapshot,
+      passengerIds,
     }
   }
-  return parsedDemandUpdateSnapshot(parsed, row.employee_id, row.cost_center, row.cost_center_id)
+  return parsedDemandUpdateSnapshot(
+    parsed,
+    row.employee_id,
+    row.cost_center,
+    row.cost_center_id,
+    passengerIds,
+  )
 }
 
 function parsedDemandUpdateSnapshot(
@@ -2343,6 +2680,7 @@ function parsedDemandUpdateSnapshot(
   employeeId: string | null,
   costCenter: string | null,
   costCenterId: string | null,
+  passengerIds: string[] = [],
 ): DemandUpdateSnapshot {
   const metadata = recordValue(snapshot.metadata)
   const legacyDetails = recordValue(metadata.serviceDetails)
@@ -2359,6 +2697,7 @@ function parsedDemandUpdateSnapshot(
     project: nullableString(metadata.project),
     paymentMethod: nullableString(recordValue(legacyDetails).paymentMethod),
     passengerName: snapshot.passengerName,
+    passengerIds,
   }
 }
 
@@ -2786,7 +3125,7 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
     empresa_id: row.company_id,
     funcionario_id: row.employee_id,
     passageiro_nome: row.passenger_name_snapshot,
-    tipo_servico: row.service_type,
+    tipo_servico: offlineLegacyServiceType(row.service_type),
     valor_cotacao: numeric(row.estimated_amount),
     valor_final: numeric(row.final_amount),
     agente_user_id: row.assigned_to_user_id || '',

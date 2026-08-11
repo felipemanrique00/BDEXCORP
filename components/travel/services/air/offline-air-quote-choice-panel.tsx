@@ -2,8 +2,10 @@
 
 import {
   AlertTriangle,
+  Building2,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   Luggage,
   Plane,
@@ -11,10 +13,14 @@ import {
   Route,
   Send,
   ShieldCheck,
+  UserRound,
   Users,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
+import { formatDecimalInput } from '@/lib/decimal-input'
+
+import { AirlineLogo } from './airline-logo'
 import { airQuoteTotalMinor, formatAirMoney } from './pricing'
 import type {
   OfflineAirDemandSummary,
@@ -36,14 +42,17 @@ export function OfflineAirQuoteChoicePanel({
   onSelect,
 }: OfflineAirQuoteChoicePanelProps) {
   const [selectedOptionId, setSelectedOptionId] = useState('')
+  const [expandedOptionId, setExpandedOptionId] = useState(quote.options[0]?.id || '')
   const [confirmed, setConfirmed] = useState(false)
   const [error, setError] = useState('')
+  const firstOptionId = quote.options[0]?.id || ''
 
   useEffect(() => {
     setSelectedOptionId('')
+    setExpandedOptionId(firstOptionId)
     setConfirmed(false)
     setError('')
-  }, [quote.id])
+  }, [firstOptionId, quote.id])
 
   const selectedOption = useMemo(
     () => quote.options.find((option) => option.id === selectedOptionId) || null,
@@ -86,6 +95,12 @@ export function OfflineAirQuoteChoicePanel({
               <span className="mt-0.5 block tabular-nums">{formatDateTime(quote.expiresAt)}</span>
             </div>
           )}
+          {quote.createdAt && (
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+              <span className="flex items-center gap-1.5 font-semibold"><ReceiptText className="h-3.5 w-3.5" />Rodada publicada</span>
+              <span className="mt-0.5 block tabular-nums">{formatDateTime(quote.createdAt)}</span>
+            </div>
+          )}
         </div>
       </header>
 
@@ -100,12 +115,16 @@ export function OfflineAirQuoteChoicePanel({
               option={option}
               index={index}
               selected={selected}
+              expanded={option.id === expandedOptionId}
               disabled={busy}
+              radioName={`offline-air-choice-${quote.id}`}
               onSelect={() => {
                 setSelectedOptionId(option.id)
+                setExpandedOptionId(option.id)
                 setConfirmed(false)
                 setError('')
               }}
+              onToggle={() => setExpandedOptionId((current) => current === option.id ? '' : option.id)}
             />
           )
         })}
@@ -162,12 +181,17 @@ export function OfflineAirQuoteChoicePanel({
 function RequestSummary({ demand }: { demand: OfflineAirDemandSummary }) {
   return (
     <div className="border-b border-bbt-gray-100 p-4 dark:border-slate-700">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Solicitação {demand.number}</div>
-        <div className="flex items-center gap-1.5 text-xs text-slate-500">
-          <Users className="h-3.5 w-3.5" />
-          {demand.passengers.map((passenger) => passenger.name).join(', ') || 'Viajante não informado'}
+        <div className="rounded-full bg-cyan-50 px-2.5 py-1 text-[11px] font-semibold text-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-200">
+          {demand.requestedCabin || 'Cabine não informada'}
         </div>
+      </div>
+      <div className="mb-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <RequestFact icon={<Building2 className="h-3.5 w-3.5" />} label="Empresa" value={demand.companyName || 'Não informada'} />
+        <RequestFact icon={<UserRound className="h-3.5 w-3.5" />} label="Solicitante" value={demand.requesterName || 'Não informado'} />
+        <RequestFact icon={<Users className="h-3.5 w-3.5" />} label="Passageiros" value={demand.passengers.map((passenger) => passenger.name).join(', ') || 'Não informados'} />
+        <RequestFact icon={<Plane className="h-3.5 w-3.5" />} label="Preferências" value={demand.preferredAirlines?.join(', ') || 'Qualquer companhia'} />
       </div>
       <div className="grid gap-2 md:grid-cols-2">
         {demand.requestedSegments.map((segment, index) => (
@@ -186,37 +210,81 @@ function RequestSummary({ demand }: { demand: OfflineAirDemandSummary }) {
   )
 }
 
-function AirChoiceCard({ option, index, selected, disabled, onSelect }: {
+function RequestFact({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-slate-50 px-3 py-2 dark:bg-slate-800/60">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">{icon}{label}</div>
+      <div className="mt-0.5 line-clamp-2 text-xs font-medium text-bbt-primary dark:text-white" title={value}>{value}</div>
+    </div>
+  )
+}
+
+function AirChoiceCard({ option, index, selected, expanded, disabled, radioName, onSelect, onToggle }: {
   option: OfflineAirQuoteOptionReadModel
   index: number
   selected: boolean
+  expanded: boolean
   disabled: boolean
+  radioName: string
   onSelect: () => void
+  onToggle: () => void
 }) {
   const totalMinor = option.totalMinor ?? airQuoteTotalMinor(option.pricing)
   const connectionCount = Math.max(0, option.segments.length - countJourneys(option.segments))
+  const firstSegment = option.segments[0]
+  const lastSegment = option.segments[option.segments.length - 1]
+  const route = firstSegment && lastSegment
+    ? `${locationLabel(firstSegment.originCode, firstSegment.originName)} → ${locationLabel(lastSegment.destinationCode, lastSegment.destinationName)}`
+    : 'Itinerário não informado'
+  const detailsId = `air-choice-details-${option.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
 
   return (
     <article className={`overflow-hidden rounded-xl border bg-white shadow-sm transition dark:bg-slate-900 ${selected ? 'border-cyan-500 ring-2 ring-cyan-500/20 dark:border-cyan-400' : 'border-slate-200 hover:border-cyan-300 dark:border-slate-700'}`} data-air-choice-option={option.id}>
-      <button type="button" className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 text-left" onClick={onSelect} disabled={disabled} aria-pressed={selected}>
-        <div className="flex items-center gap-3">
-          <span className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-bold ${selected ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>
-            {selected ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
-          </span>
-          <div>
-            <div className="font-bold text-bbt-primary dark:text-white">Opção {option.optionNumber || index + 1}</div>
-            <div className="mt-0.5 text-xs text-slate-500">
-              {primaryAirlineLabel(option)} · {connectionCount === 0 ? 'Direto por sentido' : `${connectionCount} conexão${connectionCount === 1 ? '' : 'ões'}`}
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-stretch">
+        <label className="flex cursor-pointer items-center border-r border-slate-100 px-4 dark:border-slate-700" title={`Selecionar opção ${option.optionNumber || index + 1}`}>
+          <input
+            type="radio"
+            name={radioName}
+            value={option.id}
+            checked={selected}
+            onChange={onSelect}
+            disabled={disabled}
+            className="h-4 w-4 border-slate-300 text-bbt-accent focus:ring-bbt-accent"
+            aria-label={`Selecionar opção aérea ${option.optionNumber || index + 1}`}
+          />
+        </label>
+        <button type="button" className="grid min-w-0 gap-3 px-4 py-3 text-left sm:grid-cols-2 lg:grid-cols-[1.05fr_1.25fr_1.25fr_1fr_auto] lg:items-center" onClick={onSelect} disabled={disabled} aria-pressed={selected}>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 font-bold text-bbt-primary dark:text-white">
+              <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs ${selected ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>
+                {selected ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+              </span>
+              Opção {option.optionNumber || index + 1}
             </div>
+            <div className="mt-1 truncate text-[11px] text-slate-500">{option.locator || 'Sem localizador na cotação'}</div>
           </div>
-        </div>
-        <div className="text-right">
-          <div className="text-[11px] uppercase tracking-wide text-slate-500">Total</div>
-          <div className="text-lg font-bold text-bbt-primary dark:text-white">{formatAirMoney(totalMinor, option.pricing.currency)}</div>
-        </div>
-      </button>
+          <CompactAirlineFact option={option} />
+          <CompactFact label="Itinerário" value={route} helper={connectionCount === 0 ? 'Direto por sentido' : `${connectionCount} conexão${connectionCount === 1 ? '' : 'ões'}`} />
+          <CompactFact label="Prazo de emissão" value={formatDateTime(option.issuanceDeadline)} highlight />
+          <div className="text-left lg:text-right">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total</div>
+            <div className="mt-0.5 whitespace-nowrap text-lg font-bold text-bbt-primary dark:text-white">{formatAirMoney(totalMinor, option.pricing.currency)}</div>
+          </div>
+        </button>
+        <button
+          type="button"
+          className="flex w-11 items-center justify-center border-l border-slate-100 text-slate-500 hover:bg-slate-50 hover:text-bbt-primary focus:outline-none focus:ring-2 focus:ring-inset focus:ring-bbt-accent/30 dark:border-slate-700 dark:hover:bg-slate-800 dark:hover:text-white"
+          onClick={onToggle}
+          disabled={disabled}
+          aria-expanded={expanded}
+          aria-controls={detailsId}
+          aria-label={`${expanded ? 'Ocultar' : 'Mostrar'} detalhes da opção ${option.optionNumber || index + 1}`}
+        >
+          <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
+        </button>
+      </div>
 
-      <div className="border-t border-slate-100 dark:border-slate-700">
+      {expanded && <div id={detailsId} className="border-t border-slate-100 dark:border-slate-700">
         <div className="overflow-x-auto">
           <table className="min-w-full text-left text-xs">
             <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800/70">
@@ -240,8 +308,14 @@ function AirChoiceCard({ option, index, selected, disabled, onSelect }: {
                     <span className="block text-slate-500">→ {locationLabel(segment.destinationCode, segment.destinationName)}</span>
                   </td>
                   <td className="px-3 py-2">
-                    <span className="block font-medium">{segment.airlineName || segment.airlineCode}</span>
-                    <span className="block text-slate-500">{[segment.airlineCode, segment.flightNumber].filter(Boolean).join(' ')}</span>
+                    <div className="flex min-w-40 items-center gap-2">
+                      <AirlineLogo iataCode={segment.airlineCode} airlineName={segment.airlineName} size="xs" decorative />
+                      <div className="min-w-0">
+                        <span className="block font-medium">{segment.airlineName || segment.airlineCode}</span>
+                        <span className="block text-slate-500">{[segment.airlineCode, segment.flightNumber].filter(Boolean).join(' ')}</span>
+                        {segment.equipment && <span className="block text-slate-400">Equip. {segment.equipment}</span>}
+                      </div>
+                    </div>
                   </td>
                   <td className="px-3 py-2">{segment.bookingClass || '—'}{segment.cabinClass ? ` · ${cabinLabel(segment.cabinClass)}` : ''}</td>
                   <td className="px-3 py-2"><span className="inline-flex items-center gap-1"><Luggage className="h-3.5 w-3.5" />{baggageLabel(segment.baggagePieces)}</span></td>
@@ -268,6 +342,12 @@ function AirChoiceCard({ option, index, selected, disabled, onSelect }: {
           <InfoBlock icon={<Plane className="h-3.5 w-3.5" />} label="Família / reembolso" value={`${option.fareFamily || 'Família não informada'} · ${option.refundable ? 'Reembolsável' : 'Não reembolsável'}`} />
         </div>
 
+        <div className="grid gap-3 border-t border-slate-100 p-3 sm:grid-cols-3 dark:border-slate-700">
+          <InfoBlock label="Câmbio informado" value={formatDecimalInput(option.pricing.exchangeRate, 4) || 'Não informado'} />
+          <InfoBlock label="Tarifa de referência" value={formatAirMoney(safeMoneyMinor(option.pricing.referenceFare), option.pricing.currency)} />
+          <InfoBlock label="Milhagem do itinerário" value={`${Number.parseInt(option.pricing.mileage || '0', 10) || 0} milhas`} />
+        </div>
+
         {(option.fareRules || option.cancellationPolicy || option.changePolicy || option.observations) && (
           <div className="grid gap-3 border-t border-slate-100 p-3 text-xs lg:grid-cols-2 dark:border-slate-700">
             {option.fareRules && <InfoBlock label="Regras tarifárias" value={option.fareRules} />}
@@ -276,8 +356,45 @@ function AirChoiceCard({ option, index, selected, disabled, onSelect }: {
             {option.observations && <InfoBlock label="Observações" value={option.observations} />}
           </div>
         )}
-      </div>
+      </div>}
     </article>
+  )
+}
+
+function CompactFact({ label, value, helper, highlight = false }: { label: string; value: string; helper?: string; highlight?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className={`text-[10px] font-semibold uppercase tracking-wide ${highlight ? 'text-amber-700 dark:text-amber-300' : 'text-slate-500'}`}>{label}</div>
+      <div className="mt-0.5 truncate text-xs font-semibold text-bbt-primary dark:text-white" title={value}>{value}</div>
+      {helper && <div className="truncate text-[11px] text-slate-500" title={helper}>{helper}</div>}
+    </div>
+  )
+}
+
+function CompactAirlineFact({ option }: { option: OfflineAirQuoteOptionReadModel }) {
+  const identities = optionAirlineIdentities(option)
+  const label = primaryAirlineLabel(option)
+
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Companhia</div>
+      <div className="mt-0.5 flex min-w-0 items-center gap-2">
+        <div className="flex shrink-0 items-center -space-x-1">
+          {identities.slice(0, 2).map((identity) => (
+            <AirlineLogo
+              key={`${identity.code}-${identity.name}`}
+              iataCode={identity.code}
+              airlineName={identity.name}
+              size="md"
+              decorative
+              className="bg-white dark:bg-slate-900"
+            />
+          ))}
+          {!identities.length && <AirlineLogo iataCode="" airlineName="Companhia não informada" size="md" decorative />}
+        </div>
+        <span className="truncate text-xs font-semibold text-bbt-primary dark:text-white" title={label}>{label}</span>
+      </div>
+    </div>
   )
 }
 
@@ -317,8 +434,26 @@ function countJourneys(segments: OfflineAirQuoteOptionReadModel['segments']): nu
 }
 
 function primaryAirlineLabel(option: OfflineAirQuoteOptionReadModel): string {
-  const airlines = [...new Set(option.segments.map((segment) => segment.airlineName || segment.airlineCode).filter(Boolean))]
+  const airlines = optionAirlineIdentities(option).map((identity) => identity.name || identity.code)
   return airlines.join(' + ') || 'Companhia não informada'
+}
+
+function optionAirlineIdentities(option: OfflineAirQuoteOptionReadModel): Array<{ code: string; name: string }> {
+  const candidates = [
+    { code: option.validatingAirlineCode || '', name: option.validatingAirlineName || '' },
+    ...option.segments.map((segment) => ({ code: segment.airlineCode || '', name: segment.airlineName || '' })),
+  ]
+  const seen = new Set<string>()
+
+  return candidates.flatMap((identity) => {
+    const code = identity.code.trim().toUpperCase()
+    const name = identity.name.trim()
+    if (!code && !name) return []
+    const key = code || name.toLocaleLowerCase('pt-BR')
+    if (seen.has(key)) return []
+    seen.add(key)
+    return [{ code, name }]
+  })
 }
 
 function cabinLabel(value: string): string {

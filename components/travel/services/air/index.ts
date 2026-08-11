@@ -1,3 +1,6 @@
+export { AirlineLogo } from './airline-logo'
+export type { AirlineLogoProps } from './airline-logo'
+export { normalizeAirlineIataCode, resolveAirlineBrand, supportedAirlineBrandCodes } from './airline-brand'
 export { OfflineAirOperationFields } from './offline-air-operation-fields'
 export type { OfflineAirOperationFieldsProps } from './offline-air-operation-fields'
 export { OfflineAirQuoteChoicePanel } from './offline-air-quote-choice-panel'
@@ -19,6 +22,7 @@ export {
   createEmptyAirSegment,
   formatAirMoney,
   isValidMoneyInput,
+  isValidDecimalInput,
 } from './pricing'
 export type {
   OfflineAirApprovedSnapshot,

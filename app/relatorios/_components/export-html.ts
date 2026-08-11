@@ -55,6 +55,10 @@ export type HtmlReportPayload = {
   generatedAt: string
   totalDias: number
   brandLogoDataUrl?: string
+  brandName?: string
+  agencyLogoDataUrl?: string
+  brandPrimaryColor?: string
+  brandAccentColor?: string
   detailCompanyColumn: boolean
   categoryLabels: Record<TipoServico, string>
   statusLabels: Record<StatusAtendimento, string>
@@ -74,6 +78,8 @@ export type HtmlReportPayload = {
 
 export function buildStandaloneReportHtml(payload: HtmlReportPayload): string {
   const json = serializeForInlineScript(payload)
+  const brandPrimaryColor = safeBrandColor(payload.brandPrimaryColor, '#20265A')
+  const brandAccentColor = safeBrandColor(payload.brandAccentColor, '#21BFC5')
 
   return `<!doctype html>
 <html lang="pt-BR">
@@ -89,9 +95,10 @@ export function buildStandaloneReportHtml(payload: HtmlReportPayload): string {
       --line: #d9e0ea;
       --soft: #f4f6fa;
       --paper: #ffffff;
-      --navy: #20265a;
+      --navy: ${brandPrimaryColor};
       --orange: #d8a128;
-      --blue: #416faf;
+      --blue: ${brandAccentColor};
+      --accent: ${brandAccentColor};
       --green: #236a45;
       --danger: #9b4a1c;
     }
@@ -114,7 +121,7 @@ export function buildStandaloneReportHtml(payload: HtmlReportPayload): string {
       justify-content: space-between;
       gap: 12px;
       border-bottom: 1px solid var(--line);
-      border-top: 3px solid #21bfc5;
+      border-top: 3px solid var(--accent);
       background: rgba(255,255,255,.96);
       padding: 12px 18px;
       backdrop-filter: blur(8px);
@@ -142,7 +149,7 @@ export function buildStandaloneReportHtml(payload: HtmlReportPayload): string {
     .wrap { max-width: 1180px; margin: 0 auto; padding: 20px; }
     .report { overflow: hidden; border: 1px solid #cfd6e3; border-radius: 6px; background: var(--paper); box-shadow: 0 12px 34px rgba(32,38,90,.09); }
     .report-head { position: relative; display: grid; grid-template-columns: 190px minmax(0,1fr) 190px; min-height: 82px; align-items: center; gap: 18px; border-bottom: 1px solid var(--line); padding: 14px 22px; text-align: center; }
-    .report-head::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; background: linear-gradient(90deg,#45d0d4 0 38%,#4a3191 38% 76%,#d8a128 76% 100%); }
+    .report-head::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; background: linear-gradient(90deg,var(--accent) 0 45%,var(--navy) 45% 85%,#d8a128 85% 100%); }
     .report-head-logo { display: block; width: 180px; max-width: 100%; height: auto; }
     .report-head-copy { min-width: 0; }
     .report-head-meta { color: var(--muted); font-size: 10px; line-height: 1.5; text-align: right; }
@@ -273,9 +280,10 @@ export function buildStandaloneReportHtml(payload: HtmlReportPayload): string {
 <body>
   <div class="toolbar">
     <div class="toolbar-brand">
-      ${payload.brandLogoDataUrl ? `<img class="toolbar-logo" src="${escapeHtmlText(payload.brandLogoDataUrl)}" alt="BBT Corporativo">` : ''}
-      <div><strong>BBT Corporativo</strong>
+      ${payload.brandLogoDataUrl ? `<img class="toolbar-logo" src="${escapeHtmlText(payload.brandLogoDataUrl)}" alt="${escapeHtmlText(payload.brandName || 'Identidade corporativa')}">` : ''}
+      <div><strong>${escapeHtmlText(payload.brandName || 'BBT Corporativo')}</strong>
       <small>Arquivo HTML interativo gerado em ${escapeHtmlText(new Date(payload.generatedAt).toLocaleString('pt-BR'))}</small></div>
+      ${payload.agencyLogoDataUrl ? `<div title="Gestão de viagens por BBT Corporativo"><small>Gestão de viagens por</small><img class="toolbar-logo" style="width:105px" src="${escapeHtmlText(payload.agencyLogoDataUrl)}" alt="BBT Corporativo"></div>` : ''}
     </div>
     <div class="toolbar-actions">
       <button class="btn secondary" id="btn-print" type="button">Imprimir / PDF</button>
@@ -291,6 +299,11 @@ ${STANDALONE_REPORT_SCRIPT}
   </script>
 </body>
 </html>`
+}
+
+function safeBrandColor(value: string | null | undefined, fallback: string): string {
+  const normalized = String(value || '').trim().toUpperCase()
+  return /^#[0-9A-F]{6}$/.test(normalized) ? normalized : fallback
 }
 
 const STANDALONE_REPORT_SCRIPT = String.raw`(function () {
@@ -684,9 +697,9 @@ const STANDALONE_REPORT_SCRIPT = String.raw`(function () {
     }).join("");
 
     return '<div class="report"><header class="report-head">' +
-      (data.brandLogoDataUrl ? '<img class="report-head-logo" src="' + esc(data.brandLogoDataUrl) + '" alt="BBT Corporativo">' : '<div class="brand-mark">BBT</div>') +
+      (data.brandLogoDataUrl ? '<img class="report-head-logo" src="' + esc(data.brandLogoDataUrl) + '" alt="' + esc(data.brandName || 'Identidade corporativa') + '">' : '<div class="brand-mark">BBT</div>') +
       '<div class="report-head-copy"><p class="eyebrow">' + esc(data.eyebrow) + '</p><h1>' + esc(data.title) + '</h1></div>' +
-      '<div class="report-head-meta"><strong>Relatório corporativo</strong><span>' + dateBR(data.periodStart) + ' a ' + dateBR(data.periodEnd) + '</span></div></header>' +
+      '<div class="report-head-meta"><strong>Relatório corporativo</strong><span>' + dateBR(data.periodStart) + ' a ' + dateBR(data.periodEnd) + '</span>' + (data.agencyLogoDataUrl ? '<span>Gestão de viagens por BBT Corporativo</span>' : '') + '</div></header>' +
       '<div class="shell"><aside class="side"><div class="side-intro">Resumo executivo</div><div class="side-kpis">' +
       (data.isAgency
         ? sideKpi("Total faturado", money(metrics.faturadoTotal)) + sideKpi("Custo operacional", money(metrics.custoTotal)) + sideKpi("Resultado BBT", money(metrics.markupTotal + metrics.taxaTotal), "Margem " + metrics.margemMediaPct.toFixed(1) + "%")

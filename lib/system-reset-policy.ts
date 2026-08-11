@@ -81,6 +81,8 @@ export const TENANT_BUSINESS_RESET_TABLES = [
   'commercial_supplier_contacts',
   'commercial_suppliers',
   'companies',
+  'corporate_branding_assets',
+  'corporate_branding_settings',
   'corporate_cards',
   'corporate_company_access_grants',
   'corporate_group_access_companies',

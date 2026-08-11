@@ -124,7 +124,7 @@ describe('assistant voucher HTML', () => {
     const html = renderVoucherHtml(completeHotelVoucher())
 
     for (const expected of [
-      'Cliente e aprovação',
+      'Identificação do pedido',
       'Cliente &amp; Companhia S.A.',
       'Solicitante Teste',
       'Aprovadora Um, Diretor &lt;Final&gt;',
@@ -135,7 +135,7 @@ describe('assistant voucher HTML', () => {
       'Bruno &lt;Acompanhante&gt;',
       '123.***.***-01',
       'ana@example.com, (62) 99999-1111',
-      'Hotel e hospedagem',
+      'Confirmação da hospedagem',
       'Hotel &amp; Spa &lt;Centro&gt;',
       'Ribeirão Preto/SP',
       '03/09/2026, 14:00',
@@ -148,7 +148,7 @@ describe('assistant voucher HTML', () => {
       'LOC-13728',
       'CONF-HOTEL-9988',
       'RES-CLIENTE-4455',
-      'Diária × 2 noites × 1 quarto',
+      'Diária por quarto · 2 noite(s) × 1 quarto(s)',
       'R$\u00a0330,00',
       'R$\u00a0755,52',
       'Faturado',
@@ -227,7 +227,7 @@ describe('assistant voucher HTML', () => {
       'R$\u00a0755,52',
       'Cancelamento e condições',
       'No-show sujeito a 100%',
-      'Cliente e aprovação',
+      'Dados administrativos',
       'Unidade Centro-Oeste',
       'Solicitante Teste',
       'Aprovadora Um',
@@ -278,5 +278,25 @@ describe('assistant voucher HTML', () => {
     expect(withoutAdministrativeData).not.toContain('OS-20260804-0004')
     expect(withoutAdministrativeData).not.toContain('Consultor Offline')
     expect(withoutAdministrativeData).not.toContain('Operador BBT')
+  })
+
+  it('applies the customer brand while preserving BBT as the legal travel issuer', () => {
+    const logoDataUrl = 'data:image/png;base64,iVBORw0KGgo='
+    const html = renderVoucherHtml(completeHotelVoucher(), true, {
+      displayName: 'Grupo Exemplo',
+      logoDataUrl,
+      primaryColor: '#123456',
+      accentColor: '#ABCDEF',
+      documentLegalName: 'Grupo Exemplo Participacoes S.A.',
+      documentNumber: '12.345.678/0001-90',
+    })
+
+    expect(html).toContain(`src="${logoDataUrl}"`)
+    expect(html).toContain('alt="Grupo Exemplo"')
+    expect(html).toContain('--brand-primary: #123456')
+    expect(html).toContain('--brand-accent: #ABCDEF')
+    expect(html).toContain('Grupo Exemplo Participacoes S.A. · 12.345.678/0001-90')
+    expect(html).toContain('BBT AGENCIA DE VIAGENS E TURISMO GLOBAIS')
+    expect(html).toContain('CNPJ 20.027.725/0001-80')
   })
 })

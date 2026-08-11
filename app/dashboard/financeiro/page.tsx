@@ -42,6 +42,7 @@ import { useFiltroPersistente } from '@/lib/filtros'
 import { formatarValor, formatarData } from '@/lib/normalizers'
 import { Modal } from '@/components/ui/modal'
 import { DateInput } from '@/components/ui/date-input'
+import { NumericDecimalInput } from '@/components/ui/decimal-input'
 import { toast } from 'sonner'
 import {
   Wallet, ArrowDownCircle, ArrowUpCircle, AlertTriangle, TrendingUp,
@@ -768,7 +769,12 @@ export default function FinanceiroPage() {
             <div className="border-t border-bbt-gray-100 dark:border-slate-700 pt-3">
               <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Crédito externo já conciliado</label>
               <div className="flex gap-2">
-                <input type="number" min="0" step="0.01" value={aporteValor} onChange={(e) => setAporteValor(Number(e.target.value || 0))} className="bbt-input" />
+                <NumericDecimalInput
+                  value={aporteValor}
+                  emptyValue={0}
+                  onNumberChange={(value) => setAporteValor(value ?? 0)}
+                  containerClassName="flex-1"
+                />
                 <button onClick={registrarAporte} className="bbt-button-accent">
                   <Send className="w-4 h-4" />
                 </button>
@@ -783,13 +789,11 @@ export default function FinanceiroPage() {
                 placeholder="Descrição e referência da transação"
               />
               <div className="flex gap-2">
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
+                <NumericDecimalInput
                   value={pixPagamento.valor}
-                  onChange={(e) => setPixPagamento({ ...pixPagamento, valor: Number(e.target.value || 0) })}
-                  className="bbt-input"
+                  emptyValue={0}
+                  onNumberChange={(value) => setPixPagamento({ ...pixPagamento, valor: value ?? 0 })}
+                  containerClassName="flex-1"
                 />
                 <button onClick={registrarPixPagamento} className="bbt-button-primary">
                   <Send className="w-4 h-4" />
@@ -868,7 +872,11 @@ export default function FinanceiroPage() {
             </div>
             <div>
               <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Limite</label>
-              <input type="number" min="0" step="0.01" value={cartaoForm.limite} onChange={(e) => setCartaoForm({ ...cartaoForm, limite: Number(e.target.value || 0) })} className="bbt-input" />
+              <NumericDecimalInput
+                value={cartaoForm.limite}
+                emptyValue={0}
+                onNumberChange={(value) => setCartaoForm({ ...cartaoForm, limite: value ?? 0 })}
+              />
             </div>
             <div>
               <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Restricao fornecedor/categoria</label>
@@ -1067,7 +1075,11 @@ function PagamentoForm({ lancamento, userId, userName, onSucesso }: any) {
       </div>
       <div>
         <label className="text-xs uppercase tracking-wider text-slate-500">Valor</label>
-        <input type="number" step="0.01" value={valor} onChange={(e) => setValor(parseFloat(e.target.value) || 0)} className="bbt-input w-full" />
+        <NumericDecimalInput
+          value={valor}
+          emptyValue={0}
+          onNumberChange={(nextValue) => setValor(nextValue ?? 0)}
+        />
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div>

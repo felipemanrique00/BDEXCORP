@@ -14,6 +14,11 @@ const legacyLegSchema = z.object({
   latest_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional().or(z.literal('')),
 }).strict()
 
+const airPassengerSchema = z.object({
+  employee_id: z.string().trim().min(1).max(200),
+  name: z.string().trim().min(2).max(300),
+}).strict()
+
 const legacyAirDemandSchema = z.object({
   trip_type: tripTypeSchema.default('one_way'),
   classe: z.string().trim().default('Econômica'),
@@ -23,8 +28,19 @@ const legacyAirDemandSchema = z.object({
   flexible_dates: z.boolean().default(false),
   flexible_times: z.boolean().default(false),
   internacional: z.boolean().default(false),
+  passengers: z.array(airPassengerSchema).min(1).max(100).optional(),
   trechos: z.array(legacyLegSchema).min(1).max(32),
 }).passthrough().superRefine((value, context) => {
+  if (value.passengers) {
+    const employeeIds = value.passengers.map((passenger) => passenger.employee_id)
+    if (new Set(employeeIds).size !== employeeIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['passengers'],
+        message: 'O mesmo passageiro pode ser informado somente uma vez.',
+      })
+    }
+  }
   const ordered = [...value.trechos].sort((left, right) => left.sequence - right.sequence)
   ordered.forEach((leg, index) => {
     if (leg.sequence !== index + 1) {
@@ -96,6 +112,11 @@ export interface AirDemandLegInput {
   latestDeparture: string | null
 }
 
+export interface AirDemandPassengerInput {
+  employeeId: string
+  name: string
+}
+
 export interface AirDemandDetailsInput {
   tripType: z.infer<typeof tripTypeSchema>
   cabinClass: z.infer<typeof cabinClassSchema>
@@ -103,6 +124,8 @@ export interface AirDemandDetailsInput {
   directOnly: boolean
   baggageRequired: boolean
   preferences: Record<string, unknown>
+  /** Ausente somente em demandas legadas criadas antes do cadastro multipassageiro. */
+  passengers?: AirDemandPassengerInput[]
   legs: AirDemandLegInput[]
 }
 
@@ -122,6 +145,10 @@ export function parseAirDemandDetails(value: unknown): AirDemandDetailsInput | n
         flexibleTimes: parsed.data.flexible_times,
         international: parsed.data.internacional,
       },
+      passengers: parsed.data.passengers?.map((passenger) => ({
+        employeeId: passenger.employee_id,
+        name: passenger.name,
+      })),
       legs: [...parsed.data.trechos]
         .sort((left, right) => left.sequence - right.sequence)
         .map((leg) => {

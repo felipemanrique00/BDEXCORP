@@ -10,15 +10,15 @@ const config: Config = {
     extend: {
       colors: {
         bbt: {
-          primary: '#20265A',
-          'primary-mid': '#30377A',
-          'primary-light': '#416FAF',
-          accent: '#21BFC5',
-          violet: '#4A3191',
-          gold: '#D8A128',
-          'gray-50': '#F4F6FA',
-          'gray-100': '#D9E0EA',
-          text: '#172033',
+          primary: 'rgb(var(--bbt-primary-rgb) / <alpha-value>)',
+          'primary-mid': 'rgb(var(--bbt-primary-mid-rgb) / <alpha-value>)',
+          'primary-light': 'rgb(var(--bbt-primary-light-rgb) / <alpha-value>)',
+          accent: 'rgb(var(--bbt-accent-rgb) / <alpha-value>)',
+          violet: 'rgb(var(--bbt-violet-rgb) / <alpha-value>)',
+          gold: 'rgb(var(--bbt-gold-rgb) / <alpha-value>)',
+          'gray-50': 'rgb(var(--bbt-gray-50-rgb) / <alpha-value>)',
+          'gray-100': 'rgb(var(--bbt-gray-100-rgb) / <alpha-value>)',
+          text: 'rgb(var(--bbt-text-rgb) / <alpha-value>)',
         },
       },
       fontFamily: {

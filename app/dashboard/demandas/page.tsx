@@ -584,7 +584,7 @@ export default function DemandasPage() {
               else { setEditando(null); setNovaDemandaModal(true) }
             }}
               className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-5 py-3 text-[#061631] font-semibold text-sm hover:brightness-105 transition shadow-lg shadow-cyan-500/20">
-              <Zap className="w-4 h-4" /> {requesterView ? 'Abrir portal' : 'Nova Demanda'}
+              <Zap className="w-4 h-4" /> {requesterView ? 'Abrir portal' : 'Nova demanda para cliente'}
             </button>
             <button onClick={refresh}
               className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-white text-sm hover:bg-white/15 transition border border-white/15">

@@ -4,6 +4,10 @@ import type { QueryResultRow } from 'pg'
 import { z } from 'zod'
 
 import type { TravelerDirectoryItem } from '@/lib/travelers/types'
+import {
+  airTravelerBirthDateFromMetadata,
+  assessAirTravelerProfile,
+} from '@/lib/travelers/air-profile'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
@@ -11,7 +15,8 @@ import type { RequestPrincipal } from '@/lib/server/request-context'
 const travelerQuerySchema = z.object({
   companyId: z.string().trim().min(1).max(200),
   q: z.string().trim().max(160).optional(),
-  limit: z.coerce.number().int().min(1).max(50).default(20),
+  ids: z.string().trim().max(20_099).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
 }).strict()
 
@@ -24,8 +29,11 @@ interface TravelerRow extends QueryResultRow {
   phone: string | null
   job_title: string | null
   department: string | null
+  cost_center_id: string | null
   cost_center: string | null
   registration_code: string | null
+  document_number: string | null
+  metadata: Record<string, unknown> | null
   total_count: string | number
 }
 
@@ -43,6 +51,11 @@ export async function listTravelerDirectory(
       `employee.status = 'active'`,
       'employee.deleted_at is null',
     ]
+    const employeeIds = travelerIds(query.ids)
+    if (employeeIds.length) {
+      values.push(employeeIds)
+      clauses.push(`employee.id = any($${values.length}::text[])`)
+    }
     if (query.q) {
       values.push(`%${query.q.toLowerCase()}%`)
       clauses.push(`(
@@ -71,10 +84,21 @@ export async function listTravelerDirectory(
         phone: row.phone,
         jobTitle: row.job_title,
         department: row.department,
+        costCenterId: row.cost_center_id,
         costCenter: row.cost_center,
         registrationCode: row.registration_code,
+        profileIssues: assessAirTravelerProfile({
+          name: row.full_name,
+          documentNumber: row.document_number,
+          birthDate: airTravelerBirthDateFromMetadata(row.metadata),
+        }).profileIssues,
       })),
       total: result.rows[0] ? Number(result.rows[0].total_count) : 0,
     }
   })
+}
+
+function travelerIds(value: string | undefined): string[] {
+  if (!value) return []
+  return [...new Set(value.split(',').map((item) => item.trim()).filter(Boolean))].slice(0, 100)
 }

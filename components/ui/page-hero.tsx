@@ -2,7 +2,7 @@
 /**
  * PageHero — V17
  *
- * Hero corporativo reutilizável alinhado à identidade BBT.
+ * Hero corporativo reutilizável alinhado à identidade efetiva do contexto.
  * Background sólido com faixa de marca e imagem opcional.
  *
  * Slot lateral opcional pra ações/ações rápidas no canto direito.
@@ -39,13 +39,13 @@ export function PageHero({
   const metricColumnsClass = getMetricColumnsClass(metrics?.length || 0)
 
   return (
-    <section className="relative overflow-hidden rounded-lg border border-[#353d78] bg-[#20265a] text-white shadow-[0_12px_30px_rgba(32,38,90,0.16)]">
-      <div className="absolute inset-x-0 top-0 h-1 bg-[linear-gradient(90deg,#45d0d4_0_38%,#4a3191_38%_76%,#d8a128_76%_100%)]" />
+    <section className="relative overflow-hidden rounded-lg border border-bbt-primary-light bg-bbt-primary text-white shadow-[0_12px_30px_rgb(var(--bbt-primary-rgb)/0.16)]">
+      <div className="absolute inset-x-0 top-0 h-1 bg-[linear-gradient(90deg,var(--bbt-accent)_0_38%,var(--bbt-primary-light)_38%_76%,var(--bbt-gold)_76%_100%)]" />
       {bgImage && (
         <div
           className="absolute inset-0 opacity-25 mix-blend-luminosity"
           style={{
-            backgroundImage: `linear-gradient(rgba(32,38,90,.72),rgba(32,38,90,.72)),url(${bgImage})`,
+            backgroundImage: `linear-gradient(rgb(var(--bbt-primary-rgb) / .72),rgb(var(--bbt-primary-rgb) / .72)),url(${bgImage})`,
             backgroundSize: 'cover',
             backgroundPosition: 'center',
           }}

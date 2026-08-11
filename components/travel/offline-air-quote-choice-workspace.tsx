@@ -8,6 +8,7 @@ import { atendimentoToOfflineAirDemandSummary } from '@/components/travel/offlin
 import {
   OfflineAirQuoteChoicePanel,
   toOfflineAirQuoteRoundReadModel,
+  type OfflineAirDemandSummary,
 } from '@/components/travel/services/air'
 import { listDemandsFromServer } from '@/lib/demands-client'
 import {
@@ -244,8 +245,8 @@ export function OfflineAirQuoteChoiceWorkspace({
           {rounds.map((round) => (
             <OfflineAirQuoteChoicePanel
               key={round.quote.id}
-              demand={atendimentoToOfflineAirDemandSummary(
-                round.demand,
+              demand={airChoiceDemandSummary(
+                round,
                 companyById.get(round.demand.empresa_id)?.nome || 'Empresa não informada',
               )}
               quote={toOfflineAirQuoteRoundReadModel(round.quote)}
@@ -260,6 +261,24 @@ export function OfflineAirQuoteChoiceWorkspace({
 }
 
 export default OfflineAirQuoteChoiceWorkspace
+
+function airChoiceDemandSummary(round: AirDemandQuoteRound, companyName: string): OfflineAirDemandSummary {
+  const legacy = atendimentoToOfflineAirDemandSummary(round.demand, companyName)
+  if (!round.list.passengers.length) return legacy
+
+  return {
+    ...legacy,
+    passengers: round.list.passengers.map((passenger) => ({
+      id: passenger.demandTravelerId,
+      demandTravelerId: passenger.demandTravelerId,
+      employeeId: passenger.employeeId || undefined,
+      sequence: passenger.sequence,
+      identificationCode: passenger.identificationCode || undefined,
+      name: passenger.name,
+      type: 'adulto',
+    })),
+  }
+}
 
 function isAirDemand(demand: Atendimento): boolean {
   const service = String(demand.tipo_servico || '')
