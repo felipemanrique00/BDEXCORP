@@ -13,13 +13,14 @@ interface RouteContext {
 }
 
 export async function POST(request: Request, context: RouteContext) {
+  const { scopeType, scopeId } = await context.params
   const guard = await guardApiRequest(request, {
     requireAuth: true,
-    permission: 'alterar_configuracoes',
     authorization: {
       resource: 'settings',
       action: 'update',
       requiredPermission: 'alterar_configuracoes',
+      scope: brandingAuthorizationScope(scopeType, scopeId),
     },
     rateLimit: { key: 'corporate-branding-settings:logo-upload', limit: 20, windowMs: 60_000 },
   })
@@ -34,7 +35,6 @@ export async function POST(request: Request, context: RouteContext) {
   }
 
   try {
-    const { scopeType, scopeId } = await context.params
     const form = await request.formData()
     const uploaded = form.get('file')
     if (!(uploaded instanceof File)) {
@@ -74,4 +74,10 @@ export async function POST(request: Request, context: RouteContext) {
   } catch (error) {
     return governanceErrorResponse(error, guard.requestId)
   }
+}
+
+function brandingAuthorizationScope(scopeType: string, scopeId: string) {
+  if (scopeType === 'company') return { companyId: scopeId }
+  if (scopeType === 'group') return { groupId: scopeId }
+  return {}
 }

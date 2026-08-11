@@ -24,9 +24,15 @@ RUN addgroup --system --gid 1001 nodejs \
     && chown -R nextjs:nodejs /var/lib/bbt /app
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+# Next.js standalone tracing can omit Sharp's optional libvips package. Keep the
+# musl runtime pair explicit so branding uploads work in the Alpine image.
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/sharp ./node_modules/sharp
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@img/sharp-libvips-linuxmusl-x64 ./node_modules/@img/sharp-libvips-linuxmusl-x64
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@img/sharp-linuxmusl-x64 ./node_modules/@img/sharp-linuxmusl-x64
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
 COPY --from=builder --chown=nextjs:nodejs /app/deploy/postgres/migrations ./deploy/postgres/migrations
+RUN node -e "const sharp = require('sharp'); sharp({ create: { width: 1, height: 1, channels: 4, background: '#00000000' } }).webp().toBuffer().then(() => console.log('sharp runtime ok'))"
 USER nextjs
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

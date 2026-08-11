@@ -24,13 +24,22 @@ describe('corporate branding API contracts', () => {
   it('offers audited optimistic GET/PATCH settings scoped by company or group', () => {
     expect(settingsRoute).toContain('export async function GET')
     expect(settingsRoute).toContain('export async function PATCH')
-    expect(settingsRoute).toContain("permission: 'alterar_configuracoes'")
+    expect(settingsRoute).not.toMatch(/^\s*permission:\s*'alterar_configuracoes'/m)
+    expect(settingsRoute.indexOf('const { scopeType, scopeId } = await context.params'))
+      .toBeLessThan(settingsRoute.indexOf('const guard = await guardApiRequest'))
+    expect(settingsRoute.match(/scope: brandingAuthorizationScope\(scopeType, scopeId\)/g)).toHaveLength(2)
+    expect(settingsRoute).toContain("if (scopeType === 'company') return { companyId: scopeId }")
+    expect(settingsRoute).toContain("if (scopeType === 'group') return { groupId: scopeId }")
     expect(service).toContain('version = version + 1')
     expect(service).toContain("action: 'corporate_branding.settings.update'")
     expect(service).toContain('requireCompanyAccess(principal, entity.id, permission)')
   })
 
   it('uploads only bounded images through the dedicated multipart route', () => {
+    expect(uploadRoute).not.toMatch(/^\s*permission:\s*'alterar_configuracoes'/m)
+    expect(uploadRoute.indexOf('const { scopeType, scopeId } = await context.params'))
+      .toBeLessThan(uploadRoute.indexOf('const guard = await guardApiRequest'))
+    expect(uploadRoute).toContain('scope: brandingAuthorizationScope(scopeType, scopeId)')
     expect(uploadRoute).toContain('request.formData()')
     expect(uploadRoute).toContain("form.get('file')")
     expect(uploadRoute).toContain('BRANDING_IMAGE_MAX_BYTES + 256 * 1024')

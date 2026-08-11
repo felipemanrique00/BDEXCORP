@@ -5,7 +5,6 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
 
 import type { PoolClient, QueryResultRow } from 'pg'
-import sharp from 'sharp'
 import { z } from 'zod'
 
 import {
@@ -572,6 +571,10 @@ async function normalizeBrandingLogo(
   declaredMimeType?: string | null,
 ): Promise<Buffer> {
   try {
+    // Keep native image processing out of read-only branding routes. The
+    // container build separately verifies that Sharp/libvips is available for
+    // uploads, while a packaging regression cannot take the GET API down.
+    const { default: sharp } = await import('sharp')
     validateBrandingImageEnvelope(bytes, originalName, declaredMimeType)
     const input = sharp(bytes, {
       failOn: 'warning',

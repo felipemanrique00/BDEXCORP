@@ -14,7 +14,6 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import {
-  corporateBrandingConfigurationSchema,
   corporateBrandingScopeIdSchema,
   corporateBrandingScopeTypeSchema,
   emptyCorporateBrandingDeclared,
@@ -23,6 +22,7 @@ import {
   type CorporateBrandingScopeType,
   type CorporateBrandingSource,
 } from '@/lib/corporate-branding'
+import { readCorporateBrandingConfigurationResponse } from '@/lib/branding/corporate-branding-settings-response'
 
 interface CorporateBrandingSettingsPanelProps {
   scopeType: CorporateBrandingScopeType
@@ -605,7 +605,7 @@ async function getBrandingConfiguration(
     headers: { Accept: 'application/json' },
     signal,
   })
-  return readConfigurationResponse(response, 'Não foi possível carregar a identidade visual.')
+  return readCorporateBrandingConfigurationResponse(response, 'Não foi possível carregar a identidade visual.')
 }
 
 async function patchBrandingConfiguration(
@@ -619,7 +619,7 @@ async function patchBrandingConfiguration(
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ values: normalizeDeclared(values), expectedVersion }),
   })
-  return readConfigurationResponse(response, 'Não foi possível salvar a identidade visual.')
+  return readCorporateBrandingConfigurationResponse(response, 'Não foi possível salvar a identidade visual.')
 }
 
 async function uploadBrandingLogo(
@@ -636,22 +636,7 @@ async function uploadBrandingLogo(
     headers: { Accept: 'application/json' },
     body: form,
   })
-  return readConfigurationResponse(response, 'Não foi possível enviar a logomarca.')
-}
-
-async function readConfigurationResponse(
-  response: Response,
-  fallbackMessage: string,
-): Promise<CorporateBrandingConfiguration> {
-  const payload = await response.json().catch(() => null) as {
-    ok?: boolean
-    configuration?: unknown
-    error?: string
-  } | null
-  if (!response.ok || !payload?.ok || !payload.configuration) {
-    throw new Error(payload?.error || fallbackMessage)
-  }
-  return corporateBrandingConfigurationSchema.parse(payload.configuration)
+  return readCorporateBrandingConfigurationResponse(response, 'Não foi possível enviar a logomarca.')
 }
 
 function brandingEndpoint(scopeType: CorporateBrandingScopeType, scopeId: string): string {

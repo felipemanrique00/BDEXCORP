@@ -19,20 +19,20 @@ interface RouteContext {
 }
 
 export async function GET(request: Request, context: RouteContext) {
+  const { scopeType, scopeId } = await context.params
   const guard = await guardApiRequest(request, {
     requireAuth: true,
-    permission: 'alterar_configuracoes',
     authorization: {
       resource: 'settings',
       action: 'read',
       requiredPermission: 'alterar_configuracoes',
+      scope: brandingAuthorizationScope(scopeType, scopeId),
     },
     rateLimit: { key: 'corporate-branding-settings:read', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
 
   try {
-    const { scopeType, scopeId } = await context.params
     const configuration = await getCorporateBrandingConfiguration(
       guard.principal!,
       scopeType,
@@ -48,13 +48,14 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
+  const { scopeType, scopeId } = await context.params
   const guard = await guardApiRequest(request, {
     requireAuth: true,
-    permission: 'alterar_configuracoes',
     authorization: {
       resource: 'settings',
       action: 'update',
       requiredPermission: 'alterar_configuracoes',
+      scope: brandingAuthorizationScope(scopeType, scopeId),
     },
     rateLimit: { key: 'corporate-branding-settings:update', limit: 40, windowMs: 60_000 },
   })
@@ -63,7 +64,6 @@ export async function PATCH(request: Request, context: RouteContext) {
   if (!body.ok) return governanceBodyErrorResponse(body, guard.requestId)
 
   try {
-    const { scopeType, scopeId } = await context.params
     const configuration = await patchCorporateBrandingConfiguration(
       guard.principal!,
       scopeType,
@@ -77,4 +77,10 @@ export async function PATCH(request: Request, context: RouteContext) {
   } catch (error) {
     return governanceErrorResponse(error, guard.requestId)
   }
+}
+
+function brandingAuthorizationScope(scopeType: string, scopeId: string) {
+  if (scopeType === 'company') return { companyId: scopeId }
+  if (scopeType === 'group') return { groupId: scopeId }
+  return {}
 }
