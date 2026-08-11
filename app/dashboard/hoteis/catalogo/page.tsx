@@ -579,6 +579,7 @@ export default function HotelCatalogPage() {
               disabled={saving || !draft.countryId || geographyLoading.subdivisions}
               loading={geographyLoading.subdivisions}
               required
+              emptyMessage="Nenhum estado carregado. Sincronize a base de localidades no cadastro de fornecedores."
               onChange={(subdivisionId) => {
                 setDraft((current) => ({
                   ...current,
@@ -598,7 +599,7 @@ export default function HotelCatalogPage() {
               disabled={saving || !draft.subdivisionId}
               loading={geographyLoading.cities}
               required
-              emptyMessage="Nenhuma cidade encontrada neste estado."
+              emptyMessage="Nenhuma cidade encontrada. Verifique se a base de localidades foi sincronizada."
               onSearchChange={setCityQuery}
               onChange={(cityId, option) => setDraft((current) => ({
                 ...current,

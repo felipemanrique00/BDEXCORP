@@ -303,6 +303,7 @@ export function HotelDemandConfigurator({
             loading={loading.subdivisions}
             required
             placeholder="Digite para buscar o estado"
+            emptyMessage="Nenhum estado carregado. Solicite a sincronização das localidades a um administrador."
             onChange={(subdivisionId) => {
               setError('')
               setHotelError('')
@@ -325,7 +326,7 @@ export function HotelDemandConfigurator({
             loading={loading.cities}
             required
             placeholder="Digite para buscar a cidade"
-            emptyMessage="Nenhuma cidade encontrada neste estado."
+            emptyMessage="Nenhuma cidade encontrada. Se a base estiver vazia, solicite a sincronização das localidades a um administrador."
             onSearchChange={setCityQuery}
             onChange={(cityId, option) => {
               setError('')

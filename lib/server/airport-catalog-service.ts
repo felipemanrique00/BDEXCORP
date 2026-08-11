@@ -90,7 +90,7 @@ interface DownloadedAirportCatalog {
 export async function listAirports(
   principal: RequestPrincipal,
   rawQuery: unknown = {},
-): Promise<{ items: GeographyAirport[]; total: number }> {
+): Promise<{ items: GeographyAirport[]; total: number; catalogReady: boolean }> {
   const query = airportSearchSchema.parse(rawQuery)
   return withTenantTransaction(principal.tenantId, async (client) => {
     const values: unknown[] = []
@@ -166,9 +166,19 @@ export async function listAirports(
        limit $${values.length - 1} offset $${values.length}`,
       values,
     )
+    const catalogReady = result.rows.length > 0
+      ? true
+      : Boolean((await client.query<{ ready: boolean }>(
+        `select exists (
+           select 1 from geo_airports
+           where is_active and iata_code is not null
+         ) as ready`,
+      )).rows[0]?.ready)
+
     return {
       items: result.rows.map(mapAirport),
       total: result.rows[0] ? Number(result.rows[0].total_count) : 0,
+      catalogReady,
     }
   })
 }

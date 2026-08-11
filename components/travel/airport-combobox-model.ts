@@ -64,6 +64,10 @@ export function parseAirportSearchResponse(payload: unknown): AirportOption[] {
   })
 }
 
+export function isAirportCatalogReady(payload: unknown): boolean {
+  return !isRecord(payload) || payload.catalogReady !== false
+}
+
 export function normalizeAirportSearchLimit(limit: number): number {
   if (!Number.isFinite(limit)) return 20
   return Math.min(50, Math.max(1, Math.trunc(limit)))

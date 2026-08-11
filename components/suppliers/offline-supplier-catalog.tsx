@@ -10,6 +10,7 @@ import {
   Loader2,
   MapPin,
   Pencil,
+  Plane,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -27,12 +28,15 @@ import {
   type CommercialSupplier,
 } from '@/lib/commercial-suppliers/types'
 import {
+  getAirportCatalogSyncStatus,
   getGeographySyncStatus,
   listGeographyCities,
   listGeographyCountries,
+  syncAirportCatalog,
   syncGeographyFromIbge,
 } from '@/lib/geography/client'
 import type {
+  AirportCatalogSyncStatus,
   GeographyCity,
   GeographyCountry,
   GeographySyncStatus,
@@ -97,7 +101,11 @@ export function OfflineSupplierCatalog() {
   const [loadError, setLoadError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
   const [syncing, setSyncing] = useState(false)
+  const [syncingAirports, setSyncingAirports] = useState(false)
   const [syncStatus, setSyncStatus] = useState<GeographySyncStatus | null>(null)
+  const [airportSyncStatus, setAirportSyncStatus] = useState<AirportCatalogSyncStatus | null>(null)
+  const [geographyStatusError, setGeographyStatusError] = useState('')
+  const [airportStatusError, setAirportStatusError] = useState('')
   const [canManage, setCanManage] = useState(false)
   const [canSyncGeography, setCanSyncGeography] = useState(false)
 
@@ -135,7 +143,22 @@ export function OfflineSupplierCatalog() {
         setBrazilId(items.find((country) => country.isoAlpha2 === 'BR')?.id || '')
       })
       .catch(() => setCountries([]))
-    if (syncAllowed) void getGeographySyncStatus().then(setSyncStatus).catch(() => undefined)
+    void getGeographySyncStatus()
+      .then((status) => {
+        setSyncStatus(status)
+        setGeographyStatusError('')
+      })
+      .catch((error: unknown) => {
+        setGeographyStatusError(error instanceof Error ? error.message : 'Não foi possível consultar a base de localidades.')
+      })
+    void getAirportCatalogSyncStatus()
+      .then((status) => {
+        setAirportSyncStatus(status)
+        setAirportStatusError('')
+      })
+      .catch((error: unknown) => {
+        setAirportStatusError(error instanceof Error ? error.message : 'Não foi possível consultar o catálogo de aeroportos.')
+      })
   }, [])
 
   useEffect(() => {
@@ -194,10 +217,34 @@ export function OfflineSupplierCatalog() {
       const result = await syncGeographyFromIbge()
       toast.success(`Base atualizada: ${result.countries} países, ${result.subdivisions} estados e ${result.cities} cidades.`)
       setSyncStatus(await getGeographySyncStatus())
+      setGeographyStatusError('')
+      const nextCountries = await listGeographyCountries()
+      const brazil = nextCountries.find((country) => country.isoAlpha2 === 'BR')
+      setCountries(nextCountries)
+      setBrazilId(brazil?.id || '')
+      setCities(brazil ? await listGeographyCities({
+        countryId: brazil.id,
+        q: cityQuery.trim() || undefined,
+        limit: 100,
+      }) : [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Não foi possível atualizar a base geográfica.')
     } finally {
       setSyncing(false)
+    }
+  }
+
+  async function synchronizeAirports() {
+    setSyncingAirports(true)
+    try {
+      const result = await syncAirportCatalog()
+      toast.success(`Catálogo atualizado: ${result.airports.toLocaleString('pt-BR')} aeroportos processados.`)
+      setAirportSyncStatus(await getAirportCatalogSyncStatus())
+      setAirportStatusError('')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Não foi possível atualizar o catálogo de aeroportos.')
+    } finally {
+      setSyncingAirports(false)
     }
   }
 
@@ -272,7 +319,9 @@ export function OfflineSupplierCatalog() {
             options={cityOptions}
             loading={cityLoading}
             disabled={!brazilId}
-            emptyMessage="Nenhuma cidade encontrada."
+            emptyMessage={syncStatus?.datasetVersion
+              ? 'Nenhuma cidade encontrada.'
+              : 'A base de estados e cidades ainda não foi sincronizada.'}
             onSearchChange={setCityQuery}
             onChange={(cityId) => setFilters((current) => ({ ...current, cityId }))}
           />
@@ -409,26 +458,80 @@ export function OfflineSupplierCatalog() {
         )}
       </section>
 
-      <section className="bbt-card flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between" aria-label="Base geográfica oficial">
-        <div className="min-w-0">
-          <p className="flex items-center gap-2 text-sm font-semibold text-bbt-primary dark:text-white">
-            <Database className="h-4 w-4 text-bbt-accent" aria-hidden="true" /> Base geográfica oficial
-          </p>
-          <p className="mt-1 text-xs text-slate-500">
-            {syncStatus?.datasetVersion
-              ? `Versão validada em ${new Date(syncStatus.datasetVersion.activatedAt).toLocaleString('pt-BR')} · ${syncStatus.datasetVersion.recordCount.toLocaleString('pt-BR')} registros.`
-              : 'Países, estados e cidades são lidos da cópia validada no PostgreSQL.'}
-          </p>
-        </div>
-        {canSyncGeography && (
-          <button type="button" onClick={() => void synchronizeGeography()} disabled={syncing} className="bbt-button-outline shrink-0">
-            {syncing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
-            {syncing ? 'Sincronizando...' : 'Sincronizar localidades'}
-          </button>
-        )}
+      <section className="bbt-card space-y-4 p-4" aria-label="Catálogos geográficos oficiais">
+        <CatalogSyncRow
+          icon={Database}
+          title="Países, estados e cidades"
+          status={catalogStatusMessage(syncStatus, geographyStatusError, 'localidades')}
+          empty={!syncStatus?.datasetVersion}
+          action={canSyncGeography ? (
+            <button type="button" onClick={() => void synchronizeGeography()} disabled={syncing || syncingAirports} className="bbt-button-outline shrink-0">
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
+              {syncing ? 'Sincronizando...' : 'Sincronizar localidades'}
+            </button>
+          ) : undefined}
+        />
+        <div className="border-t border-slate-200 dark:border-slate-700" />
+        <CatalogSyncRow
+          icon={Plane}
+          title="Aeroportos e códigos IATA"
+          status={catalogStatusMessage(airportSyncStatus, airportStatusError, 'aeroportos')}
+          empty={!airportSyncStatus?.datasetVersion}
+          action={canSyncGeography ? (
+            <button type="button" onClick={() => void synchronizeAirports()} disabled={syncingAirports || syncing} className="bbt-button-outline shrink-0">
+              {syncingAirports ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
+              {syncingAirports ? 'Sincronizando...' : 'Sincronizar aeroportos'}
+            </button>
+          ) : undefined}
+        />
       </section>
     </div>
   )
+}
+
+function CatalogSyncRow({
+  icon: Icon,
+  title,
+  status,
+  empty,
+  action,
+}: {
+  icon: typeof Database
+  title: string
+  status: string
+  empty: boolean
+  action?: React.ReactNode
+}) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0">
+        <p className="flex items-center gap-2 text-sm font-semibold text-bbt-primary dark:text-white">
+          <Icon className="h-4 w-4 text-bbt-accent" aria-hidden="true" /> {title}
+        </p>
+        <p className={`mt-1 text-xs ${empty ? 'font-medium text-amber-700 dark:text-amber-300' : 'text-slate-500'}`}>
+          {status}
+        </p>
+      </div>
+      {action}
+    </div>
+  )
+}
+
+function catalogStatusMessage(
+  status: GeographySyncStatus | AirportCatalogSyncStatus | null,
+  error: string,
+  catalog: 'localidades' | 'aeroportos',
+): string {
+  if (error) return error
+  if (status?.datasetVersion) {
+    return `Versão validada em ${new Date(status.datasetVersion.activatedAt).toLocaleString('pt-BR')} · ${status.datasetVersion.recordCount.toLocaleString('pt-BR')} registros.`
+  }
+  if (status?.latestRun?.status === 'failed') {
+    return status.latestRun.errorMessage || `A última sincronização de ${catalog} falhou.`
+  }
+  return catalog === 'localidades'
+    ? 'Estados e cidades ainda não foram carregados neste ambiente. Um administrador deve sincronizar as localidades.'
+    : 'Nenhum aeroporto foi carregado neste ambiente. Um administrador deve sincronizar o catálogo de aeroportos.'
 }
 
 function SelectField({

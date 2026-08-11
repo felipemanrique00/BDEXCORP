@@ -560,6 +560,7 @@ function AddressSection({
           options={subdivisionOptions}
           loading={geoLoading.subdivisions}
           disabled={disabled || !draft.countryId || geoLoading.subdivisions}
+          emptyMessage="Nenhum estado carregado. Sincronize a base de localidades no cadastro de fornecedores."
           onChange={(subdivisionId) => {
             patchDraft({ subdivisionId, cityId: '', cityLabel: '' })
             setCityQuery('')
@@ -572,6 +573,7 @@ function AddressSection({
           options={cityOptions}
           loading={geoLoading.cities}
           disabled={disabled || !draft.subdivisionId}
+          emptyMessage="Nenhuma cidade encontrada. Verifique se a base de localidades foi sincronizada."
           onSearchChange={setCityQuery}
           onChange={(cityId, option) => patchDraft({ cityId, cityLabel: option?.label || '' })}
         />

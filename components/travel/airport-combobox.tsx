@@ -16,6 +16,7 @@ import {
   airportSearchQuery,
   buildAirportSearchUrl,
   formatAirportLegacyValue,
+  isAirportCatalogReady,
   normalizeAirportSearchLimit,
   parseAirportSearchResponse,
   readAirportApiError,
@@ -68,6 +69,7 @@ export function AirportCombobox({
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [catalogEmpty, setCatalogEmpty] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
 
   const normalizedLimit = normalizeAirportSearchLimit(limit)
@@ -80,9 +82,10 @@ export function AirportCombobox({
     if (!canSearch) return `Digite ao menos ${MIN_AIRPORT_QUERY_LENGTH} caracteres para buscar.`
     if (loading) return 'Buscando aeroportos...'
     if (error) return error
+    if (catalogEmpty) return 'O catálogo de aeroportos ainda não foi sincronizado neste ambiente.'
     if (!items.length) return emptyMessage
     return `${items.length} aeroporto(s) encontrado(s).`
-  }, [canSearch, emptyMessage, error, items.length, loading, open])
+  }, [canSearch, catalogEmpty, emptyMessage, error, items.length, loading, open])
 
   useEffect(() => {
     if (value === lastEmittedValueRef.current) return
@@ -104,7 +107,10 @@ export function AirportCombobox({
     if (!open || !canSearch || disabled) {
       setLoading(false)
       setError('')
-      if (!canSearch) setItems([])
+      if (!canSearch) {
+        setItems([])
+        setCatalogEmpty(false)
+      }
       return
     }
 
@@ -124,16 +130,21 @@ export function AirportCombobox({
             const message = readAirportApiError(payload) || 'Não foi possível buscar os aeroportos.'
             throw new Error(message)
           }
-          return parseAirportSearchResponse(payload)
+          return {
+            catalogEmpty: !isAirportCatalogReady(payload),
+            items: parseAirportSearchResponse(payload),
+          }
         })
-        .then((nextItems) => {
+        .then((result) => {
           if (controller.signal.aborted) return
-          setItems(nextItems)
+          setCatalogEmpty(result.catalogEmpty)
+          setItems(result.items)
           setActiveIndex(0)
         })
         .catch((reason) => {
           if (controller.signal.aborted) return
           setItems([])
+          setCatalogEmpty(false)
           setError(reason instanceof Error ? reason.message : 'Não foi possível buscar os aeroportos.')
         })
         .finally(() => {
@@ -167,6 +178,7 @@ export function AirportCombobox({
     setQuery(nextValue)
     setOpen(false)
     setError('')
+    setCatalogEmpty(false)
     emit(nextValue, airport)
   }
 
@@ -175,6 +187,7 @@ export function AirportCombobox({
     setItems([])
     setOpen(false)
     setError('')
+    setCatalogEmpty(false)
     emit('', null)
     window.requestAnimationFrame(() => inputRef.current?.focus())
   }
@@ -309,7 +322,11 @@ export function AirportCombobox({
           })}
 
           {!loading && !error && canSearch && items.length === 0 && (
-            <div className="px-3 py-4 text-center text-xs text-slate-500">{emptyMessage}</div>
+            <div className="px-3 py-4 text-center text-xs text-slate-500">
+              {catalogEmpty
+                ? 'O catálogo de aeroportos ainda não foi sincronizado. Solicite a atualização a um administrador.'
+                : emptyMessage}
+            </div>
           )}
           {!loading && !canSearch && (
             <div className="px-3 py-4 text-center text-xs text-slate-500">

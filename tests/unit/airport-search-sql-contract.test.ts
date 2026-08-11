@@ -20,4 +20,11 @@ describe('airport search SQL parameters', () => {
     }
     expect(service).toContain('when ${normalizedPlaceholder} is not null')
   })
+
+  it('reports whether the operational catalog has any searchable airport', () => {
+    expect(service).toContain('catalogReady: boolean')
+    expect(service).toContain('select exists (')
+    expect(service).toContain('where is_active and iata_code is not null')
+    expect(service).toContain('catalogReady,')
+  })
 })

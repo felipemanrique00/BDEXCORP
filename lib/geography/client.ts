@@ -86,7 +86,7 @@ export async function getGeographySyncStatus(
 export async function searchGeographyAirports(
   input: GeographyAirportSearchOptions = {},
   signal?: AbortSignal,
-): Promise<{ items: GeographyAirport[]; total: number }> {
+): Promise<{ items: GeographyAirport[]; total: number; catalogReady: boolean }> {
   const search = new URLSearchParams()
   if (input.q) search.set('q', input.q)
   if (input.countryCode) search.set('countryCode', input.countryCode)
@@ -105,6 +105,7 @@ export async function searchGeographyAirports(
   return {
     items: payload.items as GeographyAirport[],
     total: Number(payload.total || 0),
+    catalogReady: payload.catalogReady !== false,
   }
 }
 

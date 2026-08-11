@@ -8,6 +8,7 @@ import {
   airportSearchQuery,
   buildAirportSearchUrl,
   formatAirportLegacyValue,
+  isAirportCatalogReady,
   parseAirportSearchResponse,
   type AirportOption,
 } from '@/components/travel/airport-combobox-model'
@@ -62,6 +63,13 @@ describe('airport combobox', () => {
     expect(parseAirportSearchResponse({ items: 'invalid' })).toEqual([])
   })
 
+  it('distinguishes an empty catalog from a search without matches', () => {
+    expect(isAirportCatalogReady({ items: [], catalogReady: false })).toBe(false)
+    expect(isAirportCatalogReady({ items: [], catalogReady: true })).toBe(true)
+    expect(isAirportCatalogReady({ items: [] })).toBe(true)
+    expect(isAirportCatalogReady(null)).toBe(true)
+  })
+
   it('keeps debounce, minimum query and accessible keyboard/listbox semantics explicit', () => {
     expect(AIRPORT_SEARCH_DEBOUNCE_MS).toBe(250)
     expect(MIN_AIRPORT_QUERY_LENGTH).toBe(2)
@@ -73,6 +81,7 @@ describe('airport combobox', () => {
     expect(source).toContain("event.key === 'ArrowDown'")
     expect(source).toContain("event.key === 'Enter'")
     expect(source).toContain("event.key === 'Escape'")
+    expect(source).toContain('O catálogo de aeroportos ainda não foi sincronizado')
     expect(source.match(/setItems\(\[\]\)/g)?.length).toBeGreaterThanOrEqual(2)
   })
 
