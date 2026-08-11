@@ -61,13 +61,16 @@ describe('offline travel UI wiring', () => {
   it('injects the staging offline flag during the image build and at runtime', () => {
     const buildArgument = 'ARG NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED=false'
     const buildEnvironment = 'ENV NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED=${NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED}'
+    const requiredServerFlag = 'OFFLINE_TRAVEL_ENABLED: ${OFFLINE_TRAVEL_ENABLED:?Defina OFFLINE_TRAVEL_ENABLED}'
     const requiredStagingFlag = 'NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED: ${NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED:?Defina NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED}'
 
     expect(dockerfile).toContain(buildArgument)
     expect(dockerfile).toContain(buildEnvironment)
     expect(dockerfile.indexOf(buildArgument)).toBeLessThan(dockerfile.indexOf('RUN npm run build'))
     expect(dockerfile.indexOf(buildEnvironment)).toBeLessThan(dockerfile.indexOf('RUN npm run build'))
+    expect(stagingCompose).toContain(requiredServerFlag)
     expect(stagingCompose.match(new RegExp(requiredStagingFlag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(2)
+    expect(stagingEnvironmentExample).toContain('OFFLINE_TRAVEL_ENABLED=true')
     expect(stagingEnvironmentExample).toContain('NEXT_PUBLIC_OFFLINE_TRAVEL_ENABLED=true')
   })
 
