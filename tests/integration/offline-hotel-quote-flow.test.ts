@@ -17,7 +17,11 @@ import {
 } from '@/lib/server/offline-travel-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import { getVoucher } from '@/lib/server/voucher-service'
-import { PERMISSOES_PADRAO_POR_PERFIL, type Permissoes } from '@/types'
+import {
+  CORPORATE_PROFILE_PERMISSIONS,
+  PERMISSOES_PADRAO_POR_PERFIL,
+  type Permissoes,
+} from '@/types'
 import { testDatabaseUrl } from '../support/test-database'
 
 const databaseUrl = testDatabaseUrl()
@@ -48,6 +52,13 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
   const workflowCode = `offline-selection-${randomUUID()}`
   const agentPrincipal = principalFor('agent', tenantId, agentUserId, companyId)
   const requesterPrincipal = principalFor('requester', tenantId, requesterUserId, companyId)
+  const approverPrincipal = principalFor(
+    'approver',
+    tenantId,
+    approverUserId,
+    companyId,
+    approverMembershipId,
+  )
   const checkIn = futureDateOnly(180)
   const checkOut = futureDateOnly(183)
   const expiresAt = futureIsoDateTime(7)
@@ -515,7 +526,6 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
       )
       return result.rows[0]
     })
-    const approverPrincipal = principalFor('agent', tenantId, approverUserId, companyId)
     const decided = await decideApprovalAssignment(approverPrincipal, pendingAssignment.assignment_id, {
       decision: 'approved',
       reason: 'Opcao e valores conferidos para o teste integrado.',
@@ -1191,28 +1201,36 @@ async function seedSelectionApprovalPolicy(
 }
 
 function principalFor(
-  roleKey: 'agent' | 'requester',
+  kind: 'agent' | 'requester' | 'approver',
   tenantId: string,
   userId: string,
   companyId: string,
+  membershipId = randomUUID(),
 ): RequestPrincipal {
-  const permissions: Permissoes = {
-    ...PERMISSOES_PADRAO_POR_PERFIL.agente,
-    criar_demandas: true,
-    ver_demandas: true,
-    ver_reservas: true,
-    ver_aprovacoes: true,
-    operar_cotacoes: roleKey === 'agent',
-    operar_reservas: roleKey === 'agent',
-    operar_emissoes: roleKey === 'agent',
-  }
-  const profile = roleKey === 'requester' ? 'requester' as const : 'company_admin' as const
+  const permissions: Permissoes = kind === 'approver'
+    ? { ...CORPORATE_PROFILE_PERMISSIONS.approver }
+    : {
+        ...PERMISSOES_PADRAO_POR_PERFIL.agente,
+        criar_demandas: true,
+        ver_demandas: true,
+        ver_reservas: true,
+        ver_aprovacoes: true,
+        operar_cotacoes: kind === 'agent',
+        operar_reservas: kind === 'agent',
+        operar_emissoes: kind === 'agent',
+      }
+  const profile = kind === 'approver'
+    ? 'approver' as const
+    : kind === 'requester'
+      ? 'requester' as const
+      : 'company_admin' as const
+  const roleKey = kind === 'approver' ? 'company_admin' : kind
   return {
     sessionId: randomUUID(),
     tenantId,
     tenantSlug: `offline-hotel-quote-${tenantId}`,
     tenantStatus: 'active',
-    membershipId: randomUUID(),
+    membershipId,
     roleKey,
     platformAdmin: false,
     planKey: 'business',
@@ -1245,10 +1263,16 @@ function principalFor(
     },
     user: {
       id: userId,
-      email: `offline-${roleKey}-${userId}@test.invalid`,
-      name: roleKey === 'requester' ? 'Solicitante da demanda' : 'Agente de cotacao',
+      email: `offline-${kind}-${userId}@test.invalid`,
+      name: kind === 'requester'
+        ? 'Solicitante da demanda'
+        : kind === 'approver'
+          ? 'Aprovador de custo'
+          : 'Agente de cotacao',
       role: 'company_admin',
       tenant_id: tenantId,
+      membership_id: membershipId,
+      role_key: roleKey,
       company_id: companyId,
       empresa_ids: [companyId],
       corporate_profile: profile,
