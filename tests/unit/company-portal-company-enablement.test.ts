@@ -17,6 +17,8 @@ const migration = read('deploy/postgres/migrations/0086_company_portal_company_e
 const typesSource = read('types/index.ts')
 const companiesPageSource = read('app/dashboard/empresas/page.tsx')
 const portalContextSource = read('lib/company-portal-lab/portal-context.ts')
+const portalContextHookSource = read('components/company-portal-lab/use-company-portal-context.ts')
+const portalLabSource = read('components/company-portal-lab/company-portal-lab.tsx')
 const directorySyncSource = read('lib/server/corporate-directory-sync.ts')
 const corporateAccessSource = read('lib/server/corporate-access-service.ts')
 const portalScopeSource = read('lib/server/company-portal-scope-service.ts')
@@ -77,6 +79,11 @@ describe('company Portal Empresa enablement contract', () => {
     )
     expect(portalScopeSource).toContain('company.companyPortalEnabled !== false')
     expect(portalContextSource).toContain('company.companyPortalEnabled !== false')
+    expect(portalContextHookSource).toContain(
+      'hasCompanyScopeAccess(state.user, state.access, portalCompanyIds, companyId, permission)',
+    )
+    expect(portalLabSource).toContain('() => (access?.companies || [])')
+    expect(portalLabSource).toContain("portalIncludesCompany(company.id, 'criar_demandas')")
   })
 
   it('keeps a disabled company in corporate access for Portal Viajante and preserves agency tenant-wide access', () => {

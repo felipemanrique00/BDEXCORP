@@ -41,7 +41,6 @@ import {
 } from '@/components/company-portal-lab/company-portal-chrome'
 import { TravelOrderBuilder } from '@/components/company-portal-lab/travel-order-builder'
 import { useCompanyPortalContext } from '@/components/company-portal-lab/use-company-portal-context'
-import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { OfflineAirQuoteChoiceWorkspace } from '@/components/travel/offline-air-quote-choice-workspace'
 import { OfflineAirQuoteWorkspace } from '@/components/travel/offline-air-quote-workspace'
 import { CorporateDemandApprovalPanel } from '@/components/company-portal-lab/corporate-demand-approval-panel'
@@ -123,8 +122,13 @@ const PORTAL_SERVICE_FILTERS: Array<{
 export function CompanyPortalLab() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const { portalContext, user } = useCompanyPortalContext()
-  const { includesCompany } = useCorporateCompanyScope()
+  const {
+    access,
+    portalContext,
+    portalCompanyIds,
+    portalIncludesCompany,
+    user,
+  } = useCompanyPortalContext()
   const [items, setItems] = useState<CorporateDemandListItem[]>([])
   const [travelOrders, setTravelOrders] = useState<CompanyPortalTravelOrderSummary[]>([])
   const [detailItem, setDetailItem] = useState<CorporateDemandDetail | null>(null)
@@ -153,25 +157,21 @@ export function CompanyPortalLab() {
   }
   const createIntentId = requestedCreateIntentId || generatedCreateIntentRef.current
 
-  const portalCompanyIds = useMemo(
-    () => new Set(portalContext?.companyIds || []),
-    [portalContext],
-  )
   const visibleCompanies = useMemo(
-    () => (user?.corporate_access?.companies || [])
+    () => (access?.companies || [])
       .filter((company) => (
         portalCompanyIds.has(company.companyId)
         && (company.permissions.ver_demandas || company.permissions.criar_demandas)
       ))
       .map(companyAccessToEmpresa),
-    [portalCompanyIds, user?.corporate_access?.companies],
+    [access?.companies, portalCompanyIds],
   )
   const createCompanies = useMemo(
     () => visibleCompanies.filter((company) => (
-      includesCompany(company.id, 'criar_demandas')
-      && includesCompany(company.id, 'ver_demandas')
+      portalIncludesCompany(company.id, 'criar_demandas')
+      && portalIncludesCompany(company.id, 'ver_demandas')
     )),
-    [includesCompany, visibleCompanies],
+    [portalIncludesCompany, visibleCompanies],
   )
   const companyById = useMemo(
     () => new Map(visibleCompanies.map((company) => [company.id, company])),
@@ -180,8 +180,8 @@ export function CompanyPortalLab() {
   const persona = resolvePersona(user)
   const capabilitiesForCompany = useCallback((companyId: string) => resolveCapabilities(
     user,
-    (permission) => includesCompany(companyId, permission),
-  ), [includesCompany, user])
+    (permission) => portalIncludesCompany(companyId, permission),
+  ), [portalIncludesCompany, user])
   const canCreate = Boolean(
     user
     && hasPermission(user, 'criar_demandas')
