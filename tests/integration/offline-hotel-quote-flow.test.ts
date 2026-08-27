@@ -114,6 +114,7 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
       )
       await seedApproverMembership(client, {
         tenantId,
+        companyId,
         roleId: approverRoleId,
         membershipId: approverMembershipId,
         userId: approverUserId,
@@ -919,11 +920,11 @@ async function seedIsolatedGeography(
 
 async function seedApproverMembership(
   client: PoolClient,
-  input: { tenantId: string; roleId: string; membershipId: string; userId: string },
+  input: { tenantId: string; companyId: string; roleId: string; membershipId: string; userId: string },
 ): Promise<void> {
   await client.query(
     `insert into roles (id, tenant_id, role_key, name, system_role)
-     values ($1, $2, 'tenant_admin', 'Aprovador da fixture', false)`,
+     values ($1, $2, 'company_admin', 'Aprovador corporativo da fixture', false)`,
     [input.roleId, input.tenantId],
   )
   await client.query(
@@ -937,6 +938,12 @@ async function seedApproverMembership(
        id, tenant_id, user_id, role_id, status, profile_key
      ) values ($1, $2, $3, $4, 'active', null)`,
     [input.membershipId, input.tenantId, input.userId, input.roleId],
+  )
+  await client.query(
+    `insert into corporate_company_access_grants (
+       tenant_id, membership_id, company_id, corporate_profile
+     ) values ($1, $2, $3, 'approver')`,
+    [input.tenantId, input.membershipId, input.companyId],
   )
 }
 

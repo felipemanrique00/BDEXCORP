@@ -5082,6 +5082,21 @@ async function reconcileApprovedMeritApproval(
       409,
     )
   }
+  const approvalStep = await client.query(
+    `select 1 from approval_steps
+     where tenant_id = $1 and approval_instance_id = $2
+     limit 1`,
+    [principal.tenantId, instance.id],
+  )
+  if (shouldDeferOfflineMeritReconciliation({
+    instanceType: instance.instance_type,
+    subject: instance.subject_snapshot,
+    lifecycleStatus: demand.lifecycle_status,
+    activeApprovalInstanceId: demand.active_approval_instance_id,
+    hasApprovalSteps: Boolean(approvalStep.rowCount),
+  })) {
+    return
+  }
   if (demand.active_approval_instance_id !== instance.id) {
     throw new ApprovalServiceError(
       'APPROVAL_MERIT_DEMAND_SUPERSEDED',
@@ -5154,6 +5169,22 @@ async function reconcileApprovedMeritApproval(
       toLifecycleStatus: 'approved_for_quotation',
     },
   })
+}
+
+export function shouldDeferOfflineMeritReconciliation(input: {
+  instanceType: string
+  subject: unknown
+  lifecycleStatus: string
+  activeApprovalInstanceId: string | null
+  hasApprovalSteps: boolean
+}): boolean {
+  const subject = asRecord(input.subject)
+  return input.instanceType === 'merit'
+    && subject.offlineOperation === true
+    && subject.offlineCheckpoint === 'merit'
+    && input.activeApprovalInstanceId === null
+    && !input.hasApprovalSteps
+    && ['draft', 'submitted'].includes(input.lifecycleStatus)
 }
 
 async function reconcileApprovedQuoteSelection(
