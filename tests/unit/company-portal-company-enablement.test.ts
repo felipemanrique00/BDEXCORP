@@ -19,6 +19,7 @@ const companiesPageSource = read('app/dashboard/empresas/page.tsx')
 const portalContextSource = read('lib/company-portal-lab/portal-context.ts')
 const portalContextHookSource = read('components/company-portal-lab/use-company-portal-context.ts')
 const portalLabSource = read('components/company-portal-lab/company-portal-lab.tsx')
+const travelerPortalSource = read('lib/server/traveler-portal-service.ts')
 const directorySyncSource = read('lib/server/corporate-directory-sync.ts')
 const corporateAccessSource = read('lib/server/corporate-access-service.ts')
 const portalScopeSource = read('lib/server/company-portal-scope-service.ts')
@@ -111,6 +112,8 @@ describe('company Portal Empresa enablement contract', () => {
     expect(corporate.summary.companies.find((item) => item.companyId === 'company-disabled'))
       .toMatchObject({ companyPortalEnabled: false })
     expect(corporate.effectivePermissions.acessar_portal_viajante).toBe(true)
+    expect(travelerPortalSource).toContain('const companyIds = getAccessibleCompanyIds(principal)')
+    expect(travelerPortalSource).not.toMatch(/companyPortalEnabled|company_portal_enabled/)
 
     const agency = calculateCorporateAccess(
       input('agent'),

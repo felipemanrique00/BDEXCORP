@@ -228,7 +228,7 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
       confirmed: true,
       idempotencyKey: `offline-hotel-bypass-${randomUUID()}`,
     })).rejects.toMatchObject({
-      code: 'OFFLINE_HOTEL_APPROVED_SELECTION_REQUIRED',
+      code: 'OFFLINE_APPROVED_SELECTION_REQUIRED',
       status: 409,
     })
 

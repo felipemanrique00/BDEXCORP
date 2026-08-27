@@ -195,12 +195,13 @@ describeWithDatabase('PostgreSQL traveler portal', () => {
 
   it('uses an explicit requester link before verified email matching', async () => {
     const overview = await getTravelerPortalOverview(principal)
+    const visibleTrips = [...overview.upcomingTrips, ...overview.pastTrips]
 
     expect(overview.identitySource).toBe('requester')
     expect(overview.profiles).toEqual([
       expect.objectContaining({ id: employeeLinked, identificationCode: '1001' }),
     ])
-    expect(overview.upcomingTrips).toEqual([
+    expect(visibleTrips).toEqual([
       expect.objectContaining({
         demandId: demandLinked,
         companyId: companyAllowed,

@@ -385,6 +385,59 @@ describe('corporate approval routing contract', () => {
     expect(result.conflictedUserIds).toContain(primaryUserId)
   })
 
+  it('passes an empty UUID array when a demand has no requester or traveler user', async () => {
+    const employeeId = 'employee-without-login'
+    const query = vi.fn(async (statement: string, values?: unknown[]) => {
+      if (statement.includes('from demands demand')) {
+        return { rowCount: 1, rows: [{
+          employee_id: employeeId,
+          requester_id: null,
+          employee_department: null,
+          requester_department: null,
+          demand_cost_center_id: null,
+          employee_cost_center_id: null,
+          requester_cost_center_id: null,
+          requester_user_id: null,
+          demand_created_by: null,
+          demand_updated_by: null,
+        }] }
+      }
+      if (statement.includes('with traveler_employee_candidates')) {
+        return { rowCount: 1, rows: [
+          { employee_id: employeeId, user_id: null, is_primary: true },
+        ] }
+      }
+      if (statement.includes('from approval_audience_groups audience_group')) {
+        expect(values?.[4]).toEqual([])
+        expect(values?.[4]).not.toContain('')
+        return { rowCount: 0, rows: [] }
+      }
+      throw new Error(`Consulta inesperada no teste: ${statement}`)
+    })
+    const principal = {
+      tenantId: uuid('3'),
+      user: { id: uuid('4') },
+    } as unknown as RequestPrincipal
+
+    const result = await loadCanonicalApprovalSubjectContext(
+      { query } as never,
+      principal,
+      {
+        workflowCode: 'matrix.cost.company.test',
+        companyId: 'company-a',
+        demandId: 'demand-without-login',
+        instanceType: 'cost',
+        subject: {},
+        idempotencyKey: 'audience-without-user',
+      },
+      {},
+    )
+
+    expect(result.audienceGroupIds).toEqual([])
+    expect(result.requesterUserId).toBeUndefined()
+    expect(result.travelerUserId).toBeUndefined()
+  })
+
   it('locks and revalidates corporate targets before matrix publication', () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), 'lib/server/approval-service.ts'), 'utf8')
     const migration = fs.readFileSync(path.resolve(

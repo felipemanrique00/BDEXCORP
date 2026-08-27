@@ -4739,7 +4739,7 @@ export async function loadCanonicalApprovalSubjectContext(
   }))
 
   const subjectUserIds = uniqueStrings([
-    requesterUserId || '',
+    ...(requesterUserId ? [requesterUserId] : []),
     ...travelerUserIds,
   ])
   const audienceGroups = await client.query<{ id: string }>(
