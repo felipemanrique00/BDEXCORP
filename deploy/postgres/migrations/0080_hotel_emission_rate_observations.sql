@@ -171,6 +171,11 @@ returns trigger
 language plpgsql
 as $$
 begin
+  if tenant_reset_maintenance_enabled() then
+    if tg_op = 'DELETE' then return old; end if;
+    return new;
+  end if;
+
   raise exception 'Observacoes de tarifa emitida sao imutaveis.';
 end;
 $$;

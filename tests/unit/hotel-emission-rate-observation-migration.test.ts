@@ -3,6 +3,8 @@ import { resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { TENANT_BUSINESS_RESET_TABLES } from '@/lib/system-reset-policy'
+
 const migration = readFileSync(
   resolve(process.cwd(), 'deploy/postgres/migrations/0080_hotel_emission_rate_observations.sql'),
   'utf8',
@@ -32,6 +34,21 @@ describe('hotel emission rate observations', () => {
     expect(migration).toMatch(/reservation_quote_id is distinct from new\.quote_id/i)
     expect(migration).toMatch(/hotel_quote_option_details detail/i)
     expect(migration).toMatch(/hotel_demand_rooms room/i)
+  })
+
+  it('keeps runtime immutability while allowing the guarded tenant reset maintenance path', () => {
+    const functionStart = migration.indexOf(
+      'create or replace function prevent_hotel_emission_rate_observation_mutation()',
+    )
+    const functionEnd = migration.indexOf('drop trigger if exists', functionStart)
+    const immutableTriggerFunction = migration.slice(functionStart, functionEnd)
+
+    expect(TENANT_BUSINESS_RESET_TABLES).toContain('hotel_emission_rate_observations')
+    expect(immutableTriggerFunction).toContain('if tenant_reset_maintenance_enabled() then')
+    expect(immutableTriggerFunction).toContain("if tg_op = 'DELETE' then return old; end if;")
+    expect(immutableTriggerFunction.indexOf('tenant_reset_maintenance_enabled()')).toBeLessThan(
+      immutableTriggerFunction.indexOf('Observacoes de tarifa emitida sao imutaveis.'),
+    )
   })
 
   it('records the observation in the same issuance transaction and marks supplier divergence', () => {
