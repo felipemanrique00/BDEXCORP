@@ -1899,7 +1899,7 @@ function demandPassengerSnapshots(value: unknown): Array<Record<string, unknown>
       name,
       firstName: passenger.firstName || null,
       lastName: passenger.lastName || null,
-      sequence: Number(passenger.sequence) || undefined,
+      sequence: Number(passenger.sequence) || null,
       isExternal: passenger.isExternal === true,
     }]
   })

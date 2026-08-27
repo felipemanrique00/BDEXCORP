@@ -1468,7 +1468,23 @@ async function evaluateOfflinePolicy(
       policyCoverageFingerprint,
     )
   }
-  const effectiveApproval = approval.coverageMismatch
+  const intentHandoff = resolveOfflineApprovalIntentHandoff({
+    intentMismatch: approval.intentMismatch === true,
+    activeApprovalInstanceId: demand.active_approval_instance_id,
+    mismatchedApprovalInstanceId: approval.instanceId,
+  })
+  if (intentHandoff === 'conflict') {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVAL_POLICY_COVERAGE_CHANGED',
+      'Existe outra aprovacao ativa para esta demanda. Atualize a pagina antes de continuar.',
+      409,
+    )
+  }
+  if (intentHandoff === 'detach' && approval.instanceId) {
+    await clearConsumedApproval(client, principal, demand.id, approval.instanceId)
+    demand.active_approval_instance_id = null
+  }
+  const effectiveApproval = approval.coverageMismatch || approval.intentMismatch
     ? { satisfied: false, status: null, instanceId: null }
     : approval
   const missingDocumentEvaluations: typeof evaluations = []
@@ -4751,6 +4767,17 @@ function approvalPolicyCoverageFingerprintFromSubject(subject: Record<string, un
   return explicit || null
 }
 
+export function resolveOfflineApprovalIntentHandoff(input: {
+  intentMismatch: boolean
+  activeApprovalInstanceId: string | null
+  mismatchedApprovalInstanceId: string | null
+}): 'none' | 'detach' | 'conflict' {
+  if (!input.intentMismatch || !input.activeApprovalInstanceId) return 'none'
+  return input.activeApprovalInstanceId === input.mismatchedApprovalInstanceId
+    ? 'detach'
+    : 'conflict'
+}
+
 async function approvalState(
   client: PoolClient,
   tenantId: string,
@@ -4765,6 +4792,7 @@ async function approvalState(
   status: string | null
   instanceId: string | null
   coverageMismatch?: boolean
+  intentMismatch?: boolean
 }> {
   if (!approvalInstanceId) return { satisfied: false, status: null, instanceId: null }
   const result = await client.query<{
@@ -4803,7 +4831,12 @@ async function approvalState(
     subject.offlineOperation === true
     && (!intentHash || subject.offlineIntentHash !== intentHash)
   ) {
-    return { satisfied: false, status: null, instanceId: null }
+    return {
+      satisfied: false,
+      status: instance.status,
+      instanceId: approvalInstanceId,
+      intentMismatch: true,
+    }
   }
   return {
     satisfied: instance.status === 'approved',
