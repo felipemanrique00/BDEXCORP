@@ -25,6 +25,7 @@ export interface CorporateAccessCompanyRow {
   name: string
   group_id: string | null
   group_name: string | null
+  company_portal_enabled?: boolean
 }
 
 export interface CorporateAccessGroupRow {
@@ -210,6 +211,18 @@ export async function requireCompanyAccess(
   return access
 }
 
+export async function requireCompanyAccessWithAnyPermission(
+  principal: RequestPrincipal,
+  companyId: string,
+  permissions: readonly (keyof Permissoes)[],
+): Promise<CorporateCompanyAccessSummary> {
+  const access = await requireCompanyAccess(principal, companyId)
+  if (!permissions.length || !permissions.some((permission) => access.permissions[permission])) {
+    throw new CorporateAccessDeniedError('COMPANY_PERMISSION_DENIED', 'Permissao insuficiente para esta empresa.')
+  }
+  return access
+}
+
 export async function requireGroupAccess(
   principal: RequestPrincipal,
   groupId: string,
@@ -281,6 +294,11 @@ export function calculateCorporateAccess(
   preference: CorporateAccessPreferenceRow | null,
   hasCorporateConfiguration: boolean,
 ): ResolvedCorporateAccess {
+  // Portal Empresa eligibility is deliberately projected into the access
+  // summary, not used to shrink the tenant's global corporate access. Other
+  // corporate surfaces (notably Portal Viajante) share this directory and
+  // must remain governed by their own permissions. The Portal Empresa scope
+  // resolver is the authoritative boundary for this flag.
   const companyById = new Map(companies.map((company) => [company.id, company]))
   const groupById = new Map(groups.map((group) => [group.id, group]))
   const companiesByGroup = new Map<string, CorporateAccessCompanyRow[]>()
@@ -460,6 +478,7 @@ function addCompanyAccess(
   const current = target.get(company.id) || {
     companyId: company.id,
     companyName: company.name,
+    companyPortalEnabled: company.company_portal_enabled !== false,
     groupId: company.group_id,
     groupName: company.group_name,
     sources: new Set(),
@@ -508,6 +527,7 @@ function finalizeCompanyAccess(value: MutableCompanyAccess): CorporateCompanyAcc
   return {
     companyId: value.companyId,
     companyName: value.companyName,
+    companyPortalEnabled: value.companyPortalEnabled,
     groupId: value.groupId,
     groupName: value.groupName,
     sources: [...value.sources],
@@ -586,7 +606,8 @@ async function loadCompanies(client: PoolClient, tenantId: string): Promise<Corp
     `select company_row.id,
             coalesce(company_row.trade_name, company_row.legal_name) as name,
             company_row.group_id,
-            group_row.name as group_name
+            group_row.name as group_name,
+            company_row.company_portal_enabled
      from companies company_row
      left join business_groups group_row
        on group_row.tenant_id = company_row.tenant_id

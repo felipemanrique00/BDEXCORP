@@ -26,6 +26,7 @@ const deleteSchema = mappingSchema.pick({ codigo: true }).strict()
 export async function GET(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    tenantAdmin: true,
     rateLimit: { key: 'wintour-emissor-mappings:list', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
@@ -44,6 +45,8 @@ export async function GET(request: Request) {
 export async function PUT(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    tenantAdmin: true,
+    csrf: true,
     rateLimit: { key: 'wintour-emissor-mappings:upsert', limit: 60, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
@@ -68,6 +71,8 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    tenantAdmin: true,
+    csrf: true,
     rateLimit: { key: 'wintour-emissor-mappings:delete', limit: 60, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

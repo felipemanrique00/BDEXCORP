@@ -85,6 +85,41 @@ describe('approval workflow graph', () => {
     expect(result).toMatchObject({ valid: true, topologicalOrder: ['start', 'manager', 'end'] })
   })
 
+  it('preserva um no second_level legado sem impor o contrato condicional da matriz', () => {
+    const legacy: ApprovalWorkflowSnapshot = {
+      ...workflow,
+      nodes: workflow.nodes.map((node) => (
+        node.id === 'manager' && node.type === 'approval'
+          ? { ...node, approvalKind: 'second_level' as const }
+          : node
+      )),
+    }
+    expect(validateApprovalWorkflow(legacy).valid).toBe(true)
+  })
+
+  it('aplica SOD e roteamento ao nivel dois canonico identificado pelo seletor', () => {
+    const canonicalWithoutGuards: ApprovalWorkflowSnapshot = {
+      ...workflow,
+      nodes: workflow.nodes.map((node) => (
+        node.id === 'manager' && node.type === 'approval' && node.approverResolution
+          ? {
+              ...node,
+              approverResolution: {
+                ...node.approverResolution,
+                selectors: [{ type: 'authority' as const, configuration: { level: 2 } }],
+              },
+            }
+          : node
+      )),
+    }
+    const result = validateApprovalWorkflow(canonicalWithoutGuards)
+    expect(result.valid).toBe(false)
+    expect(result.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      'SECOND_LEVEL_REQUIRES_PRIOR_APPROVER_SEPARATION',
+      'SECOND_LEVEL_REQUIRES_ROUTING_CONDITION',
+    ]))
+  })
+
   it('detecta ciclo, no morto e no inalcancavel antes da publicacao', () => {
     const invalid: ApprovalWorkflowSnapshot = {
       ...workflow,
@@ -261,6 +296,31 @@ describe('approver resolution', () => {
     }, subject, [requester, otherTenant])).toThrowError(expect.objectContaining({ code: 'NO_APPROVER_AVAILABLE' }))
   })
 
+  it('impede que o agente que criou ou escolheu a cotacao seja resolvido como aprovador', () => {
+    const supportAgent = candidate({ userId: 'support-agent', membershipId: 'support-agent-membership' })
+    expect(() => resolveApprovers('cost', {
+      selectors: [{ type: 'role', value: 'manager' }],
+      combination: 'all',
+      minimumApprovers: 1,
+      allowSelfApproval: true,
+    }, {
+      ...subject,
+      assistedActorUserId: 'support-agent',
+      conflictedUserIds: ['demand-creator'],
+    }, [supportAgent])).toThrowError(expect.objectContaining({ code: 'NO_APPROVER_AVAILABLE' }))
+
+    expect(() => resolveApprovers('cost', {
+      selectors: [{ type: 'role', value: 'manager' }],
+      combination: 'all',
+      minimumApprovers: 1,
+      allowSelfApproval: true,
+    }, {
+      ...subject,
+      conflictedUserIds: ['demand-creator'],
+    }, [candidate({ userId: 'demand-creator', membershipId: 'creator-membership' })]))
+      .toThrowError(expect.objectContaining({ code: 'NO_APPROVER_AVAILABLE' }))
+  })
+
   it('nao aceita aprovador fora da empresa ou sem tipo de aprovacao', () => {
     expect(() => resolveApprovers('cost', {
       selectors: [{ type: 'role', value: 'manager' }],
@@ -269,6 +329,78 @@ describe('approver resolution', () => {
       allowSelfApproval: true,
     }, subject, [candidate({ companyIds: ['company-b'], groupIds: [], approvalKinds: ['merit'] })]))
       .toThrowError(expect.objectContaining({ code: 'NO_APPROVER_AVAILABLE' }))
+  })
+
+  it('mantem o recorte mais especifico quando a alcada estoura e exige segundo nivel', () => {
+    const result = resolveApprovers('cost', {
+      selectors: [{ type: 'authority', configuration: { level: 1, onLimitExceeded: 'escalate' } }],
+      combination: 'all',
+      minimumApprovers: 1,
+      maximumApprovers: 1,
+      allowSelfApproval: false,
+    }, { ...subject, costCenterId: '11111111-1111-4111-8111-111111111111', amount: 50_000 }, [
+      candidate({
+        userId: 'cost-center-approver', membershipId: 'cost-center-membership',
+        maxAmount: 1_000, authorityLevel: 1, authoritySpecificity: 400,
+      }),
+      candidate({
+        userId: 'company-approver', membershipId: 'company-membership',
+        maxAmount: 100_000, authorityLevel: 1, authoritySpecificity: 200,
+      }),
+    ])
+
+    expect(result.approvers.map((approver) => approver.userId)).toEqual(['cost-center-approver'])
+    expect(result.requiresEscalation).toBe(true)
+    expect(result.escalationReasons).toEqual(['authority_limit_exceeded'])
+  })
+
+  it('prioriza a autoridade do grupo-alvo sobre o fallback geral da empresa', () => {
+    const audienceGroupId = '22222222-2222-4222-8222-222222222222'
+    const result = resolveApprovers('cost', {
+      selectors: [{ type: 'authority', configuration: { level: 1 } }],
+      combination: 'all',
+      minimumApprovers: 1,
+      maximumApprovers: 1,
+      allowSelfApproval: false,
+    }, { ...subject, audienceGroupIds: [audienceGroupId] }, [
+      candidate({
+        userId: 'audience-approver',
+        membershipId: 'audience-approver-membership',
+        audienceGroupIds: [audienceGroupId],
+        authorityLevel: 1,
+        authoritySpecificity: 500,
+      }),
+      candidate({
+        userId: 'company-approver',
+        membershipId: 'company-approver-membership',
+        authorityLevel: 1,
+        authoritySpecificity: 200,
+      }),
+    ])
+
+    expect(result.approvers.map((approver) => approver.userId)).toEqual(['audience-approver'])
+  })
+
+  it('impede que a mesma pessoa aprove o primeiro e o segundo nivel', () => {
+    const result = resolveApprovers('second_level', {
+      selectors: [{ type: 'authority', configuration: { level: 2 } }],
+      combination: 'all',
+      minimumApprovers: 1,
+      maximumApprovers: 1,
+      allowSelfApproval: false,
+      separationOfDuties: ['prior_approver'],
+    }, { ...subject, priorApproverUserIds: ['level-one-user'] }, [
+      candidate({
+        userId: 'level-one-user', membershipId: 'same-user-level-two',
+        approvalKinds: ['second_level'], authorityLevel: 2, authoritySpecificity: 200,
+      }),
+      candidate({
+        userId: 'distinct-level-two', membershipId: 'distinct-level-two-membership',
+        approvalKinds: ['second_level'], authorityLevel: 2, authoritySpecificity: 200,
+      }),
+    ])
+
+    expect(result.approvers.map((approver) => approver.userId)).toEqual(['distinct-level-two'])
   })
 })
 

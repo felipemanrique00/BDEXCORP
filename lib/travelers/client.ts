@@ -21,3 +21,42 @@ export async function searchTravelers(input: {
   }
   return payload.items as TravelerDirectoryItem[]
 }
+
+export async function createTraveler(input: {
+  companyId: string
+  name: string
+  cpf: string
+  birthDate: string
+  email?: string
+  phone?: string
+}): Promise<TravelerDirectoryItem> {
+  return mutateTraveler('/api/travelers', 'POST', input)
+}
+
+export async function completeTravelerMissingProfile(
+  travelerId: string,
+  input: { name?: string; cpf?: string; birthDate?: string },
+): Promise<TravelerDirectoryItem> {
+  return mutateTraveler(
+    `/api/travelers/${encodeURIComponent(travelerId)}/missing-profile`,
+    'PATCH',
+    input,
+  )
+}
+
+async function mutateTraveler(
+  endpoint: string,
+  method: 'POST' | 'PATCH',
+  body: Record<string, unknown>,
+): Promise<TravelerDirectoryItem> {
+  const response = await fetch(endpoint, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok || payload?.ok !== true || !payload?.item) {
+    throw new Error(String(payload?.error || 'Nao foi possivel salvar o viajante.'))
+  }
+  return payload.item as TravelerDirectoryItem
+}

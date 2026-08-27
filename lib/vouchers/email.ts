@@ -1,5 +1,10 @@
 import type { VoucherEmitido } from '@/types'
 
+export type VoucherEmailSource = Pick<
+  VoucherEmitido,
+  'id' | 'solicitante_email' | 'solicitante_nome' | 'hospedes_detalhes'
+>
+
 export type VoucherEmailRecipientKind = 'requester' | 'traveler'
 
 export const VOUCHER_EMAIL_MAX_LINKED_RECIPIENTS = 50
@@ -12,7 +17,7 @@ export interface VoucherEmailRecipient {
   kind: VoucherEmailRecipientKind
 }
 
-export function voucherEmailRecipients(voucher: VoucherEmitido): VoucherEmailRecipient[] {
+export function voucherEmailRecipients(voucher: VoucherEmailSource): VoucherEmailRecipient[] {
   const recipients: VoucherEmailRecipient[] = []
   const seen = new Set<string>()
 

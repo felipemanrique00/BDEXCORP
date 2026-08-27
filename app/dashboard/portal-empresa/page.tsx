@@ -28,7 +28,12 @@ import {
 import { canEditGlobal, getCurrentUser, getEmpresasPermitidas, hasPermission } from '@/lib/auth'
 import { getAllAtendimentos } from '@/lib/atendimentos-storage'
 import { persistNewDemandWithCompatibility } from '@/lib/demand-persistence-client'
-import { listDemandsFromServer } from '@/lib/demands-client'
+import {
+  listAgencyDemandOptionsFromServer,
+  listDemandsFromServer,
+  type AgencyDemandRequesterOption,
+} from '@/lib/demands-client'
+import { canCreateAgencyAssistedDemand } from '@/lib/demands/agency-assistance'
 import {
   atualizarCarteiraEmpresa,
   criarCartaoCorporativo,
@@ -95,7 +100,7 @@ import type {
 import { filtrarPeriodo, montarMetricasRelatorio, montarRelatorioOperacional } from '@/lib/relatorios'
 import { createEntityId } from '@/lib/ids'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
-import { isRequesterUser } from '@/lib/user-access-kind'
+import { isRequesterUser, userAccessKind } from '@/lib/user-access-kind'
 import {
   MANUAL_DEMAND_BOOKING_MODE,
   shouldSubmitDemandOnCreate,
@@ -156,7 +161,11 @@ export default function PortalEmpresaPage() {
   const { context: corporateContext, selectContext, user } = useCorporateContext()
   const { includesCompany } = useCorporateCompanyScope()
   const isGlobalMaster = canEditGlobal(user)
-  const isInternalUser = user?.role === 'master'
+  const isInternalUser = Boolean(user && userAccessKind(user) === 'internal')
+  const canCreateForClient = Boolean(user && canCreateAgencyAssistedDemand({
+    platformAdmin: user.platform_admin === true,
+    roleKey: user.role_key || (user.role === 'master' ? 'tenant_admin' : null),
+  }))
   const { empresas, funcionarios, politicas, gruposEmpresariais } = useStore()
   const [reload, setReload] = useState(0)
   const [aba, setAba] = useState<Aba>('home')
@@ -817,6 +826,7 @@ export default function PortalEmpresaPage() {
           solicitanteAtual={solicitanteAtual}
           solicitantes={solicitantesEmpresa}
           isInternalUser={isInternalUser}
+          canCreateForClient={canCreateForClient}
           onSaved={refresh}
           podeCriar={podeCriarPedido && !solicitanteBloqueado}
         />
@@ -1391,6 +1401,7 @@ function PedidosTab({
   solicitanteAtual,
   solicitantes,
   isInternalUser,
+  canCreateForClient,
   onSaved,
   podeCriar,
 }: any) {
@@ -1422,6 +1433,12 @@ function PedidosTab({
       || (!isInternalUser ? authenticatedUser?.nome || authenticatedUser?.name || authenticatedUser?.email : '')
       || '',
   ))
+  const [agencyRequesters, setAgencyRequesters] = useState<AgencyDemandRequesterOption[]>([])
+  const [selectedAgencyRequester, setSelectedAgencyRequester] = useState<AgencyDemandRequesterOption | null>(null)
+  const [requesterSearch, setRequesterSearch] = useState('')
+  const [requesterLoading, setRequesterLoading] = useState(false)
+  const [requesterError, setRequesterError] = useState('')
+  const [requesterTotal, setRequesterTotal] = useState(0)
   const [costCenterId, setCostCenterId] = useState<string | null>(empresa?.centro_custo_padrao_id || null)
   const [costCenterCode, setCostCenterCode] = useState(String(empresa?.centro_custo_padrao || ''))
   const [costCenters, setCostCenters] = useState<HotelDemandCostCenterOption[]>([])
@@ -1432,15 +1449,34 @@ function PedidosTab({
   const [enviando, setEnviando] = useState(false)
   const [pedidosVisiveis, setPedidosVisiveis] = useState(50)
 
-  const requesterOptions = useMemo<HotelDemandRequesterOption[]>(() => {
-    const byId = new Map<string, HotelDemandRequesterOption>()
+  const requesterOptions = useMemo<Array<HotelDemandRequesterOption & { hasActivePortalAccess: boolean }>>(() => {
+    if (canCreateForClient) {
+      const options = agencyRequesters.map((requester) => ({
+        id: requester.id,
+        name: requester.name,
+        email: requester.email,
+        hasActivePortalAccess: requester.hasActivePortalAccess,
+      }))
+      if (selectedAgencyRequester && !options.some((requester) => requester.id === selectedAgencyRequester.id)) {
+        options.unshift({
+          id: selectedAgencyRequester.id,
+          name: selectedAgencyRequester.name,
+          email: selectedAgencyRequester.email,
+          hasActivePortalAccess: selectedAgencyRequester.hasActivePortalAccess,
+        })
+      }
+      return options
+    }
+    const byId = new Map<string, HotelDemandRequesterOption & { hasActivePortalAccess: boolean }>()
     for (const requester of Array.isArray(solicitantes) ? solicitantes : []) {
+      if (requester?.status && requester.status !== 'ativo') continue
       const id = String(requester?.id || '')
       if (!id) continue
       byId.set(id, {
         id,
         name: String(requester?.nome || requester?.name || id),
         email: requester?.email ? String(requester.email) : null,
+        hasActivePortalAccess: Boolean(requester?.user_id),
       })
     }
     if (solicitanteAtual?.id) {
@@ -1448,14 +1484,15 @@ function PedidosTab({
         id: String(solicitanteAtual.id),
         name: String(solicitanteAtual.nome || solicitanteAtual.id),
         email: solicitanteAtual.email ? String(solicitanteAtual.email) : null,
+        hasActivePortalAccess: Boolean(solicitanteAtual.user_id),
       })
     }
     return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'))
-  }, [solicitanteAtual, solicitantes])
+  }, [agencyRequesters, canCreateForClient, selectedAgencyRequester, solicitanteAtual, solicitantes])
 
   useEffect(() => {
     if (isInternalUser) return
-    setRequesterId('')
+    setRequesterId(String(solicitanteAtual?.id || ''))
     setRequesterName(String(
       solicitanteAtual?.nome
         || authenticatedUser?.nome
@@ -1466,6 +1503,52 @@ function PedidosTab({
   }, [authenticatedUser, isInternalUser, solicitanteAtual?.id, solicitanteAtual?.nome])
 
   useEffect(() => {
+    if (!canCreateForClient || !empresaId) {
+      setAgencyRequesters([])
+      setRequesterLoading(false)
+      setRequesterError('')
+      setRequesterTotal(0)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setRequesterLoading(true)
+      setRequesterError('')
+      void listAgencyDemandOptionsFromServer(empresaId, {
+        requesterQ: requesterSearch,
+        participant: 'requesters',
+        limit: 50,
+      })
+        .then((result) => {
+          if (cancelled || result.companyId !== empresaId) return
+          setAgencyRequesters(result.requesters)
+          setRequesterTotal(result.requesterTotal)
+        })
+        .catch((error) => {
+          if (cancelled) return
+          setAgencyRequesters([])
+          setRequesterTotal(0)
+          setRequesterError(error instanceof Error
+            ? error.message
+            : 'Nao foi possivel carregar os solicitantes da empresa.')
+        })
+        .finally(() => {
+          if (!cancelled) setRequesterLoading(false)
+        })
+    }, requesterSearch.trim() ? 250 : 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [canCreateForClient, empresaId, requesterSearch])
+
+  useEffect(() => {
+    if (canCreateForClient) {
+      setRequesterId('')
+      setRequesterName('')
+      setSelectedAgencyRequester(null)
+      setRequesterSearch('')
+    }
     setFuncId('')
     setFuncCodigo('')
     setPassageiro('')
@@ -1479,7 +1562,7 @@ function PedidosTab({
       pendingVerificationIds: [],
       lookupErrors: [],
     })
-  }, [empresaId])
+  }, [canCreateForClient, empresaId])
 
   useEffect(() => {
     setCostCenterId(empresa?.centro_custo_padrao_id || null)
@@ -1545,6 +1628,7 @@ function PedidosTab({
 
   async function enviarPedido(e: React.FormEvent) {
     e.preventDefault()
+    if (e.target !== e.currentTarget) return
     if (!podeCriar) return
     const airPassengers = airPassengersFromDetails(detAereo, funcId ? {
       employee_id: funcId,
@@ -1593,6 +1677,13 @@ function PedidosTab({
         ? airPrimaryPassenger?.employee_id || null
         : funcId || null
     if (!effectivePassengerName) return toast.error(tipo === 'Hotel' ? 'Selecione o hospede responsavel.' : 'Informe o passageiro.')
+    if (canCreateForClient && !requesterId) {
+      return toast.error('Selecione o solicitante responsável pelo pedido e pela escolha da cotação.')
+    }
+    const selectedRequester = requesterOptions.find((requester) => requester.id === requesterId)
+    if (canCreateForClient && !selectedRequester?.hasActivePortalAccess) {
+      return toast.error('O solicitante precisa ter acesso ativo ao portal para receber e escolher a cotação.')
+    }
     if (tipo === 'Hotel') {
       const parsedAdministrative = hotelDemandAdministrativeSchema.safeParse({
         company_id: empresaId,
@@ -1606,7 +1697,6 @@ function PedidosTab({
       if (!parsedAdministrative.success) {
         return toast.error(parsedAdministrative.error.issues[0]?.message || 'Revise os dados administrativos do pedido.')
       }
-      if (isInternalUser && !requesterId) return toast.error('Selecione o solicitante.')
       if (costCentersLoading) return toast.error('Aguarde o carregamento dos centros de custo.')
       if (costCenterId && !costCentersUnavailable && !costCenters.some((item) => item.id === costCenterId)) {
         return toast.error('O centro de custo selecionado esta inativo ou indisponivel para a empresa.')
@@ -1624,20 +1714,16 @@ function PedidosTab({
         booking_mode: bookingMode,
         valor_cotacao: 0,
         agente_user_id: user?.id || '',
+        ...(requesterId ? { solicitante_id: requesterId } : {}),
+        ...(requesterName ? { solicitante_nome: requesterName } : {}),
+        agency_assisted: canCreateForClient || undefined,
         ...(tipo === 'Hotel'
           ? {
-              ...(requesterId ? { solicitante_id: requesterId } : {}),
-              solicitante_nome: requesterName,
               cost_center_id: costCenterId,
               centro_custo: costCenterCode.trim() || undefined,
               forma_pagamento: paymentMethod || undefined,
             }
-          : !isInternalUser ? {
-              solicitante_nome: requesterName,
-            } : solicitanteAtual ? {
-              solicitante_id: solicitanteAtual.id,
-              solicitante_nome: solicitanteAtual.nome,
-            } : {}),
+          : {}),
         status: 'pendente',
         prioridade,
         origem: 'Portal',
@@ -1680,6 +1766,12 @@ function PedidosTab({
       setCostCenterId(empresa?.centro_custo_padrao_id || null)
       setCostCenterCode(String(empresa?.centro_custo_padrao || ''))
       setPaymentMethod('IV')
+      if (canCreateForClient) {
+        setRequesterId('')
+        setRequesterName('')
+        setSelectedAgencyRequester(null)
+        setRequesterSearch('')
+      }
       onSaved()
     } catch (e: any) {
       toast.error(e?.message || 'Erro ao enviar pedido.')
@@ -1730,6 +1822,76 @@ function PedidosTab({
               ))}
             </div>
           </Field>
+          {canCreateForClient && (
+            <div
+              data-agency-requester-selector
+              className="space-y-3 rounded-xl border border-cyan-200 bg-cyan-50/70 p-4 dark:border-cyan-900/60 dark:bg-cyan-950/20"
+            >
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-cyan-900 dark:text-cyan-100">
+                  Solicitante responsável pela solicitação e escolha *
+                </div>
+                <p className="mt-1 text-xs text-cyan-800/80 dark:text-cyan-100/75">
+                  Você continua registrado como consultor. O solicitante selecionado receberá a cotação para escolher uma opção no portal.
+                </p>
+              </div>
+              <input
+                value={requesterSearch}
+                onChange={(event) => setRequesterSearch(event.target.value)}
+                className="bbt-input"
+                placeholder="Buscar por nome, e-mail, departamento ou centro de custo..."
+                aria-label="Buscar solicitante responsavel pelo pedido"
+                disabled={!empresaId || enviando}
+              />
+              <select
+                value={requesterId}
+                onChange={(event) => {
+                  const requester = requesterOptions.find((item) => item.id === event.target.value)
+                  const agencyRequester = agencyRequesters.find((item) => item.id === requester?.id)
+                    || (selectedAgencyRequester?.id === requester?.id ? selectedAgencyRequester : null)
+                  setRequesterId(requester?.id || '')
+                  setRequesterName(requester?.name || '')
+                  setSelectedAgencyRequester(agencyRequester)
+                }}
+                className="bbt-input"
+                required
+                disabled={!empresaId || requesterLoading || enviando}
+                aria-label="Solicitante responsável pelo pedido"
+              >
+                <option value="">
+                  {!empresaId
+                    ? 'Selecione primeiro a empresa'
+                    : requesterLoading
+                      ? 'Carregando solicitantes...'
+                      : 'Selecione quem pediu a viagem'}
+                </option>
+                {requesterOptions.map((requester) => (
+                  <option
+                    key={requester.id}
+                    value={requester.id}
+                    disabled={!requester.hasActivePortalAccess}
+                  >
+                    {requester.name}
+                    {requester.email ? ` - ${requester.email}` : ''}
+                    {!requester.hasActivePortalAccess ? ' - sem acesso ativo ao portal' : ''}
+                  </option>
+                ))}
+              </select>
+              {requesterError && (
+                <p role="alert" className="text-xs text-red-700 dark:text-red-300">{requesterError}</p>
+              )}
+              {!requesterLoading && !requesterError && requesterOptions.length === 0 && empresaId && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  Nenhum solicitante ativo foi encontrado. Cadastre o solicitante e habilite seu acesso ao portal antes de criar o pedido.
+                </p>
+              )}
+              {requesterTotal > requesterOptions.length && (
+                <p className="text-[11px] text-slate-500">
+                  Exibindo {requesterOptions.length} de {requesterTotal}. Digite acima para localizar outro solicitante.
+                </p>
+              )}
+            </div>
+          )}
           {tipo !== 'Hotel' && tipo !== 'Aéreo' && (
             <>
               <Field label="Funcionário (opcional)">
@@ -1789,6 +1951,7 @@ function PedidosTab({
                 costCentersUnavailable={costCentersUnavailable}
                 companyLocked
                 requesterLocked={!isInternalUser}
+                showRequesterField={!canCreateForClient}
                 disabled={enviando}
               />
             </div>

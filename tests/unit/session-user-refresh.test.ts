@@ -9,6 +9,20 @@ import { PERMISSOES_PADRAO_POR_PERFIL } from '@/types'
 import type { CorporateAccessSummary, User } from '@/types'
 
 describe('session user refresh', () => {
+  it('reloads when representation starts or changes', () => {
+    const current = internalUser('supervisor')
+    const represented = { id: 'imp-1', mode: 'operate', expiresAt: '2026-08-12T12:15:00.000Z' }
+    expect(decideSessionUserRefresh(current, {
+      reachable: true,
+      user: current,
+      representation: represented,
+    })).toBe('reload')
+    expect(decideSessionUserRefresh(current, {
+      reachable: true,
+      user: current,
+      representation: represented,
+    }, represented)).toBe('update')
+  })
   it('compartilha a consulta em andamento e libera uma nova apos concluir', async () => {
     let calls = 0
     let finishFirstRequest: (() => void) | undefined

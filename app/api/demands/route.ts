@@ -10,6 +10,8 @@ import { governanceBodyErrorResponse, governanceErrorResponse } from '@/lib/serv
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+const INTERNAL_DEMAND_ROLES = ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator']
+
 const querySchema = z.object({
   companyId: z.string().trim().min(1).max(200).optional(),
   status: z.string().trim().min(1).max(80).optional(),
@@ -28,6 +30,7 @@ export async function GET(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'ver_demandas',
+    roleKeys: INTERNAL_DEMAND_ROLES,
     rateLimit: { key: 'demands:list', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
@@ -52,6 +55,8 @@ export async function POST(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'criar_demandas',
+    roleKeys: INTERNAL_DEMAND_ROLES,
+    representationAction: 'demand.create',
     rateLimit: { key: 'demands:create', limit: 60, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

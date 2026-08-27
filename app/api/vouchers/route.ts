@@ -14,6 +14,7 @@ export const dynamic = 'force-dynamic'
 
 const querySchema = z.object({
   companyId: z.string().trim().min(1).max(160).optional(),
+  demandId: z.string().trim().min(1).max(160).optional(),
   search: z.string().trim().min(1).max(200).optional(),
   limit: z.coerce.number().int().min(1).max(500).default(100),
   offset: z.coerce.number().int().min(0).default(0),
@@ -23,6 +24,7 @@ export async function GET(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'ver_vouchers',
+    roleKeys: ['tenant_admin', 'financial_manager', 'agent', 'supervisor', 'operator'],
     rateLimit: { key: 'vouchers:list', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

@@ -63,6 +63,7 @@ export const useStore = create<DataState>()(
       addEmpresa: (e) => {
         const novo: Empresa = {
           ...e,
+          portal_empresa_habilitado: e.portal_empresa_habilitado === true,
           id: createEntityId('emp'),
           created_at: new Date().toISOString(),
           config_cobranca: e.config_cobranca || { ...CONFIG_COBRANCA_PADRAO },
@@ -226,7 +227,10 @@ export const useStore = create<DataState>()(
         return novos.length
       },
       adicionarCadastrosEmLote: (cadastros) => {
-        const novasEmpresas = cadastros.empresas || []
+        const novasEmpresas = (cadastros.empresas || []).map((empresa) => ({
+          ...empresa,
+          portal_empresa_habilitado: empresa.portal_empresa_habilitado === true,
+        }))
         const novosFuncionarios = cadastros.funcionarios || []
         const novosHoteis = cadastros.hoteis || []
         const atual = get()

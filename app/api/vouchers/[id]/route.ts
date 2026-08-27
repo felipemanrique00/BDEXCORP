@@ -25,6 +25,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'ver_vouchers',
+    roleKeys: ['tenant_admin', 'financial_manager', 'agent', 'supervisor', 'operator'],
     rateLimit: { key: 'vouchers:detail', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

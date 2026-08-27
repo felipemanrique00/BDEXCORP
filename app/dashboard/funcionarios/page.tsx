@@ -1,9 +1,9 @@
 'use client'
 import { todayISODate } from '@/lib/date'
-import { Suspense, useEffect, useState, useMemo } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useStore } from '@/lib/store'
-import { getCurrentUser, getEmpresasPermitidas, hasPermission } from '@/lib/auth'
+import { getCurrentUser, getEmpresasPermitidas } from '@/lib/auth'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { WhatsAppButton } from '@/components/ui/whatsapp-button'
@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import Link from 'next/link'
-import type { Funcionario, Cargo } from '@/types'
+import type { Cargo, Empresa, Funcionario } from '@/types'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
 import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 import { DateInput } from '@/components/ui/date-input'
@@ -67,7 +67,7 @@ function norm(s: string): string {
 }
 
 function FuncionariosInner() {
-  const user = typeof window !== 'undefined' ? getCurrentUser() : null
+  const [user, setUser] = useState<ReturnType<typeof getCurrentUser>>(null)
   const searchParams = useSearchParams()
   const empresaFiltroURL = searchParams.get('empresa')
 
@@ -88,18 +88,31 @@ function FuncionariosInner() {
   const [editing, setEditing] = useState<Funcionario | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<Funcionario | null>(null)
   const [pagina, setPagina] = useState(1)
-  const empresasPermitidas = getEmpresasPermitidas(user, empresas, gruposEmpresariais)
+  const empresasDoEscopo = getEmpresasPermitidas(user, empresas, gruposEmpresariais)
+  const empresasPermitidas = empresasDoEscopo
     .filter((empresa) => includesCompany(empresa.id, 'ver_funcionarios'))
+  const empresasPermitidasParaCadastro = empresasDoEscopo
+    .filter((empresa) => (
+      includesCompany(empresa.id, 'cadastrar_funcionarios')
+      || includesCompany(empresa.id, 'gerenciar_funcionarios')
+    ))
+  const empresasPermitidasParaGerenciamento = empresasDoEscopo
+    .filter((empresa) => includesCompany(empresa.id, 'gerenciar_funcionarios'))
   const empresasPermitidasKey = empresasPermitidas.map((empresa) => empresa.id).sort().join('|')
 
   useEffect(() => {
+    setUser(getCurrentUser())
+  }, [])
+
+  useEffect(() => {
+    if (!user) return
     if (
       empresaFilter !== 'Todas'
       && !empresasPermitidas.some((empresa) => empresa.id === empresaFilter)
     ) {
       setEmpresaFilter('Todas')
     }
-  }, [empresaFilter, empresasPermitidas, empresasPermitidasKey])
+  }, [empresaFilter, empresasPermitidas, empresasPermitidasKey, user])
 
   const visible = useMemo(() => {
     const empresasPermitidasIds = new Set(empresasPermitidasKey.split('|').filter(Boolean))
@@ -194,15 +207,16 @@ function FuncionariosInner() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button onClick={exportCSV} className="bbt-button-outline text-sm">
-            <Download className="w-4 h-4" /> Exportar CSV
+          <button type="button" onClick={exportCSV} className="bbt-button-outline text-sm">
+            <Download className="w-4 h-4" aria-hidden="true" /> Exportar CSV
           </button>
-          {hasPermission(user, 'cadastrar_funcionarios') && (
+          {empresasPermitidasParaCadastro.length > 0 && (
             <button
+              type="button"
               onClick={() => { setEditing(null); setModalOpen(true) }}
               className="bbt-button-accent text-sm"
             >
-              <Plus className="w-4 h-4" /> Novo Funcionário
+              <Plus className="w-4 h-4" aria-hidden="true" /> Novo Funcionário
             </button>
           )}
         </div>
@@ -227,7 +241,7 @@ function FuncionariosInner() {
           </select>
         )}
         {search && (
-          <button onClick={() => setSearch('')} className="text-xs text-bbt-accent hover:underline">
+          <button type="button" onClick={() => setSearch('')} className="text-xs text-bbt-accent hover:underline">
             Limpar busca
           </button>
         )}
@@ -237,16 +251,17 @@ function FuncionariosInner() {
       <div className="bbt-card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
+            <caption className="sr-only">Funcionários disponíveis no escopo selecionado</caption>
             <thead className="bg-bbt-gray-50 dark:bg-slate-900/50 border-b border-bbt-gray-100 dark:border-slate-700">
               <tr>
-                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">ID</th>
-                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Funcionário</th>
-                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">CPF</th>
-                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Cargo</th>
-                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Empresa</th>
-                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Centro de Custo</th>
-                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Telefone</th>
-                <th className="px-4 py-3 text-right font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Ações</th>
+                <th scope="col" className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">ID</th>
+                <th scope="col" className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Funcionário</th>
+                <th scope="col" className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">CPF</th>
+                <th scope="col" className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Cargo</th>
+                <th scope="col" className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Empresa</th>
+                <th scope="col" className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Centro de Custo</th>
+                <th scope="col" className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Telefone</th>
+                <th scope="col" className="px-4 py-3 text-right font-semibold text-slate-600 dark:text-slate-300 text-xs uppercase tracking-wider">Ações</th>
               </tr>
             </thead>
             <tbody>
@@ -290,16 +305,16 @@ function FuncionariosInner() {
                     <td className="px-4 py-3"><WhatsAppButton phone={f.telefone} /></td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <Link href={`/dashboard/funcionarios/${f.id}`} className="p-2 rounded-lg hover:bg-bbt-accent/10 text-slate-500 hover:text-bbt-accent transition" title="Ver detalhes">
-                          <Eye className="w-4 h-4" />
+                        <Link href={`/dashboard/funcionarios/${f.id}`} aria-label={`Ver detalhes de ${f.nome}`} className="p-2 rounded-lg hover:bg-bbt-accent/10 text-slate-500 hover:text-bbt-accent transition" title="Ver detalhes">
+                          <Eye className="w-4 h-4" aria-hidden="true" />
                         </Link>
                         {includesCompany(f.company_id, 'gerenciar_funcionarios') && (
                           <>
-                            <button onClick={() => { setEditing(f); setModalOpen(true) }} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
-                              <Edit2 className="w-4 h-4" />
+                            <button type="button" onClick={() => { setEditing(f); setModalOpen(true) }} aria-label={`Editar ${f.nome}`} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
+                              <Edit2 className="w-4 h-4" aria-hidden="true" />
                             </button>
-                            <button onClick={() => setConfirmDelete(f)} className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-500 hover:text-red-600 transition" title="Excluir">
-                              <Trash2 className="w-4 h-4" />
+                            <button type="button" onClick={() => setConfirmDelete(f)} aria-label={`Excluir ${f.nome}`} className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-500 hover:text-red-600 transition" title="Excluir">
+                              <Trash2 className="w-4 h-4" aria-hidden="true" />
                             </button>
                           </>
                         )}
@@ -345,7 +360,7 @@ function FuncionariosInner() {
           open={modalOpen}
           onClose={() => { setModalOpen(false); setEditing(null) }}
           editing={editing}
-          empresas={empresasPermitidas}
+          empresas={editing ? empresasPermitidasParaGerenciamento : empresasPermitidasParaCadastro}
           onSave={async (data) => {
             if (editing) {
               updateFuncionario(editing.id, { ...data, cpf: onlyDigits(data.cpf || ''), telefone: onlyDigits(data.telefone || '') })
@@ -406,7 +421,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   open: boolean
   onClose: () => void
   editing: Funcionario | null
-  empresas: any[]
+  empresas: Empresa[]
   onSave: (data: Partial<Funcionario>) => Promise<void>
 }) {
   const [form, setForm] = useState<Partial<Funcionario>>(editing || {
@@ -428,6 +443,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   const [costCentersLoaded, setCostCentersLoaded] = useState(false)
   const [airProfileErrors, setAirProfileErrors] = useState<EmployeeAirProfileFormErrors>({})
   const [saving, setSaving] = useState(false)
+  const formRef = useRef<HTMLFormElement | null>(null)
 
   useEffect(() => {
     if (!open || !form.company_id) {
@@ -485,7 +501,11 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (saving) return
-    if (!form.company_id) { toast.error('Selecione a empresa do funcionário.'); return }
+    if (!form.company_id) {
+      toast.error('Selecione a empresa do funcionário.')
+      window.requestAnimationFrame(() => document.getElementById('employee-company')?.focus())
+      return
+    }
     const airProfile = validateEmployeeAirProfileForm({
       nome: form.nome,
       cpf: form.cpf,
@@ -499,6 +519,17 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
         || airProfile.errors.data_nascimento
         || 'Revise os dados obrigatórios do passageiro.',
       )
+      window.requestAnimationFrame(() => {
+        formRef.current
+          ?.querySelector<HTMLElement>('[aria-invalid="true"]')
+          ?.focus()
+      })
+      return
+    }
+    const email = String(form.email || '').trim()
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      toast.error('Informe um e-mail válido.')
+      window.requestAnimationFrame(() => document.getElementById('employee-email')?.focus())
       return
     }
     if (costCentersLoading) {
@@ -516,6 +547,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
         nome: airProfile.normalized.nome,
         cpf: airProfile.normalized.cpf,
         data_nascimento: airProfile.normalized.data_nascimento,
+        email,
       })
     } catch (error) {
       toast.error(
@@ -532,7 +564,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
     const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
     const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name)
     if (!isPdf && !isImage) { toast.error('Use PDF ou foto do documento.'); return }
-    if (file.size > 35 * 1024 * 1024) { toast.error('Arquivo muito grande. Use ate 35 MB.'); return }
+    if (file.size > 35 * 1024 * 1024) { toast.error('Arquivo muito grande. Use até 35 MB.'); return }
 
     setDocLoading(true)
     setDocError('')
@@ -556,9 +588,10 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
       aplicarDocumentoNoFormulario(parsed)
       if (parsed.precisa_revisao || parsed.avisos?.length) toast.warning('Documento lido. Revise os campos antes de salvar.')
       else toast.success('Documento lido e campos preenchidos.')
-    } catch (e: any) {
-      setDocError(e.message || 'Nao consegui ler o documento.')
-      toast.error(e.message || 'Nao consegui ler o documento.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Não foi possível ler o documento.'
+      setDocError(message)
+      toast.error(message)
     } finally {
       setDocLoading(false)
     }
@@ -592,7 +625,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
 
   return (
     <Modal open={open} onClose={() => { if (!saving) onClose() }} title={editing ? 'Editar Funcionário' : 'Novo Funcionário'} size="lg">
-      <form onSubmit={submit} className="space-y-4">
+      <form ref={formRef} onSubmit={submit} className="space-y-4" noValidate aria-busy={saving}>
         <div
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
@@ -604,16 +637,16 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
         >
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-bbt-accent text-white">
-              {docLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <UploadCloud className="h-5 w-5" />}
+              {docLoading ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : <UploadCloud className="h-5 w-5" aria-hidden="true" />}
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-bbt-primary dark:text-white">Ler documento com IA</p>
               <p className="text-xs text-slate-500">
-                Arraste RG, CNH, CPF ou passaporte em PDF/foto. O sistema preenche, valida CPF e exige conferencia antes de salvar.
+                Arraste RG, CNH, CPF ou passaporte em PDF/foto. O sistema preenche, valida CPF e exige conferência antes de salvar.
               </p>
             </div>
             <label className="bbt-button-outline h-9 cursor-pointer text-xs">
-              <FileText className="h-4 w-4" /> Selecionar documento
+              <FileText className="h-4 w-4" aria-hidden="true" /> Selecionar documento
               <input
                 type="file"
                 accept=".pdf,image/*"
@@ -629,8 +662,8 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
           </div>
 
           {docError && (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div role="alert" className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
               <span>{docError}</span>
             </div>
           )}
@@ -639,7 +672,7 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
             <div className="mt-3 rounded-lg border border-bbt-gray-100 bg-white p-3 text-xs dark:border-slate-700 dark:bg-slate-900">
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 font-semibold text-bbt-primary dark:text-white">
-                  <ShieldCheck className="h-4 w-4 text-green-600" /> Documento analisado
+                  <ShieldCheck className="h-4 w-4 text-green-600" aria-hidden="true" /> Documento analisado
                 </span>
                 {docResult.documento_tipo && <span className="bbt-badge bg-blue-100 text-blue-700 text-[10px]">{docResult.documento_tipo}</span>}
                 {docResult.provedor && <span className="bbt-badge bg-purple-100 text-purple-700 text-[10px]">{docResult.provedor}</span>}
@@ -661,8 +694,9 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="ID do funcionario">
+          <Field label="ID do funcionário" htmlFor="employee-identification-code">
             <input
+              id="employee-identification-code"
               value={editing?.codigo_identificacao || 'Gerado automaticamente'}
               className="bbt-input bg-slate-50 text-slate-500 dark:bg-slate-900/50"
               disabled
@@ -671,11 +705,8 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
           <Field label="Nome completo *" htmlFor="employee-full-name">
             <input
               id="employee-full-name"
-              required
               value={form.nome || ''}
-              onInvalid={(e) => e.currentTarget.setCustomValidity('Informe o nome completo do passageiro.')}
               onChange={(e) => {
-                e.currentTarget.setCustomValidity('')
                 setForm({ ...form, nome: e.target.value })
                 setAirProfileErrors((current) => ({ ...current, nome: undefined }))
               }}
@@ -692,8 +723,9 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
             )}
           </Field>
           <div className="md:col-span-2">
-            <Field label="Nomes vindos de relatorios/importacoes">
+            <Field label="Nomes vindos de relatórios/importações" htmlFor="employee-name-aliases">
               <textarea
+                id="employee-name-aliases"
                 value={(form.aliases_nome || []).join('\n')}
                 onChange={(e) => setForm({ ...form, aliases_nome: e.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) })}
                 rows={3}
@@ -702,19 +734,16 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
               />
             </Field>
             <p className="mt-1 text-[11px] text-slate-500">
-              Use este campo para vincular nomes diferentes que aparecem em Wintour, companhias aereas ou hoteis ao mesmo ID deste funcionario.
+              Use este campo para vincular nomes diferentes que aparecem em Wintour, companhias aéreas ou hotéis ao mesmo ID deste funcionário.
             </p>
           </div>
           <Field label="CPF *" htmlFor="employee-cpf">
             <input
               id="employee-cpf"
-              required
               inputMode="numeric"
-              value={form.cpf || ''}
-              onInvalid={(e) => e.currentTarget.setCustomValidity('Informe um CPF válido para o passageiro.')}
+              value={form.cpf ? maskCPF(onlyDigits(form.cpf).slice(0, 11)) : ''}
               onChange={(e) => {
-                e.currentTarget.setCustomValidity('')
-                setForm({ ...form, cpf: e.target.value })
+                setForm({ ...form, cpf: onlyDigits(e.target.value).slice(0, 11) })
                 setAirProfileErrors((current) => ({ ...current, cpf: undefined }))
               }}
               aria-invalid={Boolean(airProfileErrors.cpf)}
@@ -728,17 +757,14 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
               </p>
             )}
           </Field>
-          <Field label="E-mail"><input type="email" value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Telefone"><input value={form.telefone || ''} onChange={(e) => setForm({ ...form, telefone: e.target.value })} className="bbt-input" /></Field>
+          <Field label="E-mail" htmlFor="employee-email"><input id="employee-email" type="email" value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} className="bbt-input" autoComplete="email" /></Field>
+          <Field label="Telefone" htmlFor="employee-phone"><input id="employee-phone" value={form.telefone ? maskPhone(onlyDigits(form.telefone).slice(0, 11)) : ''} onChange={(e) => setForm({ ...form, telefone: onlyDigits(e.target.value).slice(0, 11) })} className="bbt-input tabular-nums" inputMode="tel" autoComplete="tel" /></Field>
           <Field label="Data de Nascimento *" htmlFor="employee-birth-date">
             <DateInput
               id="employee-birth-date"
-              required
               max={todayISODate()}
               value={form.data_nascimento || ''}
-              onInvalid={(e) => e.currentTarget.setCustomValidity('Informe uma data de nascimento real e que não esteja no futuro.')}
               onChange={(e) => {
-                e.currentTarget.setCustomValidity('')
                 setForm({ ...form, data_nascimento: e.target.value })
                 setAirProfileErrors((current) => ({ ...current, data_nascimento: undefined }))
               }}
@@ -752,9 +778,9 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
               </p>
             )}
           </Field>
-          <Field label="Tipo Documento">
-            <select value={form.documento_tipo || ''} onChange={(e) => setForm({ ...form, documento_tipo: e.target.value as any })} className="bbt-input">
-              <option value="">Nao informado</option>
+          <Field label="Tipo de documento" htmlFor="employee-document-type">
+            <select id="employee-document-type" value={form.documento_tipo || ''} onChange={(e) => setForm({ ...form, documento_tipo: e.target.value ? e.target.value as Funcionario['documento_tipo'] : undefined })} className="bbt-input">
+              <option value="">Não informado</option>
               <option value="RG">RG</option>
               <option value="CNH">CNH</option>
               <option value="CPF">CPF</option>
@@ -763,23 +789,23 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
             </select>
           </Field>
           <Field label="RG"><input value={form.rg || ''} onChange={(e) => setForm({ ...form, rg: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Documento Numero"><input value={form.documento_numero || ''} onChange={(e) => setForm({ ...form, documento_numero: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Orgao/UF Emissor">
+          <Field label="Número do documento"><input value={form.documento_numero || ''} onChange={(e) => setForm({ ...form, documento_numero: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Órgão/UF emissor">
             <div className="grid grid-cols-[1fr_80px] gap-2">
               <input value={form.orgao_emissor || ''} onChange={(e) => setForm({ ...form, orgao_emissor: e.target.value })} className="bbt-input" />
-              <input value={form.uf_emissor || ''} onChange={(e) => setForm({ ...form, uf_emissor: e.target.value.toUpperCase().slice(0, 2) })} className="bbt-input" placeholder="UF" />
+              <input value={form.uf_emissor || ''} onChange={(e) => setForm({ ...form, uf_emissor: e.target.value.toUpperCase().slice(0, 2) })} className="bbt-input" placeholder="UF" aria-label="UF do órgão emissor" />
             </div>
           </Field>
-          <Field label="Emissao Documento" htmlFor="employee-document-issued-at"><DateInput id="employee-document-issued-at" value={form.documento_emissao || ''} onChange={(e) => setForm({ ...form, documento_emissao: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Validade Documento" htmlFor="employee-document-expires-at"><DateInput id="employee-document-expires-at" value={form.documento_validade || ''} onChange={(e) => setForm({ ...form, documento_validade: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Cargo *">
-            <select value={form.cargo || 'Colaborador'} onChange={(e) => setForm({ ...form, cargo: e.target.value as Cargo })} className="bbt-input">
+          <Field label="Emissão do documento" htmlFor="employee-document-issued-at"><DateInput id="employee-document-issued-at" value={form.documento_emissao || ''} onChange={(e) => setForm({ ...form, documento_emissao: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Validade do documento" htmlFor="employee-document-expires-at"><DateInput id="employee-document-expires-at" value={form.documento_validade || ''} onChange={(e) => setForm({ ...form, documento_validade: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Cargo *" htmlFor="employee-role">
+            <select id="employee-role" value={form.cargo || 'Colaborador'} onChange={(e) => setForm({ ...form, cargo: e.target.value as Cargo })} className="bbt-input">
               {CARGOS.map((c) => <option key={c}>{c}</option>)}
             </select>
           </Field>
-          <Field label="Empresa *">
+          <Field label="Empresa *" htmlFor="employee-company">
             <select
-              required
+              id="employee-company"
               value={form.company_id || ''}
               onChange={(e) => setForm({
                 ...form,
@@ -839,8 +865,8 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
           <Field label="Validade Passaporte" htmlFor="employee-passport-expires-at"><DateInput id="employee-passport-expires-at" value={form.passaporte_validade || ''} onChange={(e) => setForm({ ...form, passaporte_validade: e.target.value })} className="bbt-input" /></Field>
           <Field label="Registro CNH"><input value={form.cnh_registro || ''} onChange={(e) => setForm({ ...form, cnh_registro: e.target.value })} className="bbt-input" /></Field>
           <Field label="Categoria CNH"><input value={form.cnh_categoria || ''} onChange={(e) => setForm({ ...form, cnh_categoria: e.target.value.toUpperCase().slice(0, 3) })} className="bbt-input" /></Field>
-          <Field label="Primeira Habilitacao" htmlFor="employee-first-license-date"><DateInput id="employee-first-license-date" value={form.cnh_primeira_habilitacao || ''} onChange={(e) => setForm({ ...form, cnh_primeira_habilitacao: e.target.value })} className="bbt-input" /></Field>
-          <Field label="Nome da Mae"><input value={form.nome_mae || ''} onChange={(e) => setForm({ ...form, nome_mae: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Primeira habilitação" htmlFor="employee-first-license-date"><DateInput id="employee-first-license-date" value={form.cnh_primeira_habilitacao || ''} onChange={(e) => setForm({ ...form, cnh_primeira_habilitacao: e.target.value })} className="bbt-input" /></Field>
+          <Field label="Nome da mãe"><input value={form.nome_mae || ''} onChange={(e) => setForm({ ...form, nome_mae: e.target.value })} className="bbt-input" /></Field>
           <Field label="Nome do Pai"><input value={form.nome_pai || ''} onChange={(e) => setForm({ ...form, nome_pai: e.target.value })} className="bbt-input" /></Field>
           <Field label="Naturalidade"><input value={form.naturalidade || ''} onChange={(e) => setForm({ ...form, naturalidade: e.target.value })} className="bbt-input" /></Field>
           <Field label="Nacionalidade"><input value={form.nacionalidade || ''} onChange={(e) => setForm({ ...form, nacionalidade: e.target.value })} className="bbt-input" /></Field>
@@ -858,9 +884,18 @@ function FuncionarioModal({ open, onClose, editing, empresas, onSave }: {
 }
 
 function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: React.ReactNode }) {
+  const labelClass = 'block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5 uppercase tracking-wider'
+  if (!htmlFor) {
+    return (
+      <label className="block">
+        <span className={labelClass}>{label}</span>
+        {children}
+      </label>
+    )
+  }
   return (
     <div>
-      <label htmlFor={htmlFor} className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5 uppercase tracking-wider">{label}</label>
+      <label htmlFor={htmlFor} className={labelClass}>{label}</label>
       {children}
     </div>
   )

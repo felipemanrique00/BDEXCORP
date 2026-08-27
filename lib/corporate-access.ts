@@ -11,6 +11,7 @@ export const CORPORATE_PROFILE_LABELS: Record<CorporateProfile, string> = {
   executive_assistant: 'Secretaria executiva',
   group_finance: 'Financeiro do grupo',
   manager: 'Gestor',
+  approver: 'Autorizador',
   viewer: 'Visualizador',
   company_admin: 'Administrador de empresa',
   requester: 'Solicitante',
@@ -19,7 +20,7 @@ export const CORPORATE_PROFILE_LABELS: Record<CorporateProfile, string> = {
 export const CORPORATE_PROFILES = Object.keys(CORPORATE_PROFILE_LABELS) as CorporateProfile[]
 export const CORPORATE_PERMISSION_KEYS = Object.keys(
   CORPORATE_PROFILE_PERMISSIONS.owner,
-) as Array<keyof Permissoes>
+).filter((permission) => permission !== 'gerenciar_personificacoes') as Array<keyof Permissoes>
 export const PERMISSION_KEYS = Object.keys(CORPORATE_PROFILE_PERMISSIONS.viewer) as Array<keyof Permissoes>
 
 export function permissionsForCorporateProfile(
@@ -27,7 +28,7 @@ export function permissionsForCorporateProfile(
   overrides: Record<string, unknown> | null | undefined,
 ): Permissoes {
   const result = { ...CORPORATE_PROFILE_PERMISSIONS[profile] }
-  for (const permission of PERMISSION_KEYS) {
+  for (const permission of CORPORATE_PERMISSION_KEYS) {
     if (typeof overrides?.[permission] === 'boolean') result[permission] = overrides[permission]
   }
   return result
@@ -44,7 +45,7 @@ export function mergePermissions(values: readonly Permissoes[]): Permissoes {
 export function permissionOverridesOnly(value: Record<string, unknown> | null | undefined): Partial<Permissoes> {
   if (!value) return {}
   return Object.fromEntries(
-    PERMISSION_KEYS.flatMap((permission) => (
+    CORPORATE_PERMISSION_KEYS.flatMap((permission) => (
       typeof value[permission] === 'boolean' ? [[permission, value[permission]]] : []
     )),
   ) as Partial<Permissoes>
@@ -56,7 +57,7 @@ export function corporateProfileToLegacyRole(profile: CorporateProfile): 'compan
 
 export function corporateProfileToMembershipRoleKey(profile: CorporateProfile): 'company_admin' | 'requester' | 'readonly' {
   if (profile === 'requester') return 'requester'
-  if (profile === 'viewer') return 'readonly'
+  if (profile === 'viewer' || profile === 'approver') return 'readonly'
   return 'company_admin'
 }
 

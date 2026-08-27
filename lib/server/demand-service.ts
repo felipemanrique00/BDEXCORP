@@ -23,12 +23,29 @@ import {
   type DemandCreationSubmissionDecision,
 } from '@/lib/demands/booking-mode'
 import { applyLegacyDemandAssignment } from '@/lib/demands/operational-mutations'
+import { demandApprovalPolicyEvaluationIds } from '@/lib/demands/approval-policy-evaluation-ids'
 import {
   assessDemandUpdate,
+  lifecycleAllowsNormalAirDemandEdit,
   lifecycleAllowsNormalHotelDemandEdit,
+  lifecycleAllowsNormalGroundDemandEdit,
   lifecycleAllowsMaterialDemandEdit,
   type DemandUpdateSnapshot,
 } from '@/lib/demands/update-governance'
+import {
+  groundRequestDates,
+  groundRequestDestination,
+  groundRequestTravelers,
+  parsePortalBusRequestDetails,
+  parsePortalCarRequestDetails,
+  type PortalBusRequestDetails,
+  type PortalCarRequestDetails,
+} from '@/lib/offline-ground/request-model'
+import {
+  demandRequestAdjustmentAllows,
+  readDemandRequestAdjustment,
+  resolveDemandRequestAdjustment,
+} from '@/lib/demands/request-adjustment'
 import { normalizarNomePessoa } from '@/lib/funcionario-identidade'
 import {
   hasNormalizedHotelDemandDetails,
@@ -43,19 +60,21 @@ import {
   relationalPriorityToLegacy,
   type RelationalDemandSnapshot,
 } from '@/lib/travel/legacy-demand'
-import { createApprovalInstance, ApprovalServiceError } from '@/lib/server/approval-service'
+import { createTrustedApprovalInstance, ApprovalServiceError } from '@/lib/server/approval-service'
 import {
   AirDemandServiceError,
   hasPersistedAirDemandDetailsInTransaction,
   persistAirDemandDetailsInTransaction,
 } from '@/lib/server/air-demand-service'
-import { writeAuditEvent } from '@/lib/server/audit-log'
+import { writeAuditEvent, writeAuditEventInTransaction } from '@/lib/server/audit-log'
 import {
+  CorporateAccessDeniedError,
   normalizeMembershipPermissions,
   requireCompanyAccess,
   resolveEffectiveCorporateAccessInTransaction,
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
+import { resolvePolicyApprovalWorkflowCode } from '@/lib/server/policy-approval-workflow'
 import {
   domainRolloutAppliesToCompany,
   domainRolloutIsFullyRelational,
@@ -70,8 +89,17 @@ import {
   HotelDemandServiceError,
   persistHotelDemandDetailsInTransaction,
 } from '@/lib/server/hotel-demand-service'
+import {
+  hasPersistedGroundDemandDetailsInTransaction,
+  OfflineGroundDemandServiceError,
+  persistGroundDemandDetailsInTransaction,
+} from '@/lib/server/offline-ground-demand-service'
 import { evaluateAndPersistPoliciesInTransaction } from '@/lib/server/policy-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import {
+  realActorUserId,
+  requireActiveOperateRepresentation,
+} from '@/lib/server/support-representation-service'
 import {
   isRequesterReadPrincipal,
   requesterOwnDemandExistsSql,
@@ -195,6 +223,8 @@ interface DemandCreationRow extends QueryResultRow {
   active_approval_instance_id: string | null
   create_input_hash: string | null
   metadata: Record<string, unknown>
+  travel_order_id: string | null
+  travel_order_item_id: string | null
 }
 
 interface DemandListRow extends QueryResultRow {
@@ -231,6 +261,12 @@ interface DemandListRow extends QueryResultRow {
   metadata: Record<string, unknown>
   created_at: string | Date
   updated_at: string | Date
+  travel_order_id: string | null
+  travel_order_item_id: string | null
+  travel_order_number: string | null
+  travel_order_status: string | null
+  travel_order_item_count: string | number | null
+  travel_order_services: string[] | null
 }
 
 interface AssigneeMembershipRow extends QueryResultRow {
@@ -281,10 +317,18 @@ export interface RelationalDemandListItem {
   updatedAt: string
   demand: Record<string, unknown>
   governance: Record<string, unknown>
+  travelOrder: {
+    id: string
+    orderNumber: string
+    status: 'draft' | 'submitting' | 'submitted'
+    itemCount: number
+    services: Array<'air' | 'hotel' | 'car' | 'bus'>
+  } | null
 }
 
 export interface DemandListFilters {
   companyId?: string
+  companyIds?: string[]
   status?: string
   lifecycleStatus?: string
   serviceType?: string
@@ -366,6 +410,57 @@ interface DemandCreationPreparation extends RelationalDemandCreationResult {
   policyEvaluationId: string | null
 }
 
+interface DemandServerEnrichmentOptions {
+  enrichDemand?: (
+    client: PoolClient,
+    demand: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>
+  idempotencyPayload?: unknown
+  requireOpenRequestAdjustment?: boolean
+  allowedCompanyIds?: readonly string[]
+  travelOrderLink?: {
+    orderId: string
+    itemId: string
+  }
+  deferActivation?: boolean
+}
+
+export interface DeferredTravelOrderDemandInput {
+  itemId: string
+  payloadHash: string
+  demand: Record<string, unknown>
+  idempotencyKey: string
+}
+
+export interface DeferredTravelOrderMaterializationInput {
+  orderId: string
+  expectedVersion: number
+  submitIdempotencyKey: string
+  submitInputHash: string
+  items: DeferredTravelOrderDemandInput[]
+}
+
+interface PreparedDemandDetailsUpdateMutation {
+  input: z.infer<typeof demandDetailsUpdateSchema>
+  snapshot: RelationalDemandSnapshot
+  hotelDetails: HotelDemandDetailsInput | null
+  airDetails: AirDemandDetailsInput | null
+  carDetails: PortalCarRequestDetails | null
+  busDetails: PortalBusRequestDetails | null
+  inputHash: string
+}
+
+interface PreparedDemandCreationMutation {
+  input: z.infer<typeof demandCreateBodySchema>
+  snapshot: RelationalDemandSnapshot
+  submission: DemandCreationSubmissionDecision
+  hotelDetails: HotelDemandDetailsInput | null
+  airDetails: AirDemandDetailsInput | null
+  carDetails: PortalCarRequestDetails | null
+  busDetails: PortalBusRequestDetails | null
+  inputHash: string
+}
+
 export class DemandServiceError extends Error {
   constructor(
     public readonly code: string,
@@ -382,11 +477,26 @@ export async function listRelationalDemands(
   principal: RequestPrincipal,
   filters: DemandListFilters = {},
 ): Promise<{ items: RelationalDemandListItem[]; total: number }> {
-  const companyIds = principal.corporateAccess?.companies
+  const permittedCompanyIds = principal.corporateAccess?.companies
     .filter((company) => company.permissions.ver_demandas)
     .map((company) => company.companyId) || []
+  const requestedCompanyIds = filters.companyIds
+    ? [...new Set(filters.companyIds.map((companyId) => companyId.trim()).filter(Boolean))]
+    : null
+  if (requestedCompanyIds) {
+    await Promise.all(requestedCompanyIds.map((companyId) => (
+      requireCompanyAccess(principal, companyId, 'ver_demandas')
+    )))
+  }
+  const companyIds = requestedCompanyIds || permittedCompanyIds
   if (filters.companyId) {
     await requireCompanyAccess(principal, filters.companyId, 'ver_demandas')
+    if (requestedCompanyIds && !requestedCompanyIds.includes(filters.companyId)) {
+      throw new CorporateAccessDeniedError(
+        'COMPANY_SELECTION_SCOPE_DENIED',
+        'Empresa fora do contexto corporativo selecionado.',
+      )
+    }
   }
 
   return withTenantTransaction(principal.tenantId, async (client) => {
@@ -395,6 +505,13 @@ export async function listRelationalDemands(
       'demand.tenant_id = $1',
       'demand.deleted_at is null',
       'demand.company_id = any($2::text[])',
+      `(demand.travel_order_id is null or exists (
+        select 1
+        from company_portal_travel_orders visible_order
+        where visible_order.tenant_id = demand.tenant_id
+          and visible_order.id = demand.travel_order_id
+          and visible_order.status = 'submitted'
+      ))`,
     ]
     if (isRequesterReadPrincipal(principal)) {
       values.push(principal.user.id)
@@ -449,11 +566,23 @@ export async function listRelationalDemands(
     const result = await client.query<DemandListRow>(
       `select demand.*,
               coalesce(company.trade_name, company.legal_name) as company_name,
-              assigned_user.name as assigned_to_name
+              assigned_user.name as assigned_to_name,
+              travel_order.order_number as travel_order_number,
+              travel_order.status as travel_order_status,
+              travel_order_summary.item_count as travel_order_item_count,
+              travel_order_summary.services as travel_order_services
        from demands demand
        join companies company
          on company.tenant_id = demand.tenant_id and company.id = demand.company_id
        left join users assigned_user on assigned_user.id = demand.assigned_to_user_id
+       left join company_portal_travel_orders travel_order
+         on travel_order.tenant_id = demand.tenant_id and travel_order.id = demand.travel_order_id
+       left join lateral (
+         select count(*)::integer as item_count,
+                coalesce(array_agg(item.service_type order by item.position), '{}'::text[]) as services
+         from company_portal_travel_order_items item
+         where item.tenant_id = demand.tenant_id and item.order_id = demand.travel_order_id
+       ) travel_order_summary on demand.travel_order_id is not null
        where ${clauses.join(' and ')}
        order by
          case demand.priority
@@ -479,17 +608,21 @@ export async function listRelationalDemands(
 export async function getRelationalDemandById(
   principal: RequestPrincipal,
   rawDemandId: string,
+  options: { allowHiddenTravelOrderChild?: boolean } = {},
 ): Promise<RelationalDemandListItem> {
   const demandId = normalizeDemandId(rawDemandId)
   return withTenantTransaction(principal.tenantId, async (client) => {
     const demand = await loadDemandForMutation(client, principal.tenantId, demandId, false)
+    if (demand.travel_order_id && demand.travel_order_status !== 'submitted' && !options.allowHiddenTravelOrderChild) {
+      throw new DemandServiceError('DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
+    }
     await requireCompanyAccess(principal, demand.company_id, 'ver_demandas')
     await requireRequesterDemandReadAccess(client, principal, demandId)
     return mapDemandListItem(demand)
   })
 }
 
-async function requireRequesterDemandReadAccess(
+export async function requireRequesterDemandReadAccess(
   client: PoolClient,
   principal: RequestPrincipal,
   demandId: string,
@@ -514,48 +647,68 @@ export async function updateDemandDetails(
   principal: RequestPrincipal,
   rawDemandId: string,
   rawInput: unknown,
+  options: DemandServerEnrichmentOptions = {},
 ): Promise<DemandDetailsUpdateResult> {
   const demandId = normalizeDemandId(rawDemandId)
-  const input = demandDetailsUpdateSchema.parse(rawInput)
-  const parsed = parseLegacyDemands([input.demand])
-  const parsedSnapshot = parsed.demands[0]
-  if (!parsedSnapshot || parsed.failures.length) {
-    throw new DemandServiceError(
-      'DEMAND_INPUT_INVALID',
-      'Os dados atualizados da demanda sao invalidos.',
-      400,
-      { failures: parsed.failures },
-    )
-  }
-  const hotelDetails = normalizedHotelDetails(parsedSnapshot)
-  const airDetails = normalizedAirDetails(parsedSnapshot)
-  const normalizedSnapshot = hotelDetails
-    ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
-    : airDetails
-      ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
-      : parsedSnapshot
-  let snapshot = normalizedSnapshot
-  if (snapshot.id !== demandId) {
-    throw new DemandServiceError(
-      'DEMAND_ID_MISMATCH',
-      'O identificador da demanda nao corresponde ao recurso solicitado.',
-      400,
-    )
-  }
-  const inputHash = sha256({
-    operation: 'demand_details_update',
-    demandId,
-    demand: input.demand,
-    expectedVersion: input.expectedVersion,
-    reason: input.reason,
-  })
+  const initialMutation = prepareDemandDetailsUpdateMutation(demandId, rawInput)
+  let input = initialMutation.input
+  let snapshot = initialMutation.snapshot
+  let hotelDetails = initialMutation.hotelDetails
+  let airDetails = initialMutation.airDetails
+  let carDetails = initialMutation.carDetails
+  let busDetails = initialMutation.busDetails
+  const mutationInputHash = initialMutation.inputHash
+  const inputHash = options.idempotencyPayload === undefined
+    ? mutationInputHash
+    : sha256({
+        operation: 'company_portal_demand_details_update',
+        demandId,
+        payload: options.idempotencyPayload,
+      })
 
   const prepared = await withTenantTransaction(principal.tenantId, async (client) => {
     const current = await loadDemandForMutation(client, principal.tenantId, demandId)
-    const existingAirTravelers = current.service_type === 'air' || snapshot.serviceType === 'air'
+    const allowedCompanyIds = options.allowedCompanyIds
+      ? [...new Set(options.allowedCompanyIds.map((companyId) => companyId.trim()).filter(Boolean))]
+      : null
+    if (options.allowedCompanyIds && !allowedCompanyIds?.length) {
+      throw new DemandServiceError('DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
+    }
+    if (allowedCompanyIds && !allowedCompanyIds.includes(current.company_id)) {
+      throw new DemandServiceError('DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
+    }
+    await requireRequesterDemandReadAccess(client, principal, demandId)
+    const existingAirTravelers = ['air', 'car', 'bus'].includes(current.service_type)
+      || ['air', 'car', 'bus'].includes(snapshot.serviceType)
       ? await loadDemandTravelerPolicyRows(client, principal.tenantId, demandId, true)
       : []
     const currentMetadata = recordValue(current.metadata)
+    const creationContext = recordValue(currentMetadata.creationContext)
+    const requestAdjustment = readDemandRequestAdjustment(current.metadata)
+    const airRequestAdjustmentAllowed = demandRequestAdjustmentAllows(
+      current.metadata,
+      'edit_request',
+    ) && lifecycleAllowsNormalAirDemandEdit(
+      current.lifecycle_status,
+      true,
+    )
+    const hotelRequestAdjustmentAllowed = demandRequestAdjustmentAllows(
+      current.metadata,
+      'edit_request',
+    ) && lifecycleAllowsNormalHotelDemandEdit(
+      current.lifecycle_status,
+      true,
+    )
+    const groundRequestAdjustmentAllowed = demandRequestAdjustmentAllows(
+      current.metadata,
+      'edit_request',
+    ) && lifecycleAllowsNormalGroundDemandEdit(
+      current.lifecycle_status,
+      true,
+    )
+    const requestAdjustmentEditAllowed = airRequestAdjustmentAllowed
+      || hotelRequestAdjustmentAllowed
+      || groundRequestAdjustmentAllowed
     const currentLegacy = recordValue(currentMetadata.legacySnapshot)
     const existingAgencyAssisted = recordValue(currentMetadata.creationContext).mode === 'agency_assisted'
       || currentLegacy.agency_assisted === true
@@ -589,6 +742,25 @@ export async function updateDemandDetails(
         422,
       )
     }
+    for (const groundService of ['car', 'bus'] as const) {
+      const nextDetails = groundService === 'car' ? carDetails : busDetails
+      if (
+        (current.service_type === groundService || snapshot.serviceType === groundService)
+        && !nextDetails
+        && await hasPersistedGroundDemandDetailsInTransaction(
+          client,
+          principal.tenantId,
+          demandId,
+          groundService,
+        )
+      ) {
+        throw new DemandServiceError(
+          'GROUND_DEMAND_DETAILS_REQUIRED',
+          'Uma demanda terrestre normalizada nao pode voltar ao formato legado nem trocar de servico por esta edicao.',
+          422,
+        )
+      }
+    }
     if (snapshot.serviceType === 'air' && airDetails && !airDetails.passengers?.length) {
       if (current.service_type !== 'air') {
         throw new DemandServiceError(
@@ -618,6 +790,9 @@ export async function updateDemandDetails(
       }
     }
     if (snapshot.companyId !== current.company_id) {
+      if (allowedCompanyIds && !allowedCompanyIds.includes(snapshot.companyId)) {
+        throw new DemandServiceError('DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
+      }
       await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
       await requireRelationalDemandWrite(client, principal.tenantId, snapshot.companyId)
       await assertDemandCompanyTransferAllowed(client, principal.tenantId, current)
@@ -631,34 +806,102 @@ export async function updateDemandDetails(
     )
     if (replay) {
       assertDemandOperationReplay(replay, inputHash)
+      const updateGovernance = recordValue(recordValue(current.metadata).updateGovernance)
+      const updateCheckpoints = Array.isArray(updateGovernance.checkpoints)
+        ? updateGovernance.checkpoints.filter(isPolicyCheckpointSummary)
+        : []
       return {
         result: demandDetailsResultFromRow(current, true),
-        approvalSubject: recordValue(recordValue(current.metadata).updateGovernance).approvalSubject,
+        approvalSubject: demandApprovalSubjectWithPolicyEvaluationIds(
+          recordValue(updateGovernance.approvalSubject),
+          updateCheckpoints,
+          current.last_policy_evaluation_id,
+        ),
         policyEvaluationId: current.last_policy_evaluation_id,
       }
+    }
+
+    if (
+      options.requireOpenRequestAdjustment
+      && (
+        !requestAdjustmentEditAllowed
+        || (!isRequesterReadPrincipal(principal) && !canCreateAgencyAssistedDemand(principal))
+      )
+    ) {
+      throw new DemandServiceError(
+        'COMPANY_PORTAL_DEMAND_CORRECTION_DENIED',
+        'Este pedido nao possui uma correcao liberada para o usuario atual.',
+        403,
+      )
+    }
+
+    if (options.enrichDemand) {
+      const enrichedDemand = await options.enrichDemand(client, input.demand)
+      const enriched = prepareDemandDetailsUpdateMutation(demandId, { ...input, demand: enrichedDemand })
+      assertServerEnrichmentPreservesMutation(mutationInputHash, enriched.inputHash)
+      input = enriched.input
+      snapshot = enriched.carDetails || enriched.busDetails
+        ? {
+            ...snapshot,
+            employeeId: enriched.snapshot.employeeId,
+            passengerName: enriched.snapshot.passengerName,
+            travelStartDate: enriched.snapshot.travelStartDate,
+            travelEndDate: enriched.snapshot.travelEndDate,
+            destination: enriched.snapshot.destination,
+            metadata: enriched.snapshot.metadata,
+          }
+        : { ...snapshot, metadata: enriched.snapshot.metadata }
+      hotelDetails = enriched.hotelDetails
+      airDetails = enriched.airDetails
+      carDetails = enriched.carDetails
+      busDetails = enriched.busDetails
     }
 
     assertDemandVersion(current, input.expectedVersion)
     if (
       (current.service_type === 'hotel' || snapshot.serviceType === 'hotel')
-      && !lifecycleAllowsNormalHotelDemandEdit(current.lifecycle_status)
+      && !lifecycleAllowsNormalHotelDemandEdit(
+        current.lifecycle_status,
+        hotelRequestAdjustmentAllowed,
+        creationContext.requestedSubmit === true,
+      )
     ) {
       throw new DemandServiceError(
         'HOTEL_DEMAND_NORMAL_EDIT_LOCKED',
-        'A hospedagem ja entrou em cotacao e nao pode ser alterada por este formulario. Use o fluxo auditado de correcao da reserva.',
+        'A solicitacao de hospedagem enviada e somente leitura. A edicao exige uma devolucao auditada para ajuste.',
         409,
-        { lifecycleStatus: current.lifecycle_status },
+        {
+          lifecycleStatus: current.lifecycle_status,
+          requestAdjustmentAllowed: false,
+        },
       )
     }
     if (
       (current.service_type === 'air' || snapshot.serviceType === 'air')
-      && !lifecycleAllowsNormalHotelDemandEdit(current.lifecycle_status)
+      && !airRequestAdjustmentAllowed
     ) {
       throw new DemandServiceError(
         'AIR_DEMAND_NORMAL_EDIT_LOCKED',
-        'O itinerario aereo ja entrou em cotacao e nao pode ser alterado por este formulario. Use o fluxo auditado de correcao da reserva.',
+        'A solicitacao aerea enviada e somente leitura. A edicao exige uma devolucao auditada para ajuste.',
         409,
-        { lifecycleStatus: current.lifecycle_status },
+        {
+          lifecycleStatus: current.lifecycle_status,
+          requestAdjustmentAllowed: false,
+        },
+      )
+    }
+    if (
+      (['car', 'bus'].includes(current.service_type) || ['car', 'bus'].includes(snapshot.serviceType))
+      && !groundRequestAdjustmentAllowed
+    ) {
+      throw new DemandServiceError(
+        'GROUND_DEMAND_NORMAL_EDIT_LOCKED',
+        'A solicitacao terrestre enviada e somente leitura. A edicao exige uma devolucao auditada para ajuste.',
+        409,
+        {
+          lifecycleStatus: current.lifecycle_status,
+          requestAdjustmentAllowed: false,
+        },
       )
     }
     const company = await loadCompany(client, principal.tenantId, snapshot.companyId)
@@ -706,7 +949,9 @@ export async function updateDemandDetails(
     )
     const previousPassengerIds = orderedEmployeeIds(existingAirTravelers)
     const nextPassengerIds = airDetails?.passengers?.map((passenger) => passenger.employeeId)
-      || (snapshot.serviceType === 'air' ? previousPassengerIds : [])
+      || (carDetails || busDetails
+        ? groundRequestTravelers((carDetails || busDetails)!).map((traveler) => traveler.employee_id)
+        : (['air', 'car', 'bus'].includes(snapshot.serviceType) ? previousPassengerIds : []))
     const previousSnapshot = relationalDemandUpdateSnapshot(current, previousPassengerIds)
     const nextSnapshot = parsedDemandUpdateSnapshot(
       snapshot,
@@ -718,11 +963,17 @@ export async function updateDemandDetails(
     const reapproval = assessDemandUpdate(previousSnapshot, nextSnapshot)
     if (
       reapproval.changedFields.includes('passengerIds')
-      && current.lifecycle_status !== 'draft'
+      && !(airRequestAdjustmentAllowed || groundRequestAdjustmentAllowed)
     ) {
+      const groundPassengerEdit = ['car', 'bus'].includes(current.service_type)
+        || ['car', 'bus'].includes(snapshot.serviceType)
       throw new DemandServiceError(
-        'AIR_DEMAND_PASSENGERS_EDIT_LOCKED',
-        'A lista de passageiros nao pode ser alterada depois que a demanda foi enviada.',
+        groundPassengerEdit
+          ? 'GROUND_DEMAND_TRAVELERS_EDIT_LOCKED'
+          : 'AIR_DEMAND_PASSENGERS_EDIT_LOCKED',
+        groundPassengerEdit
+          ? 'A lista de viajantes nao pode ser alterada sem uma devolucao auditada para ajuste.'
+          : 'A lista de passageiros nao pode ser alterada depois que a demanda foi enviada.',
         409,
         { lifecycleStatus: current.lifecycle_status },
       )
@@ -748,7 +999,17 @@ export async function updateDemandDetails(
           employeeId: traveler.employee_id,
           name: traveler.name_snapshot,
         }))
-      : []
+      : carDetails || busDetails
+        ? groundRequestTravelers((carDetails || busDetails)!).map((traveler) => ({
+            employeeId: traveler.employee_id,
+            name: traveler.name,
+          }))
+        : ['car', 'bus'].includes(snapshot.serviceType)
+          ? existingAirTravelers.map((traveler) => ({
+              employeeId: traveler.employee_id,
+              name: traveler.name_snapshot,
+            }))
+          : []
     const policyTravelers = await loadDemandPolicyTravelers(
       client,
       principal.tenantId,
@@ -760,7 +1021,7 @@ export async function updateDemandDetails(
       ? ['profile', 'request']
       : ['profile', 'request', 'submission']
     const evaluations: DemandPolicyCheckpointSummary[] = []
-    const fullResults: PolicyEvaluationResult[] = []
+    const fullResults: Array<{ databaseEvaluationId: string; result: PolicyEvaluationResult }> = []
     let lastEvaluationId: string | null = null
     for (const checkpoint of checkpoints) {
       for (const traveler of policyTravelers) {
@@ -806,12 +1067,14 @@ export async function updateDemandDetails(
           },
         })
         if (traveler.sequence === 1) lastEvaluationId = evaluation.databaseEvaluationId
-        fullResults.push(evaluation.result)
+        fullResults.push(evaluation)
         evaluations.push(policySummary(checkpoint, evaluation.databaseEvaluationId, evaluation.result, traveler))
       }
     }
-    const blocked = fullResults.some((result) => result.blocks.length > 0 || !result.passed)
-    const requiresAction = fullResults.some((result) => (
+    const policyResults = fullResults.map((evaluation) => evaluation.result)
+    const policyEvaluationIds = demandApprovalPolicyEvaluationIds(fullResults)
+    const blocked = policyResults.some((result) => result.blocks.length > 0 || !result.passed)
+    const requiresAction = policyResults.some((result) => (
       result.justificationsRequired.length > 0
       || result.requiredDocuments.length > 0
       || result.requiredActions.some((item) => requiresCompletionBeforeSubmission(item.action))
@@ -827,12 +1090,12 @@ export async function updateDemandDetails(
         },
       )
     }
-    const approvals = fullResults.flatMap((result) => result.approvalsRequired)
+    const approvals = policyResults.flatMap((result) => result.approvalsRequired)
     const workflowCode = approvals.length
-      ? await resolveApprovalWorkflowCode(client, principal.tenantId, fullResults)
+      ? await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policyResults)
       : null
     const approvalRequired = approvals.length > 0
-    const governanceReset = reapproval.material && Boolean(
+    const governanceReset = !requestAdjustmentEditAllowed && reapproval.material && Boolean(
       blocked
       || requiresAction
       || approvalRequired
@@ -848,13 +1111,26 @@ export async function updateDemandDetails(
           reapproval.changedFields,
         )
       : null
-    const nextLifecycleStatus = governanceReset && current.lifecycle_status !== 'draft'
+    const adjustmentTransitionRequired = requestAdjustmentEditAllowed
+      && current.lifecycle_status === 'pending_choice'
+    const nextLifecycleStatus = adjustmentTransitionRequired
+      ? 'submitted'
+      : governanceReset && current.lifecycle_status !== 'draft'
       ? 'submitted'
       : current.lifecycle_status
-    const nextLifecycleVersion = governanceReset
+    const nextLifecycleVersion = adjustmentTransitionRequired || governanceReset
       ? Number(current.lifecycle_version) + 1
       : Number(current.lifecycle_version)
     const nextOperationalStatus = operationalStatusFromLifecycle(nextLifecycleStatus)
+    const persistedLifecycleStatus = adjustmentTransitionRequired
+      ? current.lifecycle_status
+      : nextLifecycleStatus
+    const persistedLifecycleVersion = adjustmentTransitionRequired
+      ? Number(current.lifecycle_version)
+      : nextLifecycleVersion
+    const persistedOperationalStatus = adjustmentTransitionRequired
+      ? operationalStatusFromLifecycle(current.lifecycle_status)
+      : nextOperationalStatus
     const nextLegacy = legacyDemandSnapshot(
       {
         ...currentLegacy,
@@ -866,6 +1142,8 @@ export async function updateDemandDetails(
         passageiro_nome: snapshot.passengerName,
         tipo_servico: input.demand.tipo_servico,
         ...(hotelDetails ? { detalhes_hotel: hotelDetails } : {}),
+        ...(carDetails ? { detalhes_carro: carDetails } : {}),
+        ...(busDetails ? { detalhes_rodoviario: busDetails } : {}),
         cost_center_id: references.costCenterId,
         centro_custo: references.costCenterCode,
       },
@@ -891,7 +1169,24 @@ export async function updateDemandDetails(
       budgetId: references.budgetId,
       budgetAvailable: references.budgetAvailable,
       policyViolationCodes: approvals.map((item) => item.policyCode),
+      policyEvaluationIds,
     }
+    const supersededQuoteIds = requestAdjustmentEditAllowed
+      ? await supersedeDemandQuoteRoundsForRequestAdjustment(
+          client,
+          principal,
+          demandId,
+          input.reason,
+        )
+      : []
+    const resolvedRequestAdjustment = requestAdjustmentEditAllowed && requestAdjustment
+      ? resolveDemandRequestAdjustment(requestAdjustment, {
+          resolvedAt: now,
+          resolvedBy: realActorUserId(principal),
+          resolution: 'request_edited',
+          resolutionReason: input.reason,
+        })
+      : requestAdjustment
     const updateGovernance = {
       blocked,
       requiresAction,
@@ -901,12 +1196,14 @@ export async function updateDemandDetails(
       approvalSubject,
       policyEvaluationId: lastEvaluationId,
       reapproval: {
-        required: governanceReset,
+        required: governanceReset || requestAdjustmentEditAllowed,
         changedFields: reapproval.changedFields,
         previousHash: reapproval.previousHash,
         currentHash: reapproval.currentHash,
         supersededApprovalInstanceId,
       },
+      requestAdjustmentResolved: requestAdjustmentEditAllowed,
+      supersededQuoteIds,
       reason: input.reason,
       updatedAt: now,
     }
@@ -918,6 +1215,9 @@ export async function updateDemandDetails(
       legacySnapshot: nextLegacy,
       identityResolution: identityEvidence(identity),
       updateGovernance,
+      ...(resolvedRequestAdjustment
+        ? { requestAdjustment: resolvedRequestAdjustment }
+        : {}),
     }
     const updated = await client.query(
       `update demands set
@@ -964,9 +1264,9 @@ export async function updateDemandDetails(
         identity.resolution.confidence,
         snapshot.serviceType,
         snapshot.passengerName,
-        nextOperationalStatus,
-        nextLifecycleStatus,
-        nextLifecycleVersion,
+        persistedOperationalStatus,
+        persistedLifecycleStatus,
+        persistedLifecycleVersion,
         governanceReset,
         now,
         lastEvaluationId,
@@ -1005,6 +1305,45 @@ export async function updateDemandDetails(
         airDetails,
       )
     }
+    if (carDetails) {
+      await persistNormalizedGroundDemand(client, principal, demandId, snapshot.companyId, 'car', carDetails)
+    }
+    if (busDetails) {
+      await persistNormalizedGroundDemand(client, principal, demandId, snapshot.companyId, 'bus', busDetails)
+    }
+    if (adjustmentTransitionRequired) {
+      await persistTravelTransitionInTransaction(
+        client,
+        principal,
+        {
+          demandId,
+          companyId: current.company_id,
+          status: current.lifecycle_status as TravelLifecycleRecord['status'],
+          version: Number(current.lifecycle_version),
+          lastPolicyEvaluationId: current.last_policy_evaluation_id,
+          activeApprovalInstanceId: current.active_approval_instance_id,
+        },
+        'return_for_adjustment',
+        {
+          idempotencyKey: `demand-adjustment:${sha256({
+            demandId,
+            idempotencyKey: input.idempotencyKey,
+          })}`,
+          requirements: {
+            policyEvaluationId: lastEvaluationId,
+            policyPassed: !blocked,
+            policyHasBlocks: blocked,
+            humanConfirmed: true,
+          },
+          metadata: {
+            source: 'demand_details_update',
+            reason: input.reason,
+            approvalInstanceId: requestAdjustment?.approvalInstanceId || null,
+            supersededQuoteIds,
+          },
+        },
+      )
+    }
     await persistIdentityDecision(
       client,
       principal,
@@ -1030,9 +1369,11 @@ export async function updateDemandDetails(
         JSON.stringify({
           reason: input.reason,
           changedFields: reapproval.changedFields,
-          governanceReset,
+          governanceReset: governanceReset || requestAdjustmentEditAllowed,
+          requestAdjustmentResolved: requestAdjustmentEditAllowed,
+          supersededQuoteIds,
           supersededApprovalInstanceId,
-          resultingVersion: input.expectedVersion + 1,
+          resultingVersion: input.expectedVersion + (adjustmentTransitionRequired ? 2 : 1),
         }),
         input.idempotencyKey,
         inputHash,
@@ -1268,49 +1609,11 @@ export async function createRelationalDemand(
   principal: RequestPrincipal,
   rawInput: unknown,
   rawIdempotencyKey: string,
+  options: DemandServerEnrichmentOptions = {},
 ): Promise<RelationalDemandCreationResult> {
-  const input = demandCreateBodySchema.parse(rawInput)
-  const parsed = parseLegacyDemands([input.demand])
-  const parsedSnapshot = parsed.demands[0]
-  if (!parsedSnapshot || parsed.failures.length) {
-    throw new DemandServiceError(
-      'DEMAND_INPUT_INVALID',
-      'Os dados da demanda sao invalidos.',
-      400,
-      { failures: parsed.failures },
-    )
-  }
-  const hotelDetails = normalizedHotelDetails(parsedSnapshot)
-  const airDetails = normalizedAirDetails(parsedSnapshot)
-  if (airDetails && !airDetails.passengers?.length) {
-    throw new DemandServiceError(
-      'AIR_DEMAND_PASSENGERS_REQUIRED',
-      'Selecione ao menos um passageiro cadastrado para criar uma demanda aerea.',
-      422,
-    )
-  }
-  const normalizedSnapshot = hotelDetails
-    ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
-    : airDetails
-      ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
-      : parsedSnapshot
-  const snapshot = {
-    ...normalizedSnapshot,
-    agencyAssisted: resolveAgencyAssistedDemandMode(principal, {
-      declaredAgencyAssisted: normalizedSnapshot.agencyAssisted,
-      requesterId: normalizedSnapshot.requesterId,
-    }),
-  }
-  const submission = resolveDemandCreationSubmission({
-    bookingMode: snapshot.bookingMode,
-    requestedSubmit: input.submit,
-  })
+  const initialMutation = prepareDemandCreationMutation(principal, rawInput)
+  const { snapshot, submission, inputHash } = initialMutation
   const idempotencyKey = normalizeIdempotencyKey(rawIdempotencyKey)
-  const inputHash = sha256({
-    tenantId: principal.tenantId,
-    demand: input.demand,
-    submit: submission.effectiveSubmit,
-  })
   const agencyAssistanceIssue = validateAgencyAssistedDemandParticipants(principal, {
     agencyAssisted: snapshot.agencyAssisted,
     requesterId: snapshot.requesterId,
@@ -1326,23 +1629,36 @@ export async function createRelationalDemand(
   await requireCompanyAccess(principal, snapshot.companyId, 'criar_demandas')
 
   const createAttempt = () => withTenantTransaction(principal.tenantId, async (client) => {
+    if (options.deferActivation) await allowHiddenTravelOrderChildren(client)
     const existing = await loadDemandByIdempotency(client, principal.tenantId, idempotencyKey)
-    if (existing) return replayCreation(existing, inputHash)
+    if (existing) return replayCreation(existing, inputHash, options.travelOrderLink)
+    const mutation = options.enrichDemand
+      ? prepareDemandCreationMutation(principal, {
+          ...initialMutation.input,
+          demand: await options.enrichDemand(client, initialMutation.input.demand),
+        })
+      : initialMutation
+    assertServerEnrichmentPreservesMutation(inputHash, mutation.inputHash)
     return createDemandInTransaction(
       client,
       principal,
-      snapshot,
-      input.demand,
-      submission,
+      mutation.snapshot,
+      mutation.input.demand,
+      mutation.submission,
       idempotencyKey,
       inputHash,
-      hotelDetails,
-      airDetails,
+      mutation.hotelDetails,
+      mutation.airDetails,
+      mutation.carDetails,
+      mutation.busDetails,
+      options.travelOrderLink,
+      options.deferActivation === true,
     )
   })
   const replayConcurrentCreation = () => withTenantTransaction(principal.tenantId, async (client) => {
+    if (options.deferActivation) await allowHiddenTravelOrderChildren(client)
     const existing = await loadDemandByIdempotency(client, principal.tenantId, idempotencyKey)
-    return existing ? replayCreation(existing, inputHash) : null
+    return existing ? replayCreation(existing, inputHash, options.travelOrderLink) : null
   })
 
   let preparation: DemandCreationPreparation
@@ -1370,7 +1686,7 @@ export async function createRelationalDemand(
     }
   }
 
-  if (shouldStartDemandApprovalAtCreation({
+  if (!options.deferActivation && shouldStartDemandApprovalAtCreation({
     submission,
     approvalRequired: preparation.approval.required,
     workflowCode: preparation.approval.workflowCode,
@@ -1392,7 +1708,13 @@ export async function createRelationalDemand(
       policyBlocked: preparation.policy.blocked,
       policyRequiresAction: preparation.policy.requiresAction,
       approvalRequired: preparation.approval.required,
-      creationMode: snapshot.agencyAssisted ? 'agency_assisted' : 'self_service',
+      creationMode: principal.representation
+        ? 'support_assisted'
+        : snapshot.agencyAssisted
+          ? 'agency_assisted'
+          : 'self_service',
+      representedUserId: principal.representation?.subject.id || null,
+      representationId: principal.representation?.id || null,
       bookingMode: snapshot.bookingMode || 'legacy',
       requestedSubmit: submission.requestedSubmit,
       effectiveSubmit: submission.effectiveSubmit,
@@ -1405,6 +1727,464 @@ export async function createRelationalDemand(
   return result
 }
 
+/**
+ * Runs the exact structural/domain preparation used by createRelationalDemand
+ * without opening a transaction or producing lifecycle side effects.
+ */
+export function validateRelationalDemandCreationInput(
+  principal: RequestPrincipal,
+  rawInput: unknown,
+): void {
+  prepareDemandCreationMutation(principal, rawInput)
+}
+
+/**
+ * Materializes every private child in one database transaction. This is the
+ * durable preflight for references, policy and relational constraints: if any
+ * service fails, no child/link/usage reservation survives and the parent stays
+ * editable as `draft`.
+ */
+export async function materializeDeferredTravelOrderDemands(
+  principal: RequestPrincipal,
+  input: DeferredTravelOrderMaterializationInput,
+): Promise<RelationalDemandCreationResult[]> {
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw new DemandServiceError('TRAVEL_ORDER_VERSION_INVALID', 'Versao do pedido invalida.', 400)
+  }
+  if (!input.items.length || new Set(input.items.map((item) => item.itemId)).size !== input.items.length) {
+    throw new DemandServiceError('TRAVEL_ORDER_ITEMS_INVALID', 'Os servicos do pedido sao invalidos.', 422)
+  }
+  const preparedItems = input.items.map((item) => ({
+    ...item,
+    idempotencyKey: normalizeIdempotencyKey(item.idempotencyKey),
+    mutation: prepareDemandCreationMutation(principal, { demand: item.demand, submit: true }),
+  }))
+
+  const preparations = await withTenantTransaction(principal.tenantId, async (client) => {
+    await allowHiddenTravelOrderChildren(client)
+    const parent = await client.query<{
+      company_id: string
+      requester_user_id: string
+      status: string
+      version: string | number
+      submit_input_hash: string | null
+    }>(
+      `select company_id, requester_user_id, status, version, submit_input_hash
+       from company_portal_travel_orders
+       where tenant_id = $1 and id = $2::uuid
+       for update`,
+      [principal.tenantId, input.orderId],
+    )
+    const order = parent.rows[0]
+    if (!order || order.requester_user_id !== principal.user.id) {
+      throw new DemandServiceError('TRAVEL_ORDER_NOT_FOUND', 'Pedido nao encontrado.', 404)
+    }
+    if (!['draft', 'submitting'].includes(order.status)) {
+      throw new DemandServiceError('TRAVEL_ORDER_NOT_EDITABLE', 'O pedido ja foi enviado.', 409)
+    }
+    if (order.status === 'draft' && Number(order.version) !== input.expectedVersion) {
+      throw new DemandServiceError(
+        'STALE_TRAVEL_ORDER_VERSION',
+        'O pedido foi alterado. Atualize a pagina antes de enviar.',
+        409,
+        { expectedVersion: input.expectedVersion, currentVersion: Number(order.version) },
+      )
+    }
+    if (order.status === 'submitting' && order.submit_input_hash !== input.submitInputHash) {
+      throw new DemandServiceError(
+        'TRAVEL_ORDER_SUBMIT_CONFLICT',
+        'O conteudo do pedido mudou durante o envio.',
+        409,
+      )
+    }
+
+    const itemRows = await client.query<{
+      id: string
+      company_id: string
+      payload_hash: string
+      child_demand_id: string | null
+    }>(
+      `select id, company_id, payload_hash, child_demand_id
+       from company_portal_travel_order_items
+       where tenant_id = $1 and order_id = $2::uuid
+       order by position, id
+       for update`,
+      [principal.tenantId, input.orderId],
+    )
+    const persistedById = new Map(itemRows.rows.map((item) => [item.id, item]))
+    if (
+      itemRows.rows.length !== preparedItems.length
+      || preparedItems.some((item) => persistedById.get(item.itemId)?.payload_hash !== item.payloadHash)
+    ) {
+      throw new DemandServiceError(
+        'TRAVEL_ORDER_SUBMIT_CONFLICT',
+        'Os servicos do pedido mudaram durante o envio.',
+        409,
+      )
+    }
+
+    const materialized: DemandCreationPreparation[] = []
+    for (const item of preparedItems) {
+      const persisted = persistedById.get(item.itemId)!
+      if (persisted.company_id !== order.company_id) {
+        throw new DemandServiceError('TRAVEL_ORDER_COMPANY_MISMATCH', 'Servico fora da empresa do pedido.', 409)
+      }
+      const existing = await loadDemandByIdempotency(
+        client,
+        principal.tenantId,
+        item.idempotencyKey,
+      )
+      const preparation = existing
+        ? replayCreation(existing, item.mutation.inputHash, {
+            orderId: input.orderId,
+            itemId: item.itemId,
+          })
+        : await createDemandInTransaction(
+            client,
+            principal,
+            item.mutation.snapshot,
+            item.mutation.input.demand,
+            item.mutation.submission,
+            item.idempotencyKey,
+            item.mutation.inputHash,
+            item.mutation.hotelDetails,
+            item.mutation.airDetails,
+            item.mutation.carDetails,
+            item.mutation.busDetails,
+            { orderId: input.orderId, itemId: item.itemId },
+            true,
+          )
+      if (persisted.child_demand_id && persisted.child_demand_id !== preparation.relational.id) {
+        throw new DemandServiceError(
+          'TRAVEL_ORDER_CHILD_CONFLICT',
+          'O servico ja esta ligado a outra demanda.',
+          409,
+        )
+      }
+      await client.query(
+        `update company_portal_travel_order_items
+         set child_demand_id = $4
+         where tenant_id = $1 and order_id = $2::uuid and id = $3::uuid
+           and (child_demand_id is null or child_demand_id = $4)`,
+        [principal.tenantId, input.orderId, item.itemId, preparation.relational.id],
+      )
+      materialized.push(preparation)
+    }
+
+    await reserveDeferredTravelOrderOperationUsageInTransaction(
+      client,
+      principal,
+      input.orderId,
+      preparedItems.length,
+    )
+    if (order.status === 'draft') {
+      await client.query(
+        `update company_portal_travel_orders
+         set status = 'submitting', version = version + 1,
+             submit_idempotency_key = $3, submit_input_hash = $4
+         where tenant_id = $1 and id = $2::uuid and status = 'draft'`,
+        [principal.tenantId, input.orderId, input.submitIdempotencyKey, input.submitInputHash],
+      )
+    }
+    return materialized
+  })
+
+  return preparations.map((preparation) => {
+    const { approvalSubject: _approvalSubject, policyEvaluationId: _policyEvaluationId, ...result } = preparation
+    return result
+  })
+}
+
+/**
+ * Publishes every inert child of a Portal Empresa order as one visibility
+ * boundary. Demand lifecycle transitions, legacy compatibility and outbox
+ * messages commit together with the parent `submitted` status.
+ */
+export async function activateDeferredTravelOrderDemands(
+  principal: RequestPrincipal,
+  orderId: string,
+  idempotencyKey: string,
+): Promise<void> {
+  const preparations = await withTenantTransaction(principal.tenantId, async (client) => {
+    await allowHiddenTravelOrderChildren(client)
+    const parent = await client.query<{
+      company_id: string
+      requester_user_id: string
+      status: string
+      usage_registered_at: string | null
+    }>(
+      `select company_id, requester_user_id, status, usage_registered_at
+       from company_portal_travel_orders
+       where tenant_id = $1 and id = $2::uuid
+       for update`,
+      [principal.tenantId, orderId],
+    )
+    const order = parent.rows[0]
+    if (!order || order.requester_user_id !== principal.user.id) {
+      throw new DemandServiceError('TRAVEL_ORDER_NOT_FOUND', 'Pedido nao encontrado.', 404)
+    }
+    if (!['submitting', 'submitted'].includes(order.status)) {
+      throw new DemandServiceError(
+        'TRAVEL_ORDER_NOT_READY',
+        'O pedido ainda nao esta pronto para envio.',
+        409,
+      )
+    }
+
+    const integrity = await client.query<{ item_count: string; demand_count: string }>(
+      `select count(item.id)::text as item_count,
+              count(demand.id)::text as demand_count
+       from company_portal_travel_order_items item
+       left join demands demand
+         on demand.tenant_id = item.tenant_id
+        and demand.travel_order_id = item.order_id
+        and demand.travel_order_item_id = item.id
+        and demand.company_id = item.company_id
+        and demand.id = item.child_demand_id
+        and demand.deleted_at is null
+       where item.tenant_id = $1 and item.order_id = $2::uuid`,
+      [principal.tenantId, orderId],
+    )
+    const counts = integrity.rows[0]
+    if (!counts || Number(counts.item_count) < 1 || counts.item_count !== counts.demand_count) {
+      throw new DemandServiceError(
+        'TRAVEL_ORDER_SUBMIT_INCOMPLETE',
+        'O envio dos servicos ainda nao foi concluido.',
+        409,
+      )
+    }
+    if (!order.usage_registered_at) {
+      await registerCreatedOperationUsage(client, principal, Number(counts.item_count))
+      await client.query(
+        `update company_portal_travel_orders set usage_registered_at = now()
+         where tenant_id = $1 and id = $2::uuid`,
+        [principal.tenantId, orderId],
+      )
+    }
+
+    const children = await client.query<DemandCreationRow>(
+      `select demand.id, demand.company_id, demand.employee_id,
+              demand.passenger_name_snapshot, demand.demand_number,
+              demand.lifecycle_status, demand.lifecycle_version,
+              demand.last_policy_evaluation_id,
+              demand.active_approval_instance_id, demand.create_input_hash,
+              demand.metadata
+       from company_portal_travel_order_items item
+       join demands demand
+         on demand.tenant_id = item.tenant_id
+        and demand.travel_order_id = item.order_id
+        and demand.travel_order_item_id = item.id
+        and demand.company_id = item.company_id
+        and demand.id = item.child_demand_id
+        and demand.deleted_at is null
+       where item.tenant_id = $1 and item.order_id = $2::uuid
+       order by item.position, item.id
+       for update of demand, item`,
+      [principal.tenantId, orderId],
+    )
+    const activated: DemandCreationPreparation[] = []
+    for (const row of children.rows) {
+      const metadata = recordValue(row.metadata)
+      const governance = recordValue(metadata.creationGovernance)
+      const policyEvaluationId = nullableString(governance.policyEvaluationId)
+        || row.last_policy_evaluation_id
+      let lifecycleStatus = row.lifecycle_status
+      let lifecycleVersion = Number(row.lifecycle_version)
+      if (governance.submissionAllowed === true && policyEvaluationId && lifecycleStatus === 'draft') {
+        const transition = await persistTravelTransitionInTransaction(
+          client,
+          principal,
+          {
+            demandId: row.id,
+            companyId: row.company_id,
+            status: 'draft',
+            version: lifecycleVersion,
+            lastPolicyEvaluationId: policyEvaluationId,
+            activeApprovalInstanceId: row.active_approval_instance_id,
+          },
+          'submit',
+          {
+            idempotencyKey: `${idempotencyKey}:${row.id}:activate`,
+            requirements: {
+              companySelected: true,
+              travelerSelected: Boolean(row.employee_id || row.passenger_name_snapshot.trim()),
+              policyEvaluationId,
+              policyPassed: true,
+              policyHasBlocks: false,
+            },
+            metadata: {
+              source: 'company_portal_travel_order',
+              travelOrderId: orderId,
+            },
+          },
+        )
+        lifecycleStatus = transition.plan?.toStatus || 'submitted'
+        lifecycleVersion = transition.plan?.nextVersion || lifecycleVersion + 1
+        await client.query(
+          `update demands set submitted_at = coalesce(submitted_at, now())
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, row.id],
+        )
+      }
+      const preparation = replayCreation(row, row.create_input_hash || '')
+      activated.push({
+        ...preparation,
+        relational: {
+          ...preparation.relational,
+          lifecycleStatus,
+          lifecycleVersion,
+        },
+        replayed: lifecycleStatus !== 'draft',
+      })
+    }
+    return activated
+  })
+
+  // Approval instances are idempotent but remain hidden while the parent is
+  // submitting. Only after every required instance exists do we publish the
+  // parent, legacy projections and outbox as one transaction.
+  for (const preparation of preparations) {
+    if (shouldStartDemandApprovalAtCreation({
+      submission: { requestedSubmit: true, effectiveSubmit: true, bookingMode: 'offline' },
+      approvalRequired: preparation.approval.required,
+      workflowCode: preparation.approval.workflowCode,
+      submissionAllowed: preparation.policy.submissionAllowed,
+    })) {
+      const started = await startDemandApproval(
+        principal,
+        preparation,
+        `${idempotencyKey}:travel-order:${orderId}:demand:${preparation.relational.id}`,
+      )
+      if (!started.approval.configured) {
+        throw new DemandServiceError(
+          'TRAVEL_ORDER_APPROVAL_ACTIVATION_PENDING',
+          'A aprovacao de um dos servicos ainda nao foi iniciada. Tente continuar o envio.',
+          503,
+          { demandId: preparation.relational.id },
+        )
+      }
+    }
+  }
+
+  await withTenantTransaction(principal.tenantId, async (client) => {
+    await allowHiddenTravelOrderChildren(client)
+    const parent = await client.query<{
+      requester_user_id: string
+      company_id: string
+      order_number: string
+      status: string
+    }>(
+      `select requester_user_id, company_id, order_number, status
+       from company_portal_travel_orders
+       where tenant_id = $1 and id = $2::uuid
+       for update`,
+      [principal.tenantId, orderId],
+    )
+    if (!parent.rows[0] || parent.rows[0].requester_user_id !== principal.user.id) {
+      throw new DemandServiceError('TRAVEL_ORDER_NOT_FOUND', 'Pedido nao encontrado.', 404)
+    }
+    // Every public side effect already committed if another retry published the
+    // parent first. Returning here also keeps demand-create audit rows singular.
+    if (parent.rows[0].status === 'submitted') return
+    const children = await client.query<DemandCreationRow>(
+      `select demand.id, demand.company_id, demand.employee_id,
+              demand.passenger_name_snapshot, demand.demand_number,
+              demand.lifecycle_status, demand.lifecycle_version,
+              demand.last_policy_evaluation_id,
+              demand.active_approval_instance_id, demand.create_input_hash,
+              demand.metadata, demand.travel_order_id, demand.travel_order_item_id
+       from company_portal_travel_order_items item
+       join demands demand
+         on demand.tenant_id = item.tenant_id
+        and demand.travel_order_id = item.order_id
+        and demand.travel_order_item_id = item.id
+        and demand.company_id = item.company_id
+        and demand.id = item.child_demand_id
+        and demand.deleted_at is null
+       where item.tenant_id = $1 and item.order_id = $2::uuid
+       order by item.position, item.id
+       for update of demand, item`,
+      [principal.tenantId, orderId],
+    )
+    for (const row of children.rows) {
+      const metadata = recordValue(row.metadata)
+      const governance = recordValue(metadata.creationGovernance)
+      const workflowCode = nullableString(governance.approvalWorkflowCode)
+      if (
+        governance.submissionAllowed === true
+        && governance.approvalRequired === true
+        && workflowCode
+        && !row.active_approval_instance_id
+      ) {
+        throw new DemandServiceError(
+          'TRAVEL_ORDER_APPROVAL_ACTIVATION_PENDING',
+          'A aprovacao de um dos servicos ainda nao foi iniciada. Tente continuar o envio.',
+          503,
+          { demandId: row.id },
+        )
+      }
+      const legacy = recordValue(metadata.legacySnapshot)
+      if (Object.keys(legacy).length) {
+        await persistLegacyDemandCompatibility(client, principal, legacy)
+      }
+      await enqueueDemandCreationEvents(client, principal, row.id, row.company_id, {
+        blocked: governance.blocked === true,
+        requiresAction: governance.requiresAction === true,
+        submissionAllowed: governance.submissionAllowed === true,
+        approvalRequired: governance.approvalRequired === true,
+        workflowCode,
+        checkpoints: Array.isArray(governance.checkpoints) ? governance.checkpoints : [],
+        travelOrderId: orderId,
+      })
+      await writeAuditEventInTransaction(client, {
+        action: 'travel.demand.create',
+        result: 'success',
+        tenantId: principal.tenantId,
+        actorUserId: realActorUserId(principal),
+        entityType: 'demand',
+        entityId: row.id,
+        metadata: {
+          companyId: row.company_id,
+          employeeId: row.employee_id,
+          demandNumber: row.demand_number,
+          lifecycleStatus: row.lifecycle_status,
+          creationMode: 'company_portal_travel_order',
+          travelOrderId: orderId,
+          replayed: false,
+        },
+      })
+    }
+    await writeAuditEventInTransaction(client, {
+      action: 'travel.order.submit',
+      result: 'success',
+      tenantId: principal.tenantId,
+      actorUserId: realActorUserId(principal),
+      entityType: 'travel_order',
+      entityId: orderId,
+      metadata: {
+        companyId: parent.rows[0].company_id,
+        orderNumber: parent.rows[0].order_number,
+        status: 'submitted',
+        itemCount: children.rows.length,
+        replayed: false,
+      },
+    })
+    await client.query(
+      `update company_portal_travel_orders
+       set status = 'submitted', submitted_at = coalesce(submitted_at, now()),
+           version = case when status = 'submitting' then version + 1 else version end
+       where tenant_id = $1 and id = $2::uuid`,
+      [principal.tenantId, orderId],
+    )
+  })
+}
+
+async function allowHiddenTravelOrderChildren(client: PoolClient): Promise<void> {
+  await client.query(
+    `select set_config('app.allow_hidden_travel_order_child', 'true', true)`,
+  )
+}
+
 async function createDemandInTransaction(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -1415,15 +2195,39 @@ async function createDemandInTransaction(
   inputHash: string,
   hotelDetails: HotelDemandDetailsInput | null,
   airDetails: AirDemandDetailsInput | null,
+  carDetails: PortalCarRequestDetails | null,
+  busDetails: PortalBusRequestDetails | null,
+  travelOrderLink?: { orderId: string; itemId: string },
+  deferActivation = false,
 ): Promise<DemandCreationPreparation> {
+  const actorUserId = realActorUserId(principal)
   await requireRelationalDemandWrite(client, principal.tenantId, snapshot.companyId)
   const company = await loadCompany(client, principal.tenantId, snapshot.companyId)
+  const representation = principal.representation
+    ? await requireActiveOperateRepresentation(client, principal, {
+        action: 'demand.create',
+        companyId: snapshot.companyId,
+        targetUserId: principal.user.id,
+      })
+    : null
   const requester = await loadRequesterForCreate(
     client,
     principal,
     snapshot.companyId,
     snapshot.requesterId,
   )
+  if (
+    snapshot.agencyAssisted
+    && (!requester || !await hasActiveRequesterPortalAccess(client, principal.tenantId, requester))
+  ) {
+    throw new DemandServiceError(
+      'AGENCY_ASSISTED_REQUESTER_PORTAL_ACCESS_REQUIRED',
+      'O solicitante selecionado precisa ter acesso ativo ao portal para receber e escolher a cotacao.',
+      422,
+    )
+  }
+  const requesterUserId = requester?.user_id
+    || (snapshot.agencyAssisted ? null : principal.user.id)
   const identityHints = recordValue(snapshot.metadata.identityHints)
   const identity = await resolveEmployeeIdentityForDemandInTransaction(
     client,
@@ -1450,6 +2254,11 @@ async function createDemandInTransaction(
   const now = new Date().toISOString()
   const demandId = snapshot.id || `atd-${randomUUID()}`
   const assignedTo = resolveInitialDemandAssignee(principal)
+  const creationMode = representation
+    ? 'support_assisted'
+    : snapshot.agencyAssisted
+      ? 'agency_assisted'
+      : 'self_service'
   const initialLegacy = legacyDemandSnapshot({
     ...rawDemand,
     ...(requester ? { solicitante_id: requester.id } : {}),
@@ -1458,6 +2267,8 @@ async function createDemandInTransaction(
     booking_mode: snapshot.bookingMode || undefined,
     passageiro_nome: snapshot.passengerName,
     ...(hotelDetails ? { detalhes_hotel: hotelDetails } : {}),
+    ...(carDetails ? { detalhes_carro: carDetails } : {}),
+    ...(busDetails ? { detalhes_rodoviario: busDetails } : {}),
     cost_center_id: references.costCenterId,
     centro_custo: references.costCenterCode,
   }, {
@@ -1478,11 +2289,13 @@ async function createDemandInTransaction(
     legacySnapshot: initialLegacy,
     identityResolution: identityEvidence(identity),
     creationContext: {
-      mode: snapshot.agencyAssisted ? 'agency_assisted' : 'self_service',
+      mode: creationMode,
       bookingMode: snapshot.bookingMode || 'legacy',
       requestedSubmit: submission.requestedSubmit,
       effectiveSubmit: submission.effectiveSubmit,
-      actorUserId: principal.user.id,
+      actorUserId,
+      representedUserId: representation?.targetUserId || null,
+      representationId: representation?.id || null,
       requesterId: requester?.id || null,
       employeeId: identity.resolution.employeeId,
       channel: textValue(rawDemand.origem),
@@ -1497,11 +2310,13 @@ async function createDemandInTransaction(
        lifecycle_status, lifecycle_version, priority, travel_start_date,
        travel_end_date, destination, cost_center_id, cost_center, estimated_amount, final_amount,
        observations, internal_notes, metadata, create_idempotency_key,
-       create_input_hash, created_by, updated_by, created_at, updated_at
+       create_input_hash, travel_order_id, travel_order_item_id,
+       created_by, updated_by, created_at, updated_at
      ) values (
        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
        'draft', 1, $13, $14::date, $15::date, $16, $17, $18, $19, $20,
-       $21, $22, $23::jsonb, $24, $25, $26, $26, now(), now()
+       $21, $22, $23::jsonb, $24, $25, $26::uuid, $27::uuid,
+       $28, $28, now(), now()
      )`,
     [
       demandId,
@@ -1529,7 +2344,9 @@ async function createDemandInTransaction(
       JSON.stringify(baseMetadata),
       idempotencyKey,
       inputHash,
-      principal.user.id,
+      travelOrderLink?.orderId || null,
+      travelOrderLink?.itemId || null,
+      actorUserId,
     ],
   )
 
@@ -1551,6 +2368,12 @@ async function createDemandInTransaction(
       airDetails,
     )
   }
+  if (carDetails) {
+    await persistNormalizedGroundDemand(client, principal, demandId, snapshot.companyId, 'car', carDetails)
+  }
+  if (busDetails) {
+    await persistNormalizedGroundDemand(client, principal, demandId, snapshot.companyId, 'bus', busDetails)
+  }
 
   await persistIdentityDecision(client, principal, demandId, snapshot, identity)
   await client.query(
@@ -1560,12 +2383,14 @@ async function createDemandInTransaction(
     [
       principal.tenantId,
       demandId,
-      principal.user.id,
+      actorUserId,
       JSON.stringify({
         source: 'api:demands',
         demandNumber,
         idempotencyKey,
-        creationMode: snapshot.agencyAssisted ? 'agency_assisted' : 'self_service',
+        creationMode,
+        representedUserId: representation?.targetUserId || null,
+        representationId: representation?.id || null,
         bookingMode: snapshot.bookingMode || 'legacy',
         requestedSubmit: submission.requestedSubmit,
         effectiveSubmit: submission.effectiveSubmit,
@@ -1582,14 +2407,19 @@ async function createDemandInTransaction(
     airDetails?.passengers?.map((passenger) => ({
       employeeId: passenger.employeeId,
       name: passenger.name,
-    })) || [],
+    })) || (carDetails || busDetails
+      ? groundRequestTravelers((carDetails || busDetails)!).map((traveler) => ({
+          employeeId: traveler.employee_id,
+          name: traveler.name,
+        }))
+      : []),
     identity,
   )
   const checkpoints = submission.effectiveSubmit
     ? ['profile', 'request', 'submission']
     : ['profile', 'request']
   const evaluations: DemandPolicyCheckpointSummary[] = []
-  const fullResults: PolicyEvaluationResult[] = []
+  const fullResults: Array<{ databaseEvaluationId: string; result: PolicyEvaluationResult }> = []
   let lastEvaluationId: string | null = null
 
   for (const checkpoint of checkpoints) {
@@ -1604,7 +2434,7 @@ async function createDemandInTransaction(
         demandId,
         demandNumber,
         now,
-        principal.user.id,
+        requesterUserId,
       )
       const scopes = demandPolicyScopes(
         principal,
@@ -1635,26 +2465,28 @@ async function createDemandInTransaction(
         },
       })
       if (traveler.sequence === 1) lastEvaluationId = evaluation.databaseEvaluationId
-      fullResults.push(evaluation.result)
+      fullResults.push(evaluation)
       evaluations.push(policySummary(checkpoint, evaluation.databaseEvaluationId, evaluation.result, traveler))
     }
   }
 
-  const blocked = fullResults.some((result) => result.blocks.length > 0 || !result.passed)
-  const requiresAction = fullResults.some((result) => (
+  const policyResults = fullResults.map((evaluation) => evaluation.result)
+  const policyEvaluationIds = demandApprovalPolicyEvaluationIds(fullResults)
+  const blocked = policyResults.some((result) => result.blocks.length > 0 || !result.passed)
+  const requiresAction = policyResults.some((result) => (
     result.justificationsRequired.length > 0
     || result.requiredDocuments.length > 0
     || result.requiredActions.some((item) => requiresCompletionBeforeSubmission(item.action))
   ))
   const submissionAllowed = submission.effectiveSubmit && !blocked && !requiresAction
-  const approvals = fullResults.flatMap((result) => result.approvalsRequired)
+  const approvals = policyResults.flatMap((result) => result.approvalsRequired)
   const workflowCode = approvals.length
-    ? await resolveApprovalWorkflowCode(client, principal.tenantId, fullResults)
+    ? await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policyResults)
     : null
   let lifecycleStatus = 'draft'
   let lifecycleVersion = 1
 
-  if (submissionAllowed && lastEvaluationId) {
+  if (submissionAllowed && lastEvaluationId && !deferActivation) {
     const transition = await persistTravelTransitionInTransaction(
       client,
       principal,
@@ -1689,7 +2521,7 @@ async function createDemandInTransaction(
     await client.query(
       `update demands set last_policy_evaluation_id = $3, updated_by = $4
        where tenant_id = $1 and id = $2`,
-      [principal.tenantId, demandId, lastEvaluationId, principal.user.id],
+      [principal.tenantId, demandId, lastEvaluationId, actorUserId],
     )
   }
 
@@ -1704,7 +2536,10 @@ async function createDemandInTransaction(
     updatedAt: now,
   })
   const approvalSubject = {
-    requesterUserId: requester?.user_id || principal.user.id,
+    requesterUserId,
+    assistedActorUserId: representation?.actorUserId || null,
+    lastEditorUserId: representation?.actorUserId || actorUserId,
+    conflictedUserIds: representation ? [representation.actorUserId] : [],
     amount: snapshot.estimatedAmount,
     currency: 'BRL',
     urgent: snapshot.priority === 'urgent',
@@ -1715,6 +2550,7 @@ async function createDemandInTransaction(
     budgetId: references.budgetId,
     budgetAvailable: references.budgetAvailable,
     policyViolationCodes: approvals.map((item) => item.policyCode),
+    policyEvaluationIds,
   }
   const creationGovernance = {
     blocked,
@@ -1741,19 +2577,25 @@ async function createDemandInTransaction(
       demandId,
       String(finalLegacy.status),
       JSON.stringify({ legacySnapshot: finalLegacy, creationGovernance }),
-      principal.user.id,
+      actorUserId,
     ],
   )
-  await persistLegacyDemandCompatibility(client, principal, finalLegacy)
-  await registerCreatedOperationUsage(client, principal)
-  await enqueueDemandCreationEvents(client, principal, demandId, snapshot.companyId, {
-    blocked,
-    requiresAction,
-    submissionAllowed,
-    approvalRequired,
-    workflowCode,
-    checkpoints: evaluations,
-  })
+  if (!deferActivation) {
+    await persistLegacyDemandCompatibility(client, principal, finalLegacy)
+  }
+  if (!deferActivation) {
+    await registerCreatedOperationUsage(client, principal)
+  }
+  if (!deferActivation) {
+    await enqueueDemandCreationEvents(client, principal, demandId, snapshot.companyId, {
+      blocked,
+      requiresAction,
+      submissionAllowed,
+      approvalRequired,
+      workflowCode,
+      checkpoints: evaluations,
+    })
+  }
 
   return {
     demand: finalLegacy,
@@ -1795,14 +2637,19 @@ async function startDemandApproval(
 ): Promise<DemandCreationPreparation> {
   const workflowCode = preparation.approval.workflowCode
   if (!workflowCode || !preparation.policyEvaluationId) return preparation
+  const approvalSubject = demandApprovalSubjectWithPolicyEvaluationIds(
+    preparation.approvalSubject,
+    preparation.policy.checkpoints,
+    preparation.policyEvaluationId,
+  )
   try {
-    const instance = await createApprovalInstance(principal, {
+    const instance = await createTrustedApprovalInstance(principal, {
       workflowCode,
       companyId: preparation.relational.companyId,
       demandId: preparation.relational.id,
       employeeId: preparation.relational.employeeId,
       instanceType: 'merit',
-      subject: preparation.approvalSubject,
+      subject: approvalSubject,
       idempotencyKey: `${idempotencyKey}:approval:${workflowCode}`,
     })
     const lifecycle = await withTenantTransaction(principal.tenantId, async (client) => {
@@ -1841,6 +2688,7 @@ async function startDemandApproval(
     })
     return {
       ...preparation,
+      approvalSubject,
       relational: {
         ...preparation.relational,
         lifecycleStatus: lifecycle.status,
@@ -1859,6 +2707,7 @@ async function startDemandApproval(
     if (!(error instanceof ApprovalServiceError)) throw error
     return {
       ...preparation,
+      approvalSubject,
       approval: {
         required: true,
         configured: false,
@@ -1879,7 +2728,8 @@ async function loadDemandByIdempotency(
   const result = await client.query<DemandCreationRow>(
     `select id, company_id, employee_id, passenger_name_snapshot, demand_number,
             lifecycle_status, lifecycle_version, last_policy_evaluation_id,
-            active_approval_instance_id, create_input_hash, metadata
+            active_approval_instance_id, create_input_hash, metadata,
+            travel_order_id, travel_order_item_id
      from demands
      where tenant_id = $1 and create_idempotency_key = $2 and deleted_at is null
      for update`,
@@ -1888,11 +2738,25 @@ async function loadDemandByIdempotency(
   return result.rows[0] || null
 }
 
-function replayCreation(row: DemandCreationRow, inputHash: string): DemandCreationPreparation {
+function replayCreation(
+  row: DemandCreationRow,
+  inputHash: string,
+  expectedTravelOrderLink?: { orderId: string; itemId: string },
+): DemandCreationPreparation {
   if (row.create_input_hash !== inputHash) {
     throw new DemandServiceError(
       'DEMAND_IDEMPOTENCY_CONFLICT',
       'A chave de idempotencia ja foi utilizada com outro conteudo.',
+      409,
+    )
+  }
+  if (expectedTravelOrderLink && (
+    row.travel_order_id !== expectedTravelOrderLink.orderId
+    || row.travel_order_item_id !== expectedTravelOrderLink.itemId
+  )) {
+    throw new DemandServiceError(
+      'DEMAND_IDEMPOTENCY_TRAVEL_ORDER_CONFLICT',
+      'A demanda idempotente nao pertence ao item deste pedido.',
       409,
     )
   }
@@ -1934,7 +2798,11 @@ function replayCreation(row: DemandCreationRow, inputHash: string): DemandCreati
       errorCode: approvalRequired && !workflowCode ? 'APPROVAL_WORKFLOW_NOT_CONFIGURED' : null,
       message: null,
     },
-    approvalSubject: recordValue(governance.approvalSubject),
+    approvalSubject: demandApprovalSubjectWithPolicyEvaluationIds(
+      recordValue(governance.approvalSubject),
+      checkpoints,
+      row.last_policy_evaluation_id,
+    ),
     policyEvaluationId: row.last_policy_evaluation_id,
     replayed: true,
   }
@@ -2035,6 +2903,29 @@ async function loadExplicitRequester(
   return requester
 }
 
+async function hasActiveRequesterPortalAccess(
+  client: PoolClient,
+  tenantId: string,
+  requester: RequesterRow,
+): Promise<boolean> {
+  if (!requester.user_id) return false
+  const result = await client.query<{ has_active_portal_access: boolean }>(
+    `select exists (
+       select 1
+       from tenant_memberships membership
+       join users portal_user
+         on portal_user.id = membership.user_id
+        and portal_user.status = 'active'
+        and portal_user.deleted_at is null
+       where membership.tenant_id = $1
+         and membership.user_id = $2
+         and membership.status = 'active'
+     ) as has_active_portal_access`,
+    [tenantId, requester.user_id],
+  )
+  return result.rows[0]?.has_active_portal_access === true
+}
+
 function normalizedHotelDetails(snapshot: RelationalDemandSnapshot): HotelDemandDetailsInput | null {
   if (snapshot.serviceType !== 'hotel') return null
   const serviceDetails = recordValue(snapshot.metadata.serviceDetails)
@@ -2054,6 +2945,32 @@ function normalizedAirDetails(snapshot: RelationalDemandSnapshot): AirDemandDeta
     'Informe os trechos aereos com sequencia continua, data e origem/destino em codigo IATA de 3 letras (ex.: REC - Recife).',
     422,
     { issues: airDemandDetailsIssues(rawAirDetails) },
+  )
+}
+
+function normalizedCarDetails(snapshot: RelationalDemandSnapshot): PortalCarRequestDetails | null {
+  if (snapshot.serviceType !== 'car') return null
+  const rawDetails = recordValue(snapshot.metadata.serviceDetails).car
+  if (!recordValue(rawDetails).ground) return null
+  const details = parsePortalCarRequestDetails(rawDetails)
+  if (details) return details
+  throw new DemandServiceError(
+    'CAR_DEMAND_DETAILS_INVALID',
+    'Informe lojas aprovadas, periodo e motorista para a locacao offline.',
+    422,
+  )
+}
+
+function normalizedBusDetails(snapshot: RelationalDemandSnapshot): PortalBusRequestDetails | null {
+  if (snapshot.serviceType !== 'bus') return null
+  const rawDetails = recordValue(snapshot.metadata.serviceDetails).bus
+  if (!recordValue(rawDetails).ground) return null
+  const details = parsePortalBusRequestDetails(rawDetails)
+  if (details) return details
+  throw new DemandServiceError(
+    'BUS_DEMAND_DETAILS_INVALID',
+    'Informe trechos, terminais aprovados e viajantes para o pedido rodoviario offline.',
+    422,
   )
 }
 
@@ -2101,6 +3018,29 @@ function demandSnapshotWithAirItinerary(
   }
 }
 
+function demandSnapshotWithGroundRequest(
+  snapshot: RelationalDemandSnapshot,
+  details: PortalCarRequestDetails | PortalBusRequestDetails,
+): RelationalDemandSnapshot {
+  const travelers = groundRequestTravelers(details)
+  const primary = travelers[0]!
+  const dates = groundRequestDates(details)
+  const serviceDetails = recordValue(snapshot.metadata.serviceDetails)
+  const key = 'primary_driver' in details ? 'car' : 'bus'
+  return {
+    ...snapshot,
+    employeeId: primary.employee_id,
+    passengerName: primary.name,
+    travelStartDate: dates.startDate,
+    travelEndDate: dates.endDate,
+    destination: groundRequestDestination(details),
+    metadata: {
+      ...snapshot.metadata,
+      serviceDetails: { ...serviceDetails, [key]: details },
+    },
+  }
+}
+
 async function persistNormalizedHotelDemand(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -2113,7 +3053,7 @@ async function persistNormalizedHotelDemand(
       tenantId: principal.tenantId,
       demandId,
       companyId,
-      actorUserId: principal.user.id,
+      actorUserId: realActorUserId(principal),
       details,
     })
   } catch (error) {
@@ -2136,11 +3076,63 @@ async function persistNormalizedAirDemand(
       tenantId: principal.tenantId,
       demandId,
       companyId,
-      actorUserId: principal.user.id,
+      actorUserId: realActorUserId(principal),
       details,
     })
   } catch (error) {
     if (error instanceof AirDemandServiceError) {
+      throw new DemandServiceError(error.code, error.message, error.status, error.details)
+    }
+    throw error
+  }
+}
+
+async function persistNormalizedGroundDemand(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demandId: string,
+  companyId: string,
+  service: 'car',
+  details: PortalCarRequestDetails,
+): Promise<void>
+async function persistNormalizedGroundDemand(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demandId: string,
+  companyId: string,
+  service: 'bus',
+  details: PortalBusRequestDetails,
+): Promise<void>
+async function persistNormalizedGroundDemand(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demandId: string,
+  companyId: string,
+  service: 'car' | 'bus',
+  details: PortalCarRequestDetails | PortalBusRequestDetails,
+): Promise<void> {
+  try {
+    if (service === 'car') {
+      await persistGroundDemandDetailsInTransaction(client, {
+        tenantId: principal.tenantId,
+        demandId,
+        companyId,
+        actorUserId: realActorUserId(principal),
+        service,
+        details: details as PortalCarRequestDetails,
+      })
+    } else {
+      await persistGroundDemandDetailsInTransaction(client, {
+        tenantId: principal.tenantId,
+        demandId,
+        companyId,
+        actorUserId: realActorUserId(principal),
+        service,
+        details: details as PortalBusRequestDetails,
+      })
+    }
+  } catch (error) {
+    if (error instanceof OfflineGroundDemandServiceError) {
       throw new DemandServiceError(error.code, error.message, error.status, error.details)
     }
     throw error
@@ -2292,6 +3284,7 @@ function buildDemandPolicyFacts(
   now: string,
   requesterUserIdFallback: string | null,
 ): Record<string, unknown> {
+  const actorUserId = realActorUserId(principal)
   const employee = identity.employee
   const employeeMetadata = recordValue(employee?.metadata)
   const companyMetadata = recordValue(company.metadata)
@@ -2345,7 +3338,9 @@ function buildDemandPolicyFacts(
       advanceDays,
       estimatedAmount: snapshot.estimatedAmount,
       costCenter: snapshot.costCenter || company.default_cost_center,
-      submittedByUserId: principal.user.id,
+      submittedByUserId: actorUserId,
+      representedUserId: principal.representation?.subject.id || null,
+      representationId: principal.representation?.id || null,
     },
     trip: {
       type: inferTripType(destination),
@@ -2491,33 +3486,6 @@ function policySummary(
   }
 }
 
-async function resolveApprovalWorkflowCode(
-  client: PoolClient,
-  tenantId: string,
-  results: PolicyEvaluationResult[],
-): Promise<string | null> {
-  const approvalItems = results.flatMap((result) => result.approvalsRequired)
-  const configured = approvalItems.flatMap((item) => {
-    const workflow = textValue(item.configuration.workflow)
-    return workflow ? [workflow] : []
-  })
-  const versionIds = Array.from(new Set(approvalItems.map((item) => item.policyVersionId)))
-  const dependencies = versionIds.length
-    ? await client.query<{ dependency_key: string }>(
-        `select distinct dependency_key
-         from policy_dependencies
-         where tenant_id = $1 and policy_version_id = any($2::uuid[])
-           and dependency_type = 'workflow' and required = true`,
-        [tenantId, versionIds],
-      )
-    : { rows: [] as Array<{ dependency_key: string }> }
-  const candidates = Array.from(new Set([
-    ...configured,
-    ...dependencies.rows.map((row) => row.dependency_key.trim()).filter(Boolean),
-  ]))
-  return candidates.length === 1 ? candidates[0] : null
-}
-
 async function persistIdentityDecision(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -2561,7 +3529,7 @@ async function persistIdentityDecision(
       confidence,
       identity.resolution.method,
       JSON.stringify(identityEvidence(identity)),
-      confirmed ? principal.user.id : null,
+      confirmed ? realActorUserId(principal) : null,
       confirmed ? new Date().toISOString() : null,
     ],
   )
@@ -2592,7 +3560,7 @@ async function persistLegacyDemandCompatibility(
        value = excluded.value,
        version = app_kv.version + 1,
        updated_by = excluded.updated_by`,
-    [principal.tenantId, JSON.stringify(merged), principal.user.id],
+    [principal.tenantId, JSON.stringify(merged), realActorUserId(principal)],
   )
 }
 
@@ -2798,6 +3766,67 @@ async function supersedeDemandApprovalInTransaction(
   return approvalInstanceId
 }
 
+async function supersedeDemandQuoteRoundsForRequestAdjustment(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demandId: string,
+  reason: string,
+): Promise<string[]> {
+  const actorUserId = realActorUserId(principal)
+  const selections = await client.query<{ id: string; quote_id: string }>(
+    `update travel_quote_selections
+     set status = 'superseded',
+         superseded_at = now(),
+         superseded_by = $3,
+         version = version + 1,
+         updated_at = now()
+     where tenant_id = $1 and demand_id = $2
+       and status in ('selected', 'pending_approval', 'approved')
+     returning id, quote_id`,
+    [principal.tenantId, demandId, actorUserId],
+  )
+  for (const selection of selections.rows) {
+    await writeAuditEventInTransaction(client, {
+      action: 'travel.quote.selection.superseded',
+      result: 'success',
+      tenantId: principal.tenantId,
+      actorUserId,
+      entityType: 'travel_quote_selection',
+      entityId: selection.id,
+      metadata: {
+        demandId,
+        quoteId: selection.quote_id,
+        reason: 'request_adjustment_edited',
+        adjustmentReason: reason,
+      },
+    })
+  }
+  const quotes = await client.query<{ id: string }>(
+    `update travel_quotes
+     set status = 'expired', updated_at = now()
+     where tenant_id = $1 and demand_id = $2
+       and status in ('pending', 'completed', 'selected')
+     returning id`,
+    [principal.tenantId, demandId],
+  )
+  for (const quote of quotes.rows) {
+    await writeAuditEventInTransaction(client, {
+      action: 'travel.quote.superseded',
+      result: 'success',
+      tenantId: principal.tenantId,
+      actorUserId,
+      entityType: 'travel_quote',
+      entityId: quote.id,
+      metadata: {
+        demandId,
+        reason: 'request_adjustment_edited',
+        adjustmentReason: reason,
+      },
+    })
+  }
+  return quotes.rows.map((quote) => quote.id)
+}
+
 function demandDetailsResultFromRow(
   row: DemandListRow,
   replayed: boolean,
@@ -2844,11 +3873,23 @@ async function loadDemandForMutation(
   const result = await client.query<DemandListRow>(
     `select demand.*,
             coalesce(company.trade_name, company.legal_name) as company_name,
-            assigned_user.name as assigned_to_name
+            assigned_user.name as assigned_to_name,
+            travel_order.order_number as travel_order_number,
+            travel_order.status as travel_order_status,
+            travel_order_summary.item_count as travel_order_item_count,
+            travel_order_summary.services as travel_order_services
      from demands demand
      join companies company
        on company.tenant_id = demand.tenant_id and company.id = demand.company_id
      left join users assigned_user on assigned_user.id = demand.assigned_to_user_id
+     left join company_portal_travel_orders travel_order
+       on travel_order.tenant_id = demand.tenant_id and travel_order.id = demand.travel_order_id
+     left join lateral (
+       select count(*)::integer as item_count,
+              coalesce(array_agg(item.service_type order by item.position), '{}'::text[]) as services
+       from company_portal_travel_order_items item
+       where item.tenant_id = demand.tenant_id and item.order_id = demand.travel_order_id
+     ) travel_order_summary on demand.travel_order_id is not null
      where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
      ${lock ? 'for update of demand' : ''}`,
     [tenantId, demandId],
@@ -2979,15 +4020,22 @@ function staleDemandVersion(expectedVersion: number, currentVersion: string | nu
   )
 }
 
-async function registerCreatedOperationUsage(client: PoolClient, principal: RequestPrincipal): Promise<void> {
+async function registerCreatedOperationUsage(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  count = 1,
+): Promise<void> {
+  if (!Number.isSafeInteger(count) || count < 1) {
+    throw new DemandServiceError('OPERATION_USAGE_COUNT_INVALID', 'Quantidade de operacoes invalida.', 500)
+  }
   const usage = await client.query<{ operations_created: string | number }>(
     `insert into tenant_usage_monthly (tenant_id, month_start, operations_created)
-     values ($1, date_trunc('month', current_date)::date, 1)
+     values ($1, date_trunc('month', current_date)::date, $2)
      on conflict (tenant_id, month_start) do update set
-       operations_created = tenant_usage_monthly.operations_created + 1,
+       operations_created = tenant_usage_monthly.operations_created + excluded.operations_created,
        updated_at = now()
      returning operations_created`,
-    [principal.tenantId],
+    [principal.tenantId, count],
   )
   const monthlyOperations = Number(usage.rows[0]?.operations_created || 0)
   if (principal.limits.monthlyOperations && monthlyOperations > principal.limits.monthlyOperations) {
@@ -3013,6 +4061,31 @@ async function registerCreatedOperationUsage(client: PoolClient, principal: Requ
       )
     }
   }
+}
+
+export async function reserveDeferredTravelOrderOperationUsageInTransaction(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  orderId: string,
+  count: number,
+): Promise<void> {
+  const order = await client.query<{ usage_registered_at: string | null }>(
+    `select usage_registered_at
+     from company_portal_travel_orders
+     where tenant_id = $1 and id = $2::uuid
+     for update`,
+    [principal.tenantId, orderId],
+  )
+  if (!order.rows[0]) {
+    throw new DemandServiceError('TRAVEL_ORDER_NOT_FOUND', 'Pedido nao encontrado.', 404)
+  }
+  if (order.rows[0].usage_registered_at) return
+  await registerCreatedOperationUsage(client, principal, count)
+  await client.query(
+    `update company_portal_travel_orders set usage_registered_at = now()
+     where tenant_id = $1 and id = $2::uuid`,
+    [principal.tenantId, orderId],
+  )
 }
 
 async function enqueueDemandCreationEvents(
@@ -3047,7 +4120,7 @@ async function enqueueDemandCreationEvents(
         event.type,
         JSON.stringify({ demandId, companyId, governance }),
         `demand:${demandId}:${event.suffix}`,
-        principal.user.id,
+        realActorUserId(principal),
       ],
     )
   }
@@ -3115,6 +4188,7 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
   const createdAt = isoDate(row.created_at)
   const updatedAt = isoDate(row.updated_at)
   const operationalStatus = operationalStatusFromLifecycle(row.lifecycle_status)
+  const requestAdjustment = readDemandRequestAdjustment(metadata)
   const demand = {
     ...legacy,
     id: row.id,
@@ -3169,7 +4243,32 @@ function mapDemandListItem(row: DemandListRow): RelationalDemandListItem {
     createdAt,
     updatedAt,
     demand,
-    governance: recordValue(metadata.creationGovernance),
+    governance: {
+      ...recordValue(metadata.creationGovernance),
+      requestAdjustmentAllowed: requestAdjustment?.status === 'open',
+      requestAdjustment: requestAdjustment ? {
+        status: requestAdjustment.status,
+        source: requestAdjustment.source,
+        reason: requestAdjustment.reason,
+        allowedActions: requestAdjustment.allowedActions,
+        requestedAt: requestAdjustment.requestedAt,
+        resolvedAt: requestAdjustment.resolvedAt,
+        resolution: requestAdjustment.resolution,
+      } : null,
+    },
+    travelOrder: row.travel_order_id && row.travel_order_number && row.travel_order_status
+      ? {
+          id: row.travel_order_id,
+          orderNumber: row.travel_order_number,
+          status: row.travel_order_status as 'draft' | 'submitting' | 'submitted',
+          itemCount: Number(row.travel_order_item_count || 0),
+          services: (row.travel_order_services || []).filter(
+            (service): service is 'air' | 'hotel' | 'car' | 'bus' => (
+              service === 'air' || service === 'hotel' || service === 'car' || service === 'bus'
+            ),
+          ),
+        }
+      : null,
   }
 }
 
@@ -3231,6 +4330,186 @@ function inferTripType(destination: string | null): 'national' | 'international'
   return 'national'
 }
 
+function prepareDemandDetailsUpdateMutation(
+  demandId: string,
+  rawInput: unknown,
+): PreparedDemandDetailsUpdateMutation {
+  const input = demandDetailsUpdateSchema.parse(rawInput)
+  const parsed = parseLegacyDemands([input.demand])
+  const parsedSnapshot = parsed.demands[0]
+  if (!parsedSnapshot || parsed.failures.length) {
+    throw new DemandServiceError(
+      'DEMAND_INPUT_INVALID',
+      'Os dados atualizados da demanda sao invalidos.',
+      400,
+      { failures: parsed.failures },
+    )
+  }
+  const hotelDetails = normalizedHotelDetails(parsedSnapshot)
+  const airDetails = normalizedAirDetails(parsedSnapshot)
+  const carDetails = normalizedCarDetails(parsedSnapshot)
+  const busDetails = normalizedBusDetails(parsedSnapshot)
+  const snapshot = hotelDetails
+    ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
+    : airDetails
+      ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
+      : carDetails
+        ? demandSnapshotWithGroundRequest(parsedSnapshot, carDetails)
+        : busDetails
+          ? demandSnapshotWithGroundRequest(parsedSnapshot, busDetails)
+          : parsedSnapshot
+  if (snapshot.id !== demandId) {
+    throw new DemandServiceError(
+      'DEMAND_ID_MISMATCH',
+      'O identificador da demanda nao corresponde ao recurso solicitado.',
+      400,
+    )
+  }
+  return {
+    input,
+    snapshot,
+    hotelDetails,
+    airDetails,
+    carDetails,
+    busDetails,
+    inputHash: sha256({
+      operation: 'demand_details_update',
+      demandId,
+      demand: demandMutationHashView(input.demand),
+      expectedVersion: input.expectedVersion,
+      reason: input.reason,
+    }),
+  }
+}
+
+function prepareDemandCreationMutation(
+  principal: RequestPrincipal,
+  rawInput: unknown,
+): PreparedDemandCreationMutation {
+  const input = demandCreateBodySchema.parse(rawInput)
+  const parsed = parseLegacyDemands([input.demand])
+  const parsedSnapshot = parsed.demands[0]
+  if (!parsedSnapshot || parsed.failures.length) {
+    throw new DemandServiceError(
+      'DEMAND_INPUT_INVALID',
+      'Os dados da demanda sao invalidos.',
+      400,
+      { failures: parsed.failures },
+    )
+  }
+  const hotelDetails = normalizedHotelDetails(parsedSnapshot)
+  const airDetails = normalizedAirDetails(parsedSnapshot)
+  const carDetails = normalizedCarDetails(parsedSnapshot)
+  const busDetails = normalizedBusDetails(parsedSnapshot)
+  if (airDetails && !airDetails.passengers?.length) {
+    throw new DemandServiceError(
+      'AIR_DEMAND_PASSENGERS_REQUIRED',
+      'Selecione ao menos um passageiro cadastrado para criar uma demanda aerea.',
+      422,
+    )
+  }
+  const normalizedSnapshot = hotelDetails
+    ? demandSnapshotWithHotelPrimaryTraveler(parsedSnapshot, hotelDetails)
+    : airDetails
+      ? demandSnapshotWithAirItinerary(parsedSnapshot, airDetails)
+      : carDetails
+        ? demandSnapshotWithGroundRequest(parsedSnapshot, carDetails)
+        : busDetails
+          ? demandSnapshotWithGroundRequest(parsedSnapshot, busDetails)
+          : parsedSnapshot
+  const snapshot = {
+    ...normalizedSnapshot,
+    agencyAssisted: resolveAgencyAssistedDemandMode(principal, {
+      declaredAgencyAssisted: normalizedSnapshot.agencyAssisted,
+      requesterId: normalizedSnapshot.requesterId,
+    }),
+  }
+  const submission = resolveDemandCreationSubmission({
+    bookingMode: snapshot.bookingMode,
+    requestedSubmit: input.submit,
+  })
+  return {
+    input,
+    snapshot,
+    submission,
+    hotelDetails,
+    airDetails,
+    carDetails,
+    busDetails,
+    inputHash: sha256({
+      tenantId: principal.tenantId,
+      actorUserId: realActorUserId(principal),
+      representationId: principal.representation?.id || null,
+      demand: demandMutationHashView(input.demand),
+      submit: submission.effectiveSubmit,
+    }),
+  }
+}
+
+function assertServerEnrichmentPreservesMutation(expectedHash: string, actualHash: string): void {
+  if (expectedHash === actualHash) return
+  throw new DemandServiceError(
+    'DEMAND_SERVER_ENRICHMENT_INVALID',
+    'O enriquecimento interno alterou dados controlados pela mutacao.',
+    500,
+  )
+}
+
+function demandMutationHashView(value: Record<string, unknown>): Record<string, unknown> {
+  const demand = { ...value }
+  delete demand.created_at
+  delete demand.updated_at
+  const hotelDetails = recordValue(demand.detalhes_hotel)
+  if (Object.keys(hotelDetails).length && Object.prototype.hasOwnProperty.call(hotelDetails, 'preferences')) {
+    const preferences = { ...recordValue(hotelDetails.preferences) }
+    delete preferences.hotelTariffReference
+    demand.detalhes_hotel = { ...hotelDetails, preferences }
+  }
+  const carDetails = recordValue(demand.detalhes_carro)
+  if (Object.keys(carDetails).length) {
+    delete demand.funcionario_id
+    delete demand.passageiro_nome
+    const ground = { ...recordValue(carDetails.ground) }
+    delete ground.pickupLocationText
+    delete ground.returnLocationText
+    delete ground.preferences
+    const driver = { ...recordValue(carDetails.primary_driver) }
+    delete driver.name
+    delete driver.email
+    demand.detalhes_carro = {
+      ...carDetails,
+      ground,
+      primary_driver: driver,
+    }
+    for (const field of [
+      'pickup_location_name', 'return_location_name', 'supplier_name', 'locadora',
+      'cidade_retirada', 'data_retirada', 'data_devolucao',
+    ]) delete (demand.detalhes_carro as Record<string, unknown>)[field]
+  }
+  const busDetails = recordValue(demand.detalhes_rodoviario)
+  if (Object.keys(busDetails).length) {
+    delete demand.funcionario_id
+    delete demand.passageiro_nome
+    const ground = { ...recordValue(busDetails.ground) }
+    delete ground.preferences
+    const travelers = Array.isArray(busDetails.travelers)
+      ? busDetails.travelers.map((value) => {
+          const traveler = { ...recordValue(value) }
+          delete traveler.name
+          delete traveler.email
+          return traveler
+        })
+      : []
+    demand.detalhes_rodoviario = {
+      ...busDetails,
+      ground,
+      travelers,
+    }
+    delete (demand.detalhes_rodoviario as Record<string, unknown>).leg_snapshots
+  }
+  return demand
+}
+
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -3243,6 +4522,28 @@ function textValue(value: unknown): string | null {
 
 function nullableString(value: unknown): string | null {
   return textValue(value)
+}
+
+function demandApprovalSubjectWithPolicyEvaluationIds(
+  subject: Record<string, unknown>,
+  evaluations: readonly { databaseEvaluationId: unknown }[],
+  fallbackEvaluationId: string | null,
+): Record<string, unknown> {
+  const explicit = Array.isArray(subject.policyEvaluationIds)
+    ? subject.policyEvaluationIds.map((databaseEvaluationId) => ({
+        databaseEvaluationId,
+        retainForApprovalRouting: true,
+      }))
+    : []
+  const fallback = fallbackEvaluationId ? [{ databaseEvaluationId: fallbackEvaluationId }] : []
+  return {
+    ...subject,
+    policyEvaluationIds: demandApprovalPolicyEvaluationIds([
+      ...evaluations,
+      ...explicit,
+      ...fallback,
+    ]),
+  }
 }
 
 function stringValue(value: unknown, fallback: string): string {

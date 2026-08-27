@@ -564,6 +564,7 @@ export function NovaDemandaModal({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (e.target !== e.currentTarget) return
     const hotelPrimaryGuest = detHotel.rooms
       ?.flatMap((room) => room.guests)
       .find((guest) => guest.role === 'responsible')
@@ -600,6 +601,16 @@ export function NovaDemandaModal({
     }
     if (agencyAssistedMode && !solicitanteId) {
       toast.error('Selecione o solicitante que pediu a viagem para a empresa.')
+      return
+    }
+    if (
+      agencyAssistedMode
+      && !editing
+      && !agencyRequesters.some((requester) => (
+        requester.id === solicitanteId && requester.hasActivePortalAccess
+      ))
+    ) {
+      toast.error('O solicitante precisa ter acesso ativo ao portal para receber e escolher a cotação.')
       return
     }
     if (agencyAssistedMode && !effectiveEmployeeId && !preservesLegacyUnlinkedAirPassenger) {
@@ -1037,6 +1048,7 @@ export function NovaDemandaModal({
                   const requester = agencyRequesters.find((item) => item.id === event.target.value)
                   setSolicitanteId(requester?.id || '')
                   setSolicitanteNome(requester?.name || '')
+                  setAgencyRequesterSearch(requester?.name || '')
                 }}
                 className="bbt-input"
                 required
@@ -1053,7 +1065,12 @@ export function NovaDemandaModal({
                   <option value={solicitanteId}>{solicitanteNome || 'Solicitante vinculado'}</option>
                 )}
                 {agencyRequesters.map((requester) => (
-                  <option key={requester.id} value={requester.id}>
+                  <option
+                    key={requester.id}
+                    value={requester.id}
+                    disabled={!requester.hasActivePortalAccess}
+                  >
+                    {!requester.hasActivePortalAccess ? '[SEM ACESSO AO PORTAL] ' : ''}
                     {requester.name}{requester.email ? ` · ${requester.email}` : ''}
                   </option>
                 ))}
@@ -1068,6 +1085,15 @@ export function NovaDemandaModal({
                   {agencyRequesterSearch.trim()
                     ? 'Nenhum solicitante ativo foi encontrado para essa busca.'
                     : 'A empresa não possui solicitante ativo. Cadastre ou ative um solicitante antes de criar a demanda.'}
+                </p>
+              )}
+              {empresaId
+                && !agencyRequesterLoading
+                && agencyRequesters.length > 0
+                && !agencyRequesters.some((requester) => requester.hasActivePortalAccess)
+                && !agencyRequesterError && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  A empresa possui solicitantes cadastrados, mas nenhum deles tem acesso ativo ao portal para receber a escolha.
                 </p>
               )}
             </div>

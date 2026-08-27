@@ -23,6 +23,7 @@ export function requesterOwnDemandExistsSql(
     from requesters requester_scope
     where requester_scope.tenant_id = ${demandAlias}.tenant_id
       and requester_scope.id = ${demandAlias}.requester_id
+      and requester_scope.company_id = ${demandAlias}.company_id
       and requester_scope.user_id = ${userParameter}::uuid
       and requester_scope.status = 'active'
       and requester_scope.deleted_at is null
@@ -46,7 +47,9 @@ export function requesterOwnVoucherExistsSql(
        and requester_scope.id = requester_demand.requester_id
       where requester_demand.tenant_id = ${voucherAlias}.tenant_id
         and requester_demand.id = ${voucherAlias}.demand_id
+        and requester_demand.company_id = ${voucherAlias}.company_id
         and requester_demand.deleted_at is null
+        and requester_scope.company_id = ${voucherAlias}.company_id
         and requester_scope.user_id = ${userParameter}::uuid
         and requester_scope.status = 'active'
         and requester_scope.deleted_at is null
@@ -67,6 +70,7 @@ export function requesterOwnVoucherExistsSql(
           from requesters requester_metadata_scope
           where requester_metadata_scope.tenant_id = ${voucherAlias}.tenant_id
             and requester_metadata_scope.id = coalesce(${voucherAlias}.metadata->>'solicitante_id', '')
+            and requester_metadata_scope.company_id = ${voucherAlias}.company_id
             and requester_metadata_scope.user_id = ${userParameter}::uuid
             and requester_metadata_scope.status = 'active'
             and requester_metadata_scope.deleted_at is null
@@ -76,11 +80,11 @@ export function requesterOwnVoucherExistsSql(
           from employees requester_employee
           where requester_employee.tenant_id = ${voucherAlias}.tenant_id
             and requester_employee.id = ${voucherAlias}.employee_id
+            and requester_employee.company_id = ${voucherAlias}.company_id
             and lower(coalesce(requester_employee.email::text, '')) = lower(${emailParameter}::text)
             and requester_employee.status = 'active'
             and requester_employee.deleted_at is null
         )
-        or lower(coalesce(${voucherAlias}.metadata->>'solicitante_email', '')) = lower(${emailParameter}::text)
       )
     )
   )`

@@ -65,6 +65,7 @@ describe('agency demand participant options', () => {
           email: 'solicitante@example.com',
           department: 'Compras',
           cost_center: 'ADM-001',
+          has_active_portal_access: true,
           total_count: '7',
         }],
       })
@@ -100,6 +101,7 @@ describe('agency demand participant options', () => {
         email: 'solicitante@example.com',
         department: 'Compras',
         costCenter: 'ADM-001',
+        hasActivePortalAccess: true,
       }],
       requesterTotal: 7,
       travelers: [{
@@ -121,6 +123,9 @@ describe('agency demand participant options', () => {
     expect(requesterSql).toContain('requester.tenant_id = $1')
     expect(requesterSql).toContain('requester.company_id = $2')
     expect(requesterSql).toContain("requester.status = 'active'")
+    expect(requesterSql).toContain("membership.status = 'active'")
+    expect(requesterSql).toContain("portal_user.status = 'active'")
+    expect(requesterSql).toContain('portal_user.deleted_at is null')
     expect(requesterSql).toContain('lower(requester.name)')
     expect(requesterSql).toContain('lower(requester.email::text)')
     expect(requesterSql).toContain('count(*) over() as total_count')
@@ -141,6 +146,7 @@ describe('agency demand participant options', () => {
         email: 'maria@example.com',
         department: 'Financeiro',
         cost_center: 'FIN-001',
+        has_active_portal_access: false,
         total_count: '1',
       }],
     })
@@ -161,6 +167,7 @@ describe('agency demand participant options', () => {
     ])
     expect(result).toMatchObject({
       requesterTotal: 1,
+      requesters: [{ hasActivePortalAccess: false }],
       travelers: [],
       travelerTotal: 0,
       limit: 20,

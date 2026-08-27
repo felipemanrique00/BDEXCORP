@@ -11,6 +11,7 @@ import {
 } from '@/lib/hotel-catalog/schema'
 import type {
   HotelCatalogItem,
+  HotelCatalogMedia,
   HotelCatalogRoomType,
   HotelCatalogSupplier,
 } from '@/lib/hotel-catalog/types'
@@ -53,6 +54,7 @@ interface HotelRow extends QueryResultRow {
   version: string | number
   suppliers: unknown
   room_types: unknown
+  media: unknown
   created_at: string | Date
   updated_at: string | Date
   total_count?: string | number
@@ -67,6 +69,10 @@ interface GeographyRow extends QueryResultRow {
   subdivision_name: string
   city_id: string
   city_name: string
+}
+
+interface LockedHotelRow extends QueryResultRow {
+  version: string | number
 }
 
 export class HotelCatalogServiceError extends Error {
@@ -254,11 +260,13 @@ export async function updateHotelCatalog(
   let item: HotelCatalogItem
   try {
     item = await withTenantTransaction(principal.tenantId, async (client) => {
-      const current = await loadHotel(client, principal.tenantId, id, true)
-      if (!current) throw notFound()
-      if (Number(current.version) !== input.expectedVersion) {
-        throw stale(Number(current.version))
+      const locked = await lockHotelRow(client, principal.tenantId, id)
+      if (!locked) throw notFound()
+      if (Number(locked.version) !== input.expectedVersion) {
+        throw stale(Number(locked.version))
       }
+      const current = await loadHotel(client, principal.tenantId, id)
+      if (!current) throw notFound()
       const merged = createHotelCatalogSchema.parse({
         name: input.name ?? current.name,
         countryId: input.countryId ?? current.country_id,
@@ -380,12 +388,40 @@ function hotelSelect(): string {
               'id', room.id, 'code', room.code::text, 'name', room.name,
               'occupancyType', room.occupancy_type, 'maxGuests', room.max_guests,
               'maxAdults', room.max_adults, 'maxChildren', room.max_children,
-              'bedConfiguration', room.bed_configuration, 'isActive', room.is_active
+              'bedConfiguration', room.bed_configuration, 'isActive', room.is_active,
+              'media', coalesce((
+                select jsonb_agg(jsonb_build_object(
+                  'id', media.id, 'altText', media.alt_text,
+                  'sortOrder', media.sort_order, 'roomTypeId', media.room_type_id
+                ) order by media.sort_order, media.created_at, media.id)
+                from hotel_catalog_media media
+                join stored_files file
+                  on file.tenant_id = media.tenant_id and file.id = media.file_id
+                 and file.status = 'active' and file.mime_type = 'image/webp'
+                where media.tenant_id = room.tenant_id
+                  and media.hotel_id = room.hotel_id
+                  and media.room_type_id = room.id
+                  and media.deleted_at is null
+              ), '[]'::jsonb)
             ) order by room.code)
             from hotel_room_types room
             where room.tenant_id = hotel.tenant_id and room.hotel_id = hotel.id
               and room.is_active and room.deleted_at is null
-          ), '[]'::jsonb) as room_types
+          ), '[]'::jsonb) as room_types,
+          coalesce((
+            select jsonb_agg(jsonb_build_object(
+              'id', media.id, 'altText', media.alt_text,
+              'sortOrder', media.sort_order, 'roomTypeId', media.room_type_id
+            ) order by media.sort_order, media.created_at, media.id)
+            from hotel_catalog_media media
+            join stored_files file
+              on file.tenant_id = media.tenant_id and file.id = media.file_id
+             and file.status = 'active' and file.mime_type = 'image/webp'
+            where media.tenant_id = hotel.tenant_id
+              and media.hotel_id = hotel.id
+              and media.room_type_id is null
+              and media.deleted_at is null
+          ), '[]'::jsonb) as media
    from hotels hotel
    left join geo_countries country on country.id = hotel.country_id
    left join geo_subdivisions subdivision on subdivision.id = hotel.subdivision_id
@@ -396,12 +432,25 @@ async function loadHotel(
   client: PoolClient,
   tenantId: string,
   id: string,
-  forUpdate = false,
 ): Promise<HotelRow | null> {
   const result = await client.query<HotelRow>(
     `${hotelSelect()}
+     where hotel.tenant_id = $1 and hotel.id = $2 and hotel.deleted_at is null`,
+    [tenantId, id],
+  )
+  return result.rows[0] || null
+}
+
+async function lockHotelRow(
+  client: PoolClient,
+  tenantId: string,
+  id: string,
+): Promise<LockedHotelRow | null> {
+  const result = await client.query<LockedHotelRow>(
+    `select hotel.version
+     from hotels hotel
      where hotel.tenant_id = $1 and hotel.id = $2 and hotel.deleted_at is null
-     ${forUpdate ? 'for update of hotel' : ''}`,
+     for update of hotel`,
     [tenantId, id],
   )
   return result.rows[0] || null
@@ -603,6 +652,7 @@ function mapHotel(row: HotelRow): HotelCatalogItem {
     billingEnabled: row.billing_enabled,
     billingInfo: row.billing_info,
     amenities: row.amenities || {},
+    media: mapMedia(row.media),
     status: row.status,
     source: row.source,
     version: Number(row.version),
@@ -623,7 +673,25 @@ function mapRoomTypes(value: unknown): HotelCatalogRoomType[] {
   return (value as Array<Omit<HotelCatalogRoomType, 'canonicalCategory'>>).map((room) => ({
     ...room,
     canonicalCategory: resolveCanonicalHotelRoomCategory(room.name),
+    media: mapMedia(room.media),
   }))
+}
+
+function mapMedia(value: unknown): HotelCatalogMedia[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return []
+    const row = raw as Record<string, unknown>
+    const id = typeof row.id === 'string' ? row.id : ''
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return []
+    return [{
+      id,
+      imageUrl: `/api/hotel-catalog/media/${encodeURIComponent(id)}`,
+      altText: typeof row.altText === 'string' ? row.altText : null,
+      sortOrder: Number(row.sortOrder || 0),
+      roomTypeId: typeof row.roomTypeId === 'string' ? row.roomTypeId : null,
+    }]
+  })
 }
 
 function roomTypeInputs(value: unknown): CreateHotelCatalogInput['roomTypes'] {

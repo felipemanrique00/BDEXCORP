@@ -20,6 +20,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'criar_demandas',
+    representationAction: 'quote.select',
     rateLimit: { key: 'offline-travel:quotes:select', limit: 40, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

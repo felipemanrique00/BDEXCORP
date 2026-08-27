@@ -115,9 +115,15 @@ export async function createDemandTransferRequest(
       assigned_to_user_id: string | null
       version: string | number
     }>(
-      `select id, company_id, assigned_to_user_id, version
-       from demands
-       where tenant_id = $1 and id = $2 and deleted_at is null
+      `select demand.id, demand.company_id, demand.assigned_to_user_id, demand.version
+       from demands demand
+       where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
+         and (demand.travel_order_id is null or exists (
+           select 1 from company_portal_travel_orders visible_order
+           where visible_order.tenant_id = demand.tenant_id
+             and visible_order.id = demand.travel_order_id
+             and visible_order.status = 'submitted'
+         ))
        for update`,
       [principal.tenantId, normalizeDemandId(input.demandId)],
     )

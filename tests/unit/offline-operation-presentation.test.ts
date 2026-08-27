@@ -65,7 +65,7 @@ describe('offline operation presentation', () => {
     expect(isHotelDemandLockedForNormalEdit({
       tipo_servico: 'Hotel',
       relational_lifecycle_status: 'approved_for_quotation',
-    })).toBe(false)
+    })).toBe(true)
     expect(isHotelDemandLockedForNormalEdit({
       tipo_servico: 'Aéreo',
       relational_lifecycle_status: 'reserved',

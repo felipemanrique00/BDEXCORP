@@ -19,6 +19,10 @@ const effectiveRoute = fs.readFileSync(
   path.resolve(process.cwd(), 'app/api/me/effective-branding/route.ts'),
   'utf8',
 )
+const hotelMediaService = fs.readFileSync(
+  path.resolve(process.cwd(), 'lib/server/hotel-catalog-media-service.ts'),
+  'utf8',
+)
 
 describe('corporate branding API contracts', () => {
   it('offers audited optimistic GET/PATCH settings scoped by company or group', () => {
@@ -45,10 +49,19 @@ describe('corporate branding API contracts', () => {
     expect(uploadRoute).toContain('BRANDING_IMAGE_MAX_BYTES + 256 * 1024')
     expect(uploadRoute).toContain('{ ok: true, configuration }')
     expect(service).toContain('validateBrandingImageEnvelope')
-    expect(service).toContain('limitInputPixels: BRANDING_IMAGE_MAX_PIXELS')
+    expect(service).toContain('{ allowSvg: true }')
+    expect(service).toContain("const inputPixelLimit = inputFormat === 'svg'")
+    expect(service).toContain('limitInputPixels: inputPixelLimit')
+    expect(service).toContain('BRANDING_SVG_MAX_PIXELS')
+    expect(service.match(/\.timeout\(\{ seconds: BRANDING_IMAGE_PROCESSING_TIMEOUT_SECONDS \}\)/g)).toHaveLength(2)
     expect(service).toContain(".webp({ quality: 90, alphaQuality: 95, effort: 5 })")
+    expect(service).toContain("detectBrandingImageFormat(normalized) !== 'webp'")
+    expect(service).toContain("const BRANDING_LOGO_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const")
+    expect(service).not.toMatch(/BRANDING_LOGO_MIME_TYPES\s*=\s*\[[^\]]*image\/svg\+xml/)
     expect(service).toContain("select pg_advisory_xact_lock(hashtext('tenant-file-quota')")
     expect(service).toContain('insert into corporate_branding_assets')
+    expect(hotelMediaService).toContain('validateBrandingImageEnvelope(bytes, originalName, declaredMimeType)')
+    expect(hotelMediaService).not.toContain('allowSvg')
   })
 
   it('exposes effective branding without embedding private data URLs', () => {

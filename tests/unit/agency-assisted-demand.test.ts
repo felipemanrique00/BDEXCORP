@@ -24,6 +24,10 @@ const demandServiceSource = readFileSync(
   resolve(process.cwd(), 'lib/server/demand-service.ts'),
   'utf8',
 )
+const persistenceClientSource = readFileSync(
+  resolve(process.cwd(), 'lib/demand-persistence-client.ts'),
+  'utf8',
+)
 
 describe('agency-assisted demand', () => {
   it.each(['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'])(
@@ -115,6 +119,32 @@ describe('agency-assisted demand', () => {
     expect(createGuard).toBeGreaterThan(editLegacyWrite)
     expect(createLegacyWrite).toBeGreaterThan(createGuard)
     expect(modalSource).toContain('Nenhum dado foi salvo; tente novamente mais tarde.')
+
+    const normalizedPersistenceClient = persistenceClientSource.replace(/\s+/g, ' ')
+    const persistenceGuard = normalizedPersistenceClient.indexOf(
+      'shouldBlockAgencyAssistedLegacyFallback(error.code, demand.agency_assisted === true)',
+    )
+    const persistenceLegacyWrite = normalizedPersistenceClient.indexOf(
+      'const current = getAllAtendimentos()',
+      persistenceGuard,
+    )
+    expect(persistenceGuard).toBeGreaterThan(-1)
+    expect(persistenceLegacyWrite).toBeGreaterThan(persistenceGuard)
+  })
+
+  it('requires active portal access and never substitutes the agency actor as requester', () => {
+    expect(optionsServiceSource).toContain("membership.status = 'active'")
+    expect(optionsServiceSource).toContain("portal_user.status = 'active'")
+    expect(optionsServiceSource).toContain('portal_user.deleted_at is null')
+    expect(optionsServiceSource).toContain('hasActivePortalAccess: row.has_active_portal_access === true')
+    expect(demandServiceSource).toContain('AGENCY_ASSISTED_REQUESTER_PORTAL_ACCESS_REQUIRED')
+    expect(demandServiceSource).toContain('!await hasActiveRequesterPortalAccess(client, principal.tenantId, requester)')
+    expect(demandServiceSource).toContain("membership.status = 'active'")
+    expect(demandServiceSource).toContain("portal_user.status = 'active'")
+    expect(demandServiceSource).toContain('portal_user.deleted_at is null')
+    expect(demandServiceSource).toContain('snapshot.agencyAssisted ? null : principal.user.id')
+    expect(demandServiceSource).toContain('const approvalSubject = {\n    requesterUserId,')
+    expect(demandServiceSource).not.toContain('requesterUserId: requester?.user_id || principal.user.id')
   })
 
   it('preserves the assisted flag in the relational snapshot', () => {
@@ -146,8 +176,10 @@ describe('agency-assisted demand', () => {
     expect(optionsServiceSource).toContain("await requireCompanyAccess(principal, query.companyId, 'criar_demandas')")
     expect(optionsServiceSource).toContain('employee.tenant_id = $1')
     expect(optionsServiceSource).toContain('employee.company_id = $2')
-    expect(demandServiceSource).toContain("mode: snapshot.agencyAssisted ? 'agency_assisted' : 'self_service'")
-    expect(demandServiceSource).toContain('actorUserId: principal.user.id')
+    expect(demandServiceSource).toContain("? 'support_assisted'")
+    expect(demandServiceSource).toContain("? 'agency_assisted'")
+    expect(demandServiceSource).toContain('const actorUserId = realActorUserId(principal)')
+    expect(demandServiceSource).toContain('representedUserId: representation?.targetUserId || null')
     expect(demandServiceSource).toContain("'demand_created', 'draft'")
     expect(modalSource).toContain('Solicitante do cliente *')
     expect(modalSource).toContain('aria-label="Buscar solicitante do cliente"')

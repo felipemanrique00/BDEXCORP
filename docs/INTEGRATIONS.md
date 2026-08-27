@@ -105,9 +105,9 @@ IDs externos nao sao aceitos como `company_id` interno. O sistema usa:
 Cada associacao inclui tenant e validacao da empresa interna. Mapeamento ausente
 deve ir para conciliacao, nao para a primeira empresa disponivel.
 
-## Wintour e importacoes
+## Wintour - importacao e sincronizacao de vendas
 
-O fluxo Wintour:
+O fluxo de entrada Wintour → BDEX:
 
 - recebe CSV/XLSX/PDF conforme o importador;
 - normaliza campos;
@@ -119,6 +119,30 @@ O fluxo Wintour:
 
 Reimportacao nao deve apagar dados anteriores. Rollback usa snapshots de
 entidades criadas pelo job.
+
+O fluxo de saida BDEX → Wintour e independente do importador. Emissoes
+finalizadas entram numa fila propria, recebem um `idv_externo` numerico estavel,
+sao validadas contra o layout v4 e podem ser baixadas como XML ou transmitidas
+por SOAP. Alteracoes pos-emissao usam o layout DGR-046, somente com os campos
+permitidos e com o numero da venda Wintour previamente reconciliado.
+
+Na cobertura inicial, a preparacao automatica e restrita a emissao aerea
+`manual-offline`, uma venda por bilhete e BRL, com todos os dados reconstruidos
+de fontes relacionais verificaveis. Hotel, Locacao, Rodoviario e qualquer caso
+financeiro ambiguo permanecem bloqueados ate mapeamento e homologacao proprios.
+
+O protocolo retornado por `importaArquivo2` ou `alteraVendas` confirma apenas o
+recebimento na fila. O job so pode ser considerado concluido depois da consulta
+de protocolo ou conciliacao humana. Timeout ou conexao interrompida depois do
+envio produz estado ambiguo e nunca dispara retry automatico. Cada reenvio
+manual cria uma nova tentativa e preserva todos os protocolos anteriores.
+
+O PIN fica exclusivamente no ambiente do servidor e deve ser vinculado a um
+unico tenant por `WINTOUR_TENANT_ID`; o worker recusa reutiliza-lo em outro
+tenant. XML, snapshots de origem e dados de passageiros nao entram na listagem
+JSON nem nos logs operacionais.
+Consulte [Sincronizacao Wintour](./WINTOUR-OUTBOUND-SYNC.md) para ativacao e
+limitacoes de homologacao.
 
 ## IA
 
@@ -191,6 +215,7 @@ Sem essas evidencias, a integracao permanece desabilitada em producao.
 | Tech Reports | Sim | Sim | Consulta por periodo | Nao homologado | Nao | Sim | Nao executado | Desabilitada |
 | Tech transacional | Sim | Sim | Chave nas mutacoes | Nao repetir mutacao automaticamente | Nao distribuido | Sim | Nao executado | Desabilitada |
 | Wintour/importacao | Parser local | Sim | Job/fingerprint/snapshot | Reprocessamento controlado | Nao aplicavel | Sim | Parcial por arquivo | Piloto controlado |
+| Wintour/sincronizacao de vendas | SOAP + XML, desabilitado por padrao | Sim | ID externo estavel + snapshot | Sem retry automatico em ambiguidade | Nao distribuido | Sim | Pendente PIN/homologacao | Implementada, nao homologada |
 | SMTP | Sim | Erros tipados | Token unico | Biblioteca/servidor | Nao | Sim | Nao executado | Desabilitada |
 | OpenAI/Gemini | Sim | Limites e erro explicito | Nao executa mutacao critica | Provedor | Nao distribuido | Sim | Nao executado | Opcional/desabilitada |
 | WhatsApp | Interface/adaptador opcional | Parcial | Evento de envio | Nao homologado | Nao | Sim | Nao executado | Desabilitada |

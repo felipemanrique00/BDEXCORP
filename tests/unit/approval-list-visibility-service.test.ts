@@ -14,12 +14,15 @@ vi.mock('@/lib/server/database', () => ({
 
 import {
   createApprovalInstance,
+  decideApprovalAssignment,
   getApprovalInstanceDetail,
   listApprovalInstances,
 } from '@/lib/server/approval-service'
 
 const USER_ID = '11111111-1111-4111-8111-111111111111'
 const INSTANCE_ID = '22222222-2222-4222-8222-222222222222'
+const STEP_ID = '33333333-3333-4333-8333-333333333333'
+const ASSIGNMENT_ID = '44444444-4444-4444-8444-444444444444'
 
 describe('approval list requester visibility', () => {
   beforeEach(() => {
@@ -57,9 +60,7 @@ describe('approval list requester visibility', () => {
     expect(String(mocks.query.mock.calls[0]?.[0])).not.toContain("subject_snapshot ->> 'requesterUserId'")
   })
 
-  it('rejects requester creation for another owner even with a forged requesterUserId', async () => {
-    mocks.query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-
+  it('rejects direct entity-bound creation before a forged requester snapshot reaches persistence', async () => {
     await expect(createApprovalInstance(principal('requester'), {
       workflowCode: 'hotel-cost',
       companyId: 'company-a',
@@ -68,15 +69,10 @@ describe('approval list requester visibility', () => {
       subject: { requesterUserId: USER_ID, amount: 500, currency: 'BRL' },
       idempotencyKey: 'forged-attempt-1',
     })).rejects.toMatchObject({
-      code: 'APPROVAL_REQUESTER_DEMAND_ACCESS_DENIED',
+      code: 'APPROVAL_ENTITY_INSTANCE_DOMAIN_ORIGIN_REQUIRED',
       status: 403,
     })
-
-    const ownershipSql = String(mocks.query.mock.calls[0]?.[0])
-    expect(ownershipSql).toContain('requester_identity.user_id = $4::uuid')
-    expect(ownershipSql).toContain("requester_identity.status = 'active'")
-    expect(ownershipSql).not.toContain('requesterUserId')
-    expect(mocks.query).toHaveBeenCalledTimes(1)
+    expect(mocks.query).not.toHaveBeenCalled()
   })
 
   it('rejects ownerless approval creation from a requester', async () => {
@@ -88,6 +84,55 @@ describe('approval list requester visibility', () => {
       idempotencyKey: 'ownerless-attempt-1',
     })).rejects.toMatchObject({
       code: 'APPROVAL_REQUESTER_DEMAND_REQUIRED',
+      status: 403,
+    })
+    expect(mocks.query).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      selector: { workflowCode: 'matrix.cost.company.deadbeef' },
+      subject: { amount: 1, urgent: false, currency: 'BRL', product: 'air' },
+    },
+    {
+      selector: { workflowDefinitionId: '99999999-9999-4999-8999-999999999999' },
+      subject: { amount: 999_999, urgent: true, currency: 'BRL', destination: 'FOR' },
+    },
+  ])('rejects public matrix creation before trusting spoofed subject facts ($selector)', async ({ selector, subject }) => {
+    mocks.query.mockResolvedValueOnce({
+      rows: [{ workflow_code: 'matrix.cost.company.deadbeef' }],
+      rowCount: 1,
+    })
+
+    await expect(createApprovalInstance(principal('agent'), {
+      ...selector,
+      companyId: 'company-a',
+      instanceType: 'cost',
+      subject,
+      idempotencyKey: `public-matrix-spoof-${subject.urgent ? 'urgent' : 'amount'}`,
+    })).rejects.toMatchObject({
+      code: 'APPROVAL_MATRIX_INSTANCE_DOMAIN_ORIGIN_REQUIRED',
+      status: 403,
+    })
+
+    expect(mocks.query).toHaveBeenCalledTimes(1)
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('from approval_workflow_definitions')
+  })
+
+  it.each([
+    { demandId: 'demand-pending-merit' },
+    { reservationId: 'reservation-a' },
+    { employeeId: 'employee-a' },
+  ])('rejects a public non-matrix entity binding without any database write (%o)', async (binding) => {
+    await expect(createApprovalInstance(principal('agent'), {
+      workflowCode: 'legacy-non-matrix-workflow',
+      companyId: 'company-a',
+      ...binding,
+      instanceType: 'merit',
+      subject: { amount: 1, urgent: false, currency: 'BRL', product: 'air' },
+      idempotencyKey: `public-entity-spoof-${Object.keys(binding)[0]}`,
+    })).rejects.toMatchObject({
+      code: 'APPROVAL_ENTITY_INSTANCE_DOMAIN_ORIGIN_REQUIRED',
       status: 403,
     })
     expect(mocks.query).not.toHaveBeenCalled()
@@ -299,6 +344,110 @@ describe('approval list requester visibility', () => {
     expect(detail.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'event-internal', payload: { technical: true } }),
     ]))
+  })
+
+  it('returns the committed decision when the first response was lost without mutating again', async () => {
+    const workflowSnapshot = {
+      workflowId: '55555555-5555-4555-8555-555555555555',
+      workflowVersionId: '66666666-6666-4666-8666-666666666666',
+      version: 1,
+      code: 'replay-cost',
+      name: 'Aprovacao de custo',
+      contentHash: 'c'.repeat(64),
+      nodes: [
+        { id: 'start', key: 'start', name: 'Inicio', type: 'start' },
+        { id: 'end', key: 'end', name: 'Fim', type: 'end' },
+      ],
+      edges: [{ id: 'edge', sourceNodeId: 'start', targetNodeId: 'end', sequence: 1 }],
+    }
+    const instanceRow = {
+      id: INSTANCE_ID,
+      company_id: 'company-a',
+      company_name: 'Empresa A',
+      workflow_definition_id: workflowSnapshot.workflowId,
+      workflow_version_id: workflowSnapshot.workflowVersionId,
+      workflow_name: workflowSnapshot.name,
+      demand_id: 'demand-a',
+      reservation_id: null,
+      employee_id: null,
+      demand_number: 'OS-REPLAY-1',
+      demand_service_type: 'air',
+      demand_passenger_name: 'Viajante A',
+      requester_name: 'Solicitante A',
+      demand_destination: 'Sao Paulo',
+      demand_travel_start_date: '2026-09-01',
+      demand_travel_end_date: '2026-09-02',
+      instance_type: 'cost',
+      status: 'approved',
+      version: 2,
+      started_at: '2026-08-17T12:00:00.000Z',
+      completed_at: '2026-08-17T12:01:00.000Z',
+      subject_snapshot: { companyId: 'company-a', amount: 700, currency: 'BRL' },
+      workflow_snapshot: workflowSnapshot,
+    }
+    const input = {
+      decision: 'approved',
+      reason: 'Viagem autorizada',
+      expectedStepVersion: 4,
+      idempotencyKey: 'approval-response-lost-replay',
+      confirmation: true,
+    }
+    mocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: ASSIGNMENT_ID,
+          approval_step_id: STEP_ID,
+          assignee_user_id: USER_ID,
+          status: 'approved',
+          delegated_from_user_id: null,
+          source_reference: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: STEP_ID,
+          approval_instance_id: INSTANCE_ID,
+          node_id: 'approval-node',
+          status: 'approved',
+          version: 5,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [instanceRow] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: '77777777-7777-4777-8777-777777777777',
+          assignment_id: ASSIGNMENT_ID,
+          decision: 'approved',
+          reason: 'Viagem autorizada',
+          decided_by_user_id: USER_ID,
+          acting_for_user_id: null,
+          decision_source: 'human',
+          impersonation_id: null,
+          decision_snapshot: {
+            expectedStepVersion: 4,
+            confirmation: true,
+            representationId: null,
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [instanceRow] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const detail = await decideApprovalAssignment(
+      principal('agent'),
+      ASSIGNMENT_ID,
+      input,
+      { allowedCompanyIds: ['company-a'] },
+    )
+
+    expect(detail).toMatchObject({ id: INSTANCE_ID, status: 'approved' })
+    const sql = mocks.query.mock.calls.map((call) => String(call[0])).join('\n')
+    expect(sql).toContain('from approval_decisions')
+    expect(sql).not.toContain('insert into approval_decisions')
+    expect(sql).not.toContain('update approval_assignments')
+    expect(sql).not.toContain('insert into audit_logs')
   })
 })
 

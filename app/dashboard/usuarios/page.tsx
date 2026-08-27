@@ -12,7 +12,7 @@ import { SearchInput } from '@/components/ui/search-input'
 import { useStore } from '@/lib/store'
 import {
   Users, Plus, Edit2, Trash2, RefreshCcw, Shield, Crown,
-  CheckCircle2, XCircle, Key, Mail, User as UserIcon,
+  CheckCircle2, XCircle, Key, Mail, User as UserIcon, LogIn,
 } from 'lucide-react'
 import { PERMISSOES_PADRAO_POR_PERFIL } from '@/types'
 import type { User, PerfilBBT, Permissoes } from '@/types'
@@ -25,6 +25,7 @@ import {
 import type { CorporateProfile } from '@/types'
 import { CORPORATE_PROFILE_LABELS } from '@/lib/corporate-access'
 import { useCorporateContext } from '@/components/corporate-context-provider'
+import { useImpersonation } from '@/components/impersonation/impersonation-provider'
 import {
   hasPermissionOverrides,
   internalPermissionMutationPayload,
@@ -51,6 +52,7 @@ const PERFIS: { value: PerfilBBT; label: string; desc: string }[] = [
 
 export default function UsuariosPage() {
   const router = useRouter()
+  const { canStartRepresentation, openDialog: openImpersonationDialog } = useImpersonation()
   const [user, setUser] = useState<User | null>(null)
   const [usuarios, setUsuarios] = useState<User[]>([])
   const [busca, setBusca] = useState('')
@@ -255,6 +257,36 @@ export default function UsuariosPage() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
+                      {canStartRepresentation
+                        && isAtivo
+                        && !isInvited
+                        && !isPlatformAdmin
+                        && u.id !== user.id
+                        && userAccessKind(u) === 'corporate'
+                        && u.membership_id && (
+                          <button
+                            type="button"
+                            onClick={() => openImpersonationDialog({
+                              userId: u.id,
+                              membershipId: u.membership_id!,
+                              name: u.name,
+                              email: u.email,
+                              roleKey: u.role_key || u.corporate_profile || '',
+                              ...(u.corporate_profile ? { corporateProfile: u.corporate_profile } : {}),
+                              companyId: u.company_id,
+                              companyIds: u.empresa_ids || (u.company_id ? [u.company_id] : []),
+                              groupIds: u.grupo_ids || [],
+                              // O modal substitui este resumo pelo alvo autoritativo retornado
+                              // pelo servidor antes de habilitar qualquer operacao.
+                              allowedActions: [],
+                            })}
+                            className="rounded-lg p-2 text-slate-500 transition hover:bg-cyan-50 hover:text-cyan-700 focus:outline-none focus:ring-2 focus:ring-cyan-500 dark:hover:bg-cyan-950/30 dark:hover:text-cyan-300"
+                            title={`Acessar como ${u.name}`}
+                            aria-label={`Acessar como ${u.name}`}
+                          >
+                            <LogIn className="h-4 w-4" />
+                          </button>
+                        )}
                       {(u.id !== user.id || canEditOwnAccess) && (
                         <button onClick={() => abrirEditar(u)} className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 text-slate-500 hover:text-blue-600 transition" title="Editar">
                           <Edit2 className="w-4 h-4" />
@@ -858,6 +890,7 @@ function UsuarioModal({
 
 function formatPermKey(k: string): string {
   const labels: Record<string, string> = {
+    gerenciar_personificacoes: 'Acessar como usuario corporativo',
     ver_financeiro: 'Ver financeiro (custo/markup/taxa)',
     editar_financeiro: 'Editar valores financeiros',
     cadastrar_empresas: 'Cadastrar empresas',

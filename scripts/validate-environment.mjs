@@ -69,6 +69,21 @@ if (booleanValue('TECH_REPORTS_ENABLED')) {
   required('TECH_REPORTS_KEY')
   validateUrl('TECH_REPORTS_BASE_URL')
 }
+if (booleanValue('WINTOUR_AUTO_SEND') || booleanValue('WINTOUR_PROTOCOL_POLL_ENABLED')) {
+  if (!booleanValue('WINTOUR_SYNC_ENABLED')) {
+    errors.push('WINTOUR_SYNC_ENABLED deve estar habilitado antes do envio ou consulta automatica.')
+  }
+}
+if (booleanValue('WINTOUR_SYNC_ENABLED')) {
+  required('WINTOUR_PIN')
+  required('WINTOUR_TENANT_ID')
+  if (!/^[\x21-\x7E]{1,128}$/.test(String(values.WINTOUR_PIN || '').trim())) {
+    errors.push('WINTOUR_PIN deve conter de 1 a 128 caracteres ASCII imprimiveis.')
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(values.WINTOUR_TENANT_ID || '').trim())) {
+    errors.push('WINTOUR_TENANT_ID deve ser um UUID canonico do tenant vinculado ao PIN.')
+  }
+}
 if (args.has('--bootstrap')) {
   for (const key of [
     'BOOTSTRAP_TENANT_NAME',

@@ -18,7 +18,8 @@ vi.mock('@/lib/server/audit-log', () => ({
 }))
 
 import {
-  WintourEmissorMappingError,
+  deleteWintourEmissorMapping,
+  listWintourEmissorMappings,
   upsertWintourEmissorMapping,
 } from '@/lib/server/wintour-emissor-mapping-service'
 
@@ -32,24 +33,50 @@ describe('Wintour emissor mapping service', () => {
     mocks.writeAuditEvent.mockResolvedValue(undefined)
   })
 
-  it('blocks users without an import or integration management permission', async () => {
-    const denied = principal()
-    denied.user.permissoes = {
-      ...PERMISSOES_PADRAO_POR_PERFIL.operacional,
-      importar_planilhas: false,
-      gerenciar_integracoes: false,
-      gerenciar_usuarios: false,
-    }
-
-    await expect(upsertWintourEmissorMapping(denied, {
+  it.each([
+    ['list', (actor: RequestPrincipal) => listWintourEmissorMappings(actor)],
+    ['upsert', (actor: RequestPrincipal) => upsertWintourEmissorMapping(actor, {
       codigo: 'ABC',
       userId: '22222222-2222-4222-8222-222222222222',
-    })).rejects.toBeInstanceOf(WintourEmissorMappingError)
+    })],
+    ['delete', (actor: RequestPrincipal) => deleteWintourEmissorMapping(actor, 'ABC')],
+  ])('blocks a company administrator with forged broad permissions from %s', async (_operation, execute) => {
+    const denied = principal({ roleKey: 'company_admin', platformAdmin: false })
+    denied.user.permissoes = {
+      ...PERMISSOES_PADRAO_POR_PERFIL.operacional,
+      importar_planilhas: true,
+      gerenciar_integracoes: true,
+      gerenciar_usuarios: true,
+    }
+
+    await expect(execute(denied)).rejects.toMatchObject({
+      code: 'WINTOUR_EMISSOR_MAPPING_DENIED',
+      status: 403,
+    })
     expect(mocks.withTenantTransaction).not.toHaveBeenCalled()
   })
 
-  it('resolves the target user inside the authenticated tenant and normalizes the code', async () => {
+  it('keeps GET/list strictly read-only without triggering legacy bootstrap writes', async () => {
+    mocks.query.mockResolvedValueOnce({ rows: [] })
+
+    await expect(listWintourEmissorMappings(principal())).resolves.toEqual([])
+
+    expect(mocks.query).toHaveBeenCalledOnce()
+    expect(mocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('from integration_actor_mappings mapping'),
+      ['11111111-1111-4111-8111-111111111111', 'wintour'],
+    )
+    const executedSql = mocks.query.mock.calls.map(([sql]) => String(sql)).join('\n')
+    expect(executedSql).not.toMatch(/\bapp_kv\b/i)
+    expect(executedSql).not.toMatch(/\binsert\b|\bupdate\b|\bdelete\b/i)
+  })
+
+  it.each([
+    ['tenant administrator', { roleKey: 'tenant_admin', platformAdmin: false }],
+    ['platform administrator', { roleKey: 'company_admin', platformAdmin: true }],
+  ])('allows a %s to resolve the target user inside the tenant and normalize the code', async (_authority, overrides) => {
     mocks.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
           user_id: '22222222-2222-4222-8222-222222222222',
@@ -66,7 +93,7 @@ describe('Wintour emissor mapping service', () => {
         }],
       })
 
-    const result = await upsertWintourEmissorMapping(principal(), {
+    const result = await upsertWintourEmissorMapping(principal(overrides), {
       codigo: ' emissor-01 ',
       userId: '22222222-2222-4222-8222-222222222222',
     })
@@ -74,6 +101,14 @@ describe('Wintour emissor mapping service', () => {
     expect(mocks.withTenantTransaction).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111', expect.any(Function))
     expect(mocks.query).toHaveBeenNthCalledWith(
       1,
+      'select value from app_kv where tenant_id = $1 and key = $2',
+      [
+        '11111111-1111-4111-8111-111111111111',
+        'bbt-wintour-emissor-map-v1',
+      ],
+    )
+    expect(mocks.query).toHaveBeenNthCalledWith(
+      2,
       expect.stringContaining('membership.tenant_id = $1'),
       [
         '11111111-1111-4111-8111-111111111111',
@@ -81,7 +116,7 @@ describe('Wintour emissor mapping service', () => {
       ],
     )
     expect(mocks.query).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining('insert into integration_actor_mappings'),
       expect.arrayContaining(['EMISSOR-01']),
     )
@@ -98,15 +133,20 @@ describe('Wintour emissor mapping service', () => {
   })
 })
 
-function principal(): RequestPrincipal {
+function principal(
+  overrides: Pick<RequestPrincipal, 'roleKey' | 'platformAdmin'> = {
+    roleKey: 'tenant_admin',
+    platformAdmin: false,
+  },
+): RequestPrincipal {
   return {
     sessionId: 'session-a',
     tenantId: '11111111-1111-4111-8111-111111111111',
     tenantSlug: 'tenant-a',
     tenantStatus: 'active',
     membershipId: 'membership-a',
-    roleKey: 'company_admin',
-    platformAdmin: false,
+    roleKey: overrides.roleKey,
+    platformAdmin: overrides.platformAdmin,
     planKey: 'business',
     entitlements: {},
     limits: { users: null, storageBytes: null, monthlyOperations: null },

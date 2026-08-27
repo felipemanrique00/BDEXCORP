@@ -49,7 +49,15 @@ const CorporateContext = createContext<CorporateContextState | null>(null)
 
 export const CORPORATE_CONTEXT_CHANGED_EVENT = 'bbt-corporate-context-changed'
 
-export function CorporateContextProvider({ children, user }: { children: React.ReactNode; user: User }) {
+export function CorporateContextProvider({
+  children,
+  user,
+  persistContextSelection = true,
+}: {
+  children: React.ReactNode
+  user: User
+  persistContextSelection?: boolean
+}) {
   const [access, setAccess] = useState<CorporateAccessSummary | null>(user.corporate_access || null)
   const [selection, setSelection] = useState<CorporateViewSelection>(
     () => defaultCorporateViewSelection(user.corporate_access),
@@ -148,6 +156,11 @@ export function CorporateContextProvider({ children, user }: { children: React.R
     setSelection(nextSelection)
     notifySelectionChange(access, nextSelection)
 
+    if (!persistContextSelection) {
+      setIsChanging(false)
+      return
+    }
+
     try {
       const response = await fetch('/api/me/corporate-contexts', {
         method: 'PATCH',
@@ -167,7 +180,7 @@ export function CorporateContextProvider({ children, user }: { children: React.R
     } finally {
       setIsChanging(false)
     }
-  }, [access, isChanging, notifySelectionChange, refreshAccess, selection])
+  }, [access, isChanging, notifySelectionChange, persistContextSelection, refreshAccess, selection])
 
   useEffect(() => {
     const refreshWhenVisible = () => {

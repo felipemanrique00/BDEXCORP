@@ -25,6 +25,7 @@ describe('agency demand participant options client', () => {
         email: 'maria@example.com',
         department: 'Financeiro',
         costCenter: 'FIN-001',
+        hasActivePortalAccess: true,
       }],
       requesterTotal: 1,
       travelers: [],
@@ -54,6 +55,7 @@ describe('agency demand participant options client', () => {
       requesterTotal: 1,
       travelerTotal: 0,
       limit: 100,
+      requesters: [{ hasActivePortalAccess: true }],
     })
   })
 })

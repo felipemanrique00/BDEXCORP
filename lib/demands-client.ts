@@ -1,5 +1,6 @@
 'use client'
 
+import type { AirTravelerProfileIssue } from '@/lib/travelers/air-profile'
 import type { Atendimento, StatusAtendimento } from '@/types'
 
 export interface DemandCreationClientResult {
@@ -66,7 +67,20 @@ export interface RelationalDemandClientItem {
   createdAt: string
   updatedAt: string
   demand: Atendimento
-  governance: Record<string, unknown>
+  governance: DemandItemGovernance
+}
+
+export interface DemandItemGovernance extends Record<string, unknown> {
+  requestAdjustmentAllowed?: boolean
+  requestAdjustment?: {
+    status: 'open' | 'resolved'
+    source: 'merit_approval_rejected' | 'cost_approval_rejected'
+    reason: string
+    allowedActions: Array<'edit_request' | 'choose_another_option'>
+    requestedAt: string
+    resolvedAt: string | null
+    resolution: 'request_edited' | 'new_option_selected' | null
+  } | null
 }
 
 export interface DemandListClientFilters {
@@ -108,6 +122,7 @@ export interface AgencyDemandRequesterOption {
   email: string
   department: string | null
   costCenter: string | null
+  hasActivePortalAccess: boolean
 }
 
 export interface AgencyDemandTravelerOption {
@@ -119,6 +134,7 @@ export interface AgencyDemandTravelerOption {
   jobTitle: string | null
   costCenterId: string | null
   costCenter: string | null
+  profileIssues: AirTravelerProfileIssue[]
 }
 
 export interface AgencyDemandOptionsClientResult {
@@ -689,6 +705,7 @@ function isAgencyDemandRequesterOption(value: unknown): value is AgencyDemandReq
     && typeof item.name === 'string'
     && typeof item.email === 'string'
     && (item.employeeId === null || typeof item.employeeId === 'string')
+    && typeof item.hasActivePortalAccess === 'boolean'
 }
 
 function isAgencyDemandTravelerOption(value: unknown): value is AgencyDemandTravelerOption {
@@ -697,6 +714,7 @@ function isAgencyDemandTravelerOption(value: unknown): value is AgencyDemandTrav
     && typeof item.identificationCode === 'string'
     && typeof item.name === 'string'
     && (item.email === null || typeof item.email === 'string')
+    && Array.isArray(item.profileIssues)
 }
 
 function isDemandPolicy(value: unknown): boolean {

@@ -43,6 +43,10 @@ const CLOSED_DEMAND_STATUSES = new Set([
 export interface OfflineQuoteChoicePanelProps {
   demands: Atendimento[]
   requesterId?: string | null
+  /** Limits the embedded workspace to one demand, as used by the company portal detail. */
+  focusDemandId?: string
+  /** Internal screens may discover eligible demands; embedded corporate views must provide projected demands. */
+  discoverServerDemands?: boolean
   onCompleted: () => void
 }
 
@@ -55,6 +59,8 @@ interface DemandQuoteRound {
 export function OfflineQuoteChoicePanel({
   demands,
   requesterId,
+  focusDemandId,
+  discoverServerDemands = true,
   onCompleted,
 }: OfflineQuoteChoicePanelProps) {
   const [rounds, setRounds] = useState<DemandQuoteRound[]>([])
@@ -79,13 +85,14 @@ export function OfflineQuoteChoicePanel({
       // de o consultor publicar a cotacao no banco relacional. A autorizacao e
       // o estado decisivo sao validados pelo GET server-side logo abaixo.
       if (!isHotelDemand(demand) || isClosedDemand(demand)) continue
+      if (focusDemandId && demand.id !== focusDemandId) continue
       if (completedDemandIds.has(demand.id)) continue
       if (exactRequesterId && String(demand.solicitante_id || '') !== exactRequesterId) continue
       byId.set(demand.id, demand)
     }
 
     return [...byId.values()].sort((left, right) => demandUpdatedAt(right).localeCompare(demandUpdatedAt(left)))
-  }, [completedDemandIds, demands, requesterId, serverDemands])
+  }, [completedDemandIds, demands, focusDemandId, requesterId, serverDemands])
 
   const candidateKey = useMemo(
     () => requesterDemandCandidates.map((demand) => demand.id).sort().join('|'),
@@ -95,7 +102,17 @@ export function OfflineQuoteChoicePanel({
   useEffect(() => {
     let active = true
     setDemandLoadError('')
-    void listDemandsFromServer({ lifecycleStatus: 'pending_choice', limit: 200 })
+    if (!discoverServerDemands) {
+      setServerDemands([])
+      return () => {
+        active = false
+      }
+    }
+    void listDemandsFromServer({
+      lifecycleStatus: 'pending_choice',
+      serviceType: 'hotel',
+      limit: 200,
+    })
       .then((result) => {
         if (active) setServerDemands(result.items.map((item) => item.demand))
       })
@@ -107,7 +124,7 @@ export function OfflineQuoteChoicePanel({
     return () => {
       active = false
     }
-  }, [reloadToken])
+  }, [discoverServerDemands, reloadToken])
 
   useEffect(() => {
     setClock(Date.now())

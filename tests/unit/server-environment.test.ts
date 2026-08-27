@@ -21,6 +21,11 @@ describe('server environment', () => {
     vi.stubEnv('TECH_API_BASE_URL', '')
     vi.stubEnv('TECH_REPORTS_ENABLED', 'false')
     vi.stubEnv('TECH_REPORTS_BASE_URL', '')
+    vi.stubEnv('WINTOUR_SYNC_ENABLED', 'false')
+    vi.stubEnv('WINTOUR_TENANT_ID', '')
+    vi.stubEnv('WINTOUR_AUTO_SEND', 'false')
+    vi.stubEnv('WINTOUR_PROTOCOL_POLL_ENABLED', 'false')
+    vi.stubEnv('WINTOUR_PIN', '')
 
     const { getServerEnvironment } = await import('@/lib/server/environment')
     const environment = getServerEnvironment()
@@ -29,6 +34,70 @@ describe('server environment', () => {
     expect(environment.WHATSAPP_API_BASE_URL).toBeUndefined()
     expect(environment.TECH_API_BASE_URL).toBeUndefined()
     expect(environment.TECH_REPORTS_BASE_URL).toBeUndefined()
+    expect(environment.WINTOUR_PIN).toBeUndefined()
+    expect(environment.WINTOUR_TENANT_ID).toBeUndefined()
+    expect(environment.WINTOUR_SYNC_ENABLED).toBe(false)
+  })
+
+  it('bloqueia Wintour habilitado sem PIN', async () => {
+    vi.stubEnv('WINTOUR_SYNC_ENABLED', 'true')
+    vi.stubEnv('WINTOUR_TENANT_ID', '11111111-1111-4111-8111-111111111111')
+    vi.stubEnv('WINTOUR_PIN', '')
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    expect(() => getServerEnvironment()).toThrow(
+      /WINTOUR_PIN e obrigatorio quando WINTOUR_SYNC_ENABLED=true/,
+    )
+  })
+
+  it('bloqueia Wintour habilitado sem vincular o PIN a um tenant', async () => {
+    vi.stubEnv('WINTOUR_SYNC_ENABLED', 'true')
+    vi.stubEnv('WINTOUR_TENANT_ID', '')
+    vi.stubEnv('WINTOUR_PIN', 'pin-de-homologacao')
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    expect(() => getServerEnvironment()).toThrow(
+      /WINTOUR_TENANT_ID e obrigatorio quando WINTOUR_SYNC_ENABLED=true/,
+    )
+  })
+
+  it('bloqueia envio ou consulta automatica sem habilitar o conector', async () => {
+    vi.stubEnv('WINTOUR_SYNC_ENABLED', 'false')
+    vi.stubEnv('WINTOUR_AUTO_SEND', 'true')
+    vi.stubEnv('WINTOUR_PROTOCOL_POLL_ENABLED', 'true')
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    expect(() => getServerEnvironment()).toThrow(
+      /WINTOUR_SYNC_ENABLED deve estar habilitado/,
+    )
+  })
+
+  it('aceita Wintour explicitamente habilitado com PIN server-side', async () => {
+    vi.stubEnv('WINTOUR_SYNC_ENABLED', 'true')
+    vi.stubEnv('WINTOUR_TENANT_ID', '11111111-1111-4111-8111-111111111111')
+    vi.stubEnv('WINTOUR_AUTO_SEND', 'false')
+    vi.stubEnv('WINTOUR_PROTOCOL_POLL_ENABLED', 'false')
+    vi.stubEnv('WINTOUR_PIN', 'pin-de-homologacao')
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    const environment = getServerEnvironment()
+    expect(environment.WINTOUR_SYNC_ENABLED).toBe(true)
+    expect(environment.WINTOUR_TENANT_ID).toBe('11111111-1111-4111-8111-111111111111')
+    expect(environment.WINTOUR_PIN).toBe('pin-de-homologacao')
+  })
+
+  it('alinha o PIN Wintour ao envelope SOAP e rejeita formato incompativel', async () => {
+    vi.stubEnv('WINTOUR_SYNC_ENABLED', 'true')
+    vi.stubEnv('WINTOUR_TENANT_ID', '11111111-1111-4111-8111-111111111111')
+    vi.stubEnv('WINTOUR_PIN', `pin-${'x'.repeat(125)}`)
+
+    const { getServerEnvironment } = await import('@/lib/server/environment')
+
+    expect(() => getServerEnvironment()).toThrow(/WINTOUR_PIN/)
   })
 
   it('continua bloqueando SMTP habilitado sem configuracao completa', async () => {

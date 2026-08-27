@@ -12,6 +12,7 @@ export function requiresAdministrativeMfa(principal: RequestPrincipal): boolean 
       permissions?.gerenciar_workflows ||
       permissions?.gerenciar_integracoes ||
       permissions?.gerenciar_ia ||
-      permissions?.gerenciar_automacoes,
+      permissions?.gerenciar_automacoes ||
+      permissions?.gerenciar_personificacoes,
     )
 }

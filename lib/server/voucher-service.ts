@@ -71,13 +71,40 @@ export class VoucherServiceError extends Error {
 
 export async function listVouchers(
   principal: RequestPrincipal,
-  filters: { companyId?: string; search?: string; limit?: number; offset?: number } = {},
+  filters: {
+    companyId?: string
+    companyIds?: readonly string[]
+    demandId?: string
+    search?: string
+    limit?: number
+    offset?: number
+    bootstrapLegacy?: boolean
+  } = {},
 ): Promise<{ items: VoucherEmitido[]; total: number }> {
   const allowedCompanyIds = voucherCompanyIds(principal)
   if (filters.companyId) {
     await requireCompanyAccess(principal, filters.companyId, 'ver_vouchers')
   }
-  const companyIds = filters.companyId ? [filters.companyId] : allowedCompanyIds
+  const scopedCompanyIds = filters.companyIds
+    ? [...new Set(filters.companyIds.map((companyId) => companyId.trim()).filter(Boolean))]
+    : null
+  if (filters.companyIds && !scopedCompanyIds?.length) {
+    throw new VoucherServiceError(
+      'VOUCHER_COMPANY_SCOPE_EMPTY',
+      'Informe ao menos uma empresa autorizada para consultar vouchers.',
+      403,
+    )
+  }
+  if (scopedCompanyIds) {
+    for (const companyId of scopedCompanyIds) {
+      await requireCompanyAccess(principal, companyId, 'ver_vouchers')
+    }
+  }
+  const companyIds = filters.companyId
+    ? [filters.companyId]
+    : scopedCompanyIds
+      ? scopedCompanyIds
+      : allowedCompanyIds
   const limit = Math.max(1, Math.min(500, Number(filters.limit || 100)))
   const offset = Math.max(0, Number(filters.offset || 0))
   const search = filters.search?.trim()
@@ -86,7 +113,9 @@ export async function listVouchers(
   if (!companyIds.length) return { items: [], total: 0 }
 
   return withTenantTransaction(principal.tenantId, async (client) => {
-    const bootstrap = await bootstrapLegacyVouchers(client, principal)
+    const bootstrap = filters.bootstrapLegacy === false
+      ? { unresolved: [] }
+      : await bootstrapLegacyVouchers(client, principal)
     const parameters: unknown[] = [principal.tenantId, companyIds]
     const clauses = [
       'voucher.tenant_id = $1',
@@ -100,6 +129,10 @@ export async function listVouchers(
         `$${parameters.length - 1}`,
         `$${parameters.length}`,
       ))
+    }
+    if (filters.demandId) {
+      parameters.push(filters.demandId)
+      clauses.push(`voucher.demand_id = $${parameters.length}`)
     }
     if (search) {
       parameters.push(search)
@@ -123,7 +156,9 @@ export async function listVouchers(
        limit $${parameters.length - 1} offset $${parameters.length}`,
       parameters,
     )
-    await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
+    if (filters.bootstrapLegacy !== false) {
+      await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
+    }
     const enrichedItems = await enrichVouchersFromDatabase(
       client,
       principal.tenantId,
@@ -144,14 +179,19 @@ export async function listVouchers(
 export async function getVoucher(
   principal: RequestPrincipal,
   rawVoucherId: string,
+  options: { bootstrapLegacy?: boolean } = {},
 ): Promise<VoucherEmitido> {
   const voucherId = voucherIdentifierSchema.parse(rawVoucherId)
   return withTenantTransaction(principal.tenantId, async (client) => {
-    const bootstrap = await bootstrapLegacyVouchers(client, principal)
+    const bootstrap = options.bootstrapLegacy === false
+      ? { unresolved: [] }
+      : await bootstrapLegacyVouchers(client, principal)
     const row = await loadVoucherForUpdate(client, principal.tenantId, voucherId, false)
     await requireCompanyAccess(principal, row.company_id, 'ver_vouchers')
     await requireRequesterVoucherReadAccess(client, principal, row.id)
-    await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
+    if (options.bootstrapLegacy !== false) {
+      await syncVoucherCompatibilityProjection(client, principal, bootstrap.unresolved)
+    }
     const voucher = mapVoucherRow(row)
     const [enriched] = await enrichVouchersFromDatabase(client, principal.tenantId, [voucher])
     const [presented] = await attachVoucherPresentationSettings(

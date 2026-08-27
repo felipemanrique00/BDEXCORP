@@ -23,6 +23,7 @@ import { EmployeeIdentityError } from '@/lib/server/employee-identity-service'
 import { FinanceServiceError } from '@/lib/server/finance-service'
 import { GeographyServiceError } from '@/lib/server/geography-service'
 import { HotelCatalogServiceError } from '@/lib/server/hotel-catalog-service'
+import { HotelCatalogMediaServiceError } from '@/lib/server/hotel-catalog-media-service'
 import { IntegrationCompanyMappingError } from '@/lib/server/integration-company-mapping-service'
 import { IntegrationProviderServiceError } from '@/lib/server/integration-provider-service'
 import { IntelligenceServiceError } from '@/lib/server/intelligence-service'
@@ -37,6 +38,8 @@ import { ReportSnapshotError } from '@/lib/server/report-snapshot-service'
 import { TravelGovernanceError } from '@/lib/server/travel-governance-service'
 import { TravelOperationReconciliationError } from '@/lib/server/travel-operation-reconciliation-service'
 import { TravelRefundError } from '@/lib/server/travel-refund-service'
+import { TravelerManagementSettingsServiceError } from '@/lib/server/traveler-management-settings-service'
+import { TravelerProfileManagementError } from '@/lib/server/traveler-profile-management-service'
 import { VoucherServiceError } from '@/lib/server/voucher-service'
 import { VoucherPresentationServiceError } from '@/lib/server/voucher-presentation-service'
 import { WintourEmissorMappingError } from '@/lib/server/wintour-emissor-mapping-service'
@@ -60,6 +63,8 @@ export function governanceErrorResponse(error: unknown, requestId: string): Next
     || error instanceof TravelOperationReconciliationError
     || error instanceof VoucherServiceError
     || error instanceof VoucherPresentationServiceError
+    || error instanceof TravelerManagementSettingsServiceError
+    || error instanceof TravelerProfileManagementError
     || error instanceof CorporateBrandingServiceError
   ) {
     return NextResponse.json(
@@ -82,6 +87,7 @@ export function governanceErrorResponse(error: unknown, requestId: string): Next
     || error instanceof FinanceServiceError
     || error instanceof GeographyServiceError
     || error instanceof HotelCatalogServiceError
+    || error instanceof HotelCatalogMediaServiceError
     || error instanceof CorporateFinanceServiceError
     || error instanceof ManualHotelBookingError
     || error instanceof IntegrationCompanyMappingError

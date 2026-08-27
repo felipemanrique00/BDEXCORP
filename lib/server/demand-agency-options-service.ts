@@ -31,6 +31,7 @@ interface RequesterOptionRow extends QueryResultRow {
   email: string
   department: string | null
   cost_center: string | null
+  has_active_portal_access: boolean
   total_count: string | number
 }
 
@@ -55,6 +56,7 @@ export interface AgencyDemandRequesterOption {
   email: string
   department: string | null
   costCenter: string | null
+  hasActivePortalAccess: boolean
 }
 
 export interface AgencyDemandTravelerOption {
@@ -114,6 +116,17 @@ export async function listAgencyDemandOptions(
       const requesterResult = await client.query<RequesterOptionRow>(
         `select requester.id, requester.employee_id, requester.name,
                 requester.email::text, requester.department, requester.cost_center,
+                exists (
+                  select 1
+                  from tenant_memberships membership
+                  join users portal_user
+                    on portal_user.id = membership.user_id
+                   and portal_user.status = 'active'
+                   and portal_user.deleted_at is null
+                  where membership.tenant_id = requester.tenant_id
+                    and membership.user_id = requester.user_id
+                    and membership.status = 'active'
+                ) as has_active_portal_access,
                 count(*) over() as total_count
          from requesters requester
          where ${requesterClauses.join(' and ')}
@@ -167,6 +180,7 @@ export async function listAgencyDemandOptions(
         email: row.email,
         department: row.department,
         costCenter: row.cost_center,
+        hasActivePortalAccess: row.has_active_portal_access === true,
       })),
       requesterTotal: requesterRows[0] ? Number(requesterRows[0].total_count) : 0,
       travelers: travelerRows.map((row) => ({

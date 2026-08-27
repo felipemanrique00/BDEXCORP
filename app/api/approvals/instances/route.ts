@@ -9,9 +9,12 @@ import { governanceBodyErrorResponse, governanceErrorResponse } from '@/lib/serv
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+const INTERNAL_APPROVAL_ROLES = ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator']
+
 const querySchema = z.object({
   status: z.enum(['pending', 'in_progress', 'approved', 'rejected', 'cancelled', 'expired', 'failed', 'superseded']).optional(),
   companyId: z.string().trim().min(1).max(200).optional(),
+  demandId: z.string().trim().min(1).max(200).optional(),
   assignedToMe: z.coerce.boolean().optional(),
   overdueOnly: z.coerce.boolean().optional(),
   search: z.string().trim().max(200).optional(),
@@ -23,6 +26,7 @@ export async function GET(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'ver_aprovacoes',
+    roleKeys: INTERNAL_APPROVAL_ROLES,
     rateLimit: { key: 'approval-instances:list', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
@@ -39,6 +43,7 @@ export async function POST(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'criar_demandas',
+    roleKeys: INTERNAL_APPROVAL_ROLES,
     rateLimit: { key: 'approval-instances:create', limit: 40, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

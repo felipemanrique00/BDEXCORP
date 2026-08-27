@@ -726,6 +726,44 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
     })
     expect(issuance.voucherId).toMatch(/^H-/)
 
+    const emittedRateObservation = await tenantTransaction(pool, tenantId, async (client) => {
+      const result = await client.query<{
+        hotel_id: string
+        hotel_supplier_id: string
+        supplier_id: string
+        room_category: string
+        nightly_amount: string
+        nightly_tax_amount: string
+        option_service_fee_amount: string
+        currency: string
+        quote_snapshot_hash: string
+        operational_supplier_name: string
+        supplier_matches_quote: boolean
+      }>(
+        `select hotel_id, hotel_supplier_id::text, supplier_id::text,
+                room_category, nightly_amount::text, nightly_tax_amount::text,
+                option_service_fee_amount::text, currency, quote_snapshot_hash,
+                operational_supplier_name, supplier_matches_quote
+         from hotel_emission_rate_observations
+         where tenant_id = $1 and emission_id = $2`,
+        [tenantId, issuance.emissionId],
+      )
+      return result.rows[0]
+    })
+    expect(emittedRateObservation).toMatchObject({
+      hotel_id: hotelIds[1],
+      hotel_supplier_id: hotelSupplierLinkIds[1],
+      supplier_id: supplierIds[1],
+      room_category: 'Executivo Single',
+      nightly_amount: '270.00',
+      nightly_tax_amount: '27.00',
+      option_service_fee_amount: '40.00',
+      currency: 'BRL',
+      quote_snapshot_hash: persisted.snapshot_hash,
+      operational_supplier_name: operationalSupplierName,
+      supplier_matches_quote: false,
+    })
+
     const voucher = await getVoucher(agentPrincipal, issuance.voucherId!)
     expect(voucher).toMatchObject({
       id: issuance.voucherId,

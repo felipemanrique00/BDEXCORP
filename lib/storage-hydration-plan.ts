@@ -33,6 +33,10 @@ export function storageKeysForDashboardPath(pathname: string): SharedStorageKey[
   const path = normalizePath(pathname)
 
   if (path === '/dashboard/configuracoes') return [...RESETTABLE_SHARED_STORAGE_KEYS]
+  if (path === '/dashboard/portal-empresa-lab') {
+    // The isolated portal is hydrated exclusively through projected BFF DTOs.
+    return []
+  }
   if (path.startsWith('/dashboard/relatorios') || path === '/dashboard/portal-empresa') return [...REPORT_KEYS]
   if (path === '/dashboard' || path.startsWith('/dashboard/risco')) {
     return [...REPORT_KEYS]

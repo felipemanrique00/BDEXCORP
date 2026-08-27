@@ -27,6 +27,7 @@ export const dynamic = 'force-dynamic'
 
 const MAX_STORAGE_BODY_BYTES = 64 * 1024 * 1024
 const MAX_DELETE_BODY_BYTES = 64 * 1024
+const INTERNAL_STORAGE_ROLES = ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator']
 const LEGACY_STORAGE_HEADERS = {
   Deprecation: 'true',
   Warning: '299 BDEX "API de storage generico em processo de desativacao; use APIs de dominio"',
@@ -36,6 +37,7 @@ const LEGACY_STORAGE_HEADERS = {
 export async function GET(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    roleKeys: INTERNAL_STORAGE_ROLES,
     rateLimit: { key: 'storage:get', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
@@ -95,6 +97,7 @@ function pickEntries(entries: Record<string, unknown>, keys: readonly string[]):
 export async function PUT(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    roleKeys: INTERNAL_STORAGE_ROLES,
     rateLimit: { key: 'storage:put', limit: 240, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
@@ -197,6 +200,7 @@ export async function DELETE(request: Request) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'gerenciar_usuarios',
+    roleKeys: INTERNAL_STORAGE_ROLES,
     rateLimit: { key: 'storage:delete', limit: 30, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

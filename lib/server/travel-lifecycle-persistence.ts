@@ -26,6 +26,7 @@ export async function persistTravelTransitionInTransaction(
   command: TravelLifecycleCommand,
   input: PersistTravelTransitionInput,
 ): Promise<{ replayed: boolean; plan: TravelTransitionPlan | null }> {
+  const actorUserId = principal.actor?.user.id || principal.user.id
   const existing = await client.query<{ command: string }>(
     `select command from travel_state_events
      where tenant_id = $1 and demand_id = $2 and idempotency_key = $3`,
@@ -46,14 +47,23 @@ export async function persistTravelTransitionInTransaction(
     command,
     expectedVersion: current.version,
     idempotencyKey: input.idempotencyKey,
-    actorUserId: principal.user.id,
+    actorUserId,
     occurredAt: new Date().toISOString(),
     requirements: input.requirements,
     metadata: input.metadata,
   })
   const updated = nextTravelRecord(current, plan)
   const operationalStatus = operationalStatusFromLifecycle(updated.status)
-  const clearActiveApproval = ['approve_merit', 'approve_cost', 'reject', 'cancel', 'expire', 'fail'].includes(command)
+  const clearActiveApproval = [
+    'approve_merit',
+    'approve_cost',
+    'return_to_choice',
+    'return_for_adjustment',
+    'reject',
+    'cancel',
+    'expire',
+    'fail',
+  ].includes(command)
   await client.query(
     `select
        set_config('app.lifecycle_command', $1, true),
@@ -86,7 +96,7 @@ export async function persistTravelTransitionInTransaction(
      where tenant_id = $1 and id = $2 and lifecycle_version = $3`,
     [
       principal.tenantId, current.demandId, plan.previousVersion, updated.status, updated.version,
-      plan.occurredAt, plan.policyEvaluationId, plan.approvalInstanceId, principal.user.id,
+      plan.occurredAt, plan.policyEvaluationId, plan.approvalInstanceId, actorUserId,
       clearActiveApproval,
       operationalStatus,
     ],
@@ -104,7 +114,7 @@ export async function persistTravelTransitionInTransaction(
      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)`,
     [
       principal.tenantId, current.demandId, command, plan.fromStatus, plan.toStatus,
-      plan.nextVersion, plan.idempotencyKey, principal.user.id, uuidOrNull(requestId),
+      plan.nextVersion, plan.idempotencyKey, actorUserId, uuidOrNull(requestId),
       plan.policyEvaluationId, plan.approvalInstanceId, input.providerOperationId || null,
       JSON.stringify(plan.metadata),
     ],
@@ -116,7 +126,7 @@ export async function persistTravelTransitionInTransaction(
     [
       principal.tenantId,
       current.demandId,
-      principal.user.id,
+      actorUserId,
       plan.fromStatus,
       plan.toStatus,
       JSON.stringify({ command, lifecycleVersion: plan.nextVersion }),

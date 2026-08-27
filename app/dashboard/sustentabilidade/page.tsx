@@ -47,7 +47,7 @@ export default function SustentabilidadePage() {
     const total = pegadas.reduce((s, x) => s + x.p.kg_co2, 0)
 
     const porTipo: Record<TipoServico, number> = {
-      'Aéreo': 0, 'Hotel': 0, 'Carro': 0, 'Pacote': 0, 'Outro': 0,
+      'Aéreo': 0, 'Hotel': 0, 'Carro': 0, 'Rodoviário': 0, 'Pacote': 0, 'Outro': 0,
     }
     pegadas.forEach((x) => { porTipo[x.p.tipo as TipoServico] = (porTipo[x.p.tipo as TipoServico] || 0) + x.p.kg_co2 })
 
@@ -88,6 +88,7 @@ export default function SustentabilidadePage() {
     'Aéreo': '#0EA5E9',
     'Hotel': '#10B981',
     'Carro': '#F59E0B',
+    'Rodoviário': '#EA580C',
     'Pacote': '#8B5CF6',
     'Outro': '#94A3B8',
   }

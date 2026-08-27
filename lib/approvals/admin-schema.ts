@@ -122,11 +122,15 @@ export const createApprovalInstanceSchema = z.object({
 export const approvalSubjectInputSchema = z.object({
   groupId: z.string().trim().min(1).max(200).nullable().optional(),
   branchId: z.string().trim().min(1).max(200).nullable().optional(),
+  department: z.string().trim().min(1).max(240).nullable().optional(),
   requesterUserId: z.string().uuid().nullable().optional(),
   travelerUserId: z.string().uuid().nullable().optional(),
   managerUserId: z.string().uuid().nullable().optional(),
   lastEditorUserId: z.string().uuid().nullable().optional(),
   financialExecutorUserId: z.string().uuid().nullable().optional(),
+  assistedActorUserId: z.string().uuid().nullable().optional(),
+  conflictedUserIds: z.array(z.string().uuid()).max(100).default([]),
+  policyEvaluationIds: z.array(z.string().uuid()).max(100).default([]),
   costCenterId: z.string().uuid().nullable().optional(),
   projectId: z.string().uuid().nullable().optional(),
   accountId: z.string().trim().min(1).max(200).nullable().optional(),
@@ -145,7 +149,10 @@ export const approvalSubjectInputSchema = z.object({
 }).passthrough()
 
 export const approvalDecisionInputSchema = z.object({
-  decision: z.enum(['approved', 'rejected', 'abstained']),
+  // Abstencao ainda nao possui estado proprio em approval_assignments. Aceita-la
+  // aqui a convertia silenciosamente em rejeicao; mantemos apenas decisoes com
+  // semantica implementada ate o motor suportar abstencao de ponta a ponta.
+  decision: z.enum(['approved', 'rejected']),
   reason: z.string().trim().min(3).max(2_000),
   expectedStepVersion: z.number().int().positive(),
   idempotencyKey: z.string().trim().min(8).max(200),
@@ -176,7 +183,7 @@ export const revokeApprovalDelegationSchema = z.object({
   reason: z.string().trim().min(10).max(2_000),
 }).strict()
 
-export const approvalAuthorityInputSchema = z.object({
+const approvalAuthorityObjectSchema = z.object({
   membershipId: z.string().uuid(),
   approvalKind: z.enum([
     'merit', 'cost', 'budget', 'operational', 'security', 'international', 'national',
@@ -187,6 +194,9 @@ export const approvalAuthorityInputSchema = z.object({
   groupId: z.string().trim().min(1).max(200).nullable().optional(),
   costCenterId: z.string().uuid().nullable().optional(),
   projectId: z.string().uuid().nullable().optional(),
+  department: z.string().trim().min(1).max(240).nullable().optional(),
+  audienceGroupId: z.string().uuid().nullable().optional(),
+  approvalLevel: z.union([z.literal(1), z.literal(2)]).default(1),
   maxAmount: z.number().nonnegative().max(1_000_000_000_000).nullable().optional(),
   accumulatedAmountLimit: z.number().nonnegative().max(1_000_000_000_000).nullable().optional(),
   accumulationPeriodDays: z.number().int().min(1).max(366).nullable().optional(),
@@ -201,9 +211,20 @@ export const approvalAuthorityInputSchema = z.object({
   validFrom: z.string().datetime({ offset: true }),
   validUntil: z.string().datetime({ offset: true }).nullable().optional(),
   justification: z.string().trim().min(10).max(2_000),
-}).strict().superRefine((authority, context) => {
-  if ([authority.companyId, authority.groupId, authority.costCenterId, authority.projectId].filter(Boolean).length > 1) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: 'A alcada deve possuir no maximo um escopo organizacional.' })
+}).strict()
+
+function validateApprovalAuthorityConfiguration(
+  authority: z.infer<typeof approvalAuthorityObjectSchema>,
+  context: z.RefinementCtx,
+) {
+  if (authority.groupId && (authority.companyId || authority.costCenterId || authority.projectId || authority.department || authority.audienceGroupId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Escopo de grupo economico nao pode ser combinado com empresa, centro de custo, projeto, departamento ou grupo de usuarios.' })
+  }
+  if ([authority.costCenterId, authority.projectId, authority.department, authority.audienceGroupId].filter(Boolean).length > 1) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'A alcada aceita somente um recorte entre centro de custo, projeto, departamento ou grupo de usuarios.' })
+  }
+  if ((authority.department || authority.audienceGroupId) && !authority.companyId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Escopo por departamento ou grupo de usuarios exige a empresa.' })
   }
   if (authority.validUntil && Date.parse(authority.validUntil) <= Date.parse(authority.validFrom)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Fim da alcada deve ser posterior ao inicio.' })
@@ -211,7 +232,133 @@ export const approvalAuthorityInputSchema = z.object({
   if (authority.accumulatedAmountLimit !== null && authority.accumulatedAmountLimit !== undefined && !authority.accumulationPeriodDays) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Limite acumulado exige periodo de acumulacao.' })
   }
+}
+
+export const approvalAuthorityInputSchema = approvalAuthorityObjectSchema.superRefine(validateApprovalAuthorityConfiguration)
+
+const approvalMatrixScopeSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('company'),
+    companyId: z.string().trim().min(1).max(200),
+  }).strict(),
+  z.object({
+    type: z.literal('business_group'),
+    businessGroupId: z.string().trim().min(1).max(200),
+    mode: z.enum(['all_companies', 'selected_companies']),
+    companyIds: z.array(z.string().trim().min(1).max(200)).max(500).default([]),
+  }).strict(),
+]).superRefine((scope, context) => {
+  if (scope.type !== 'business_group') return
+  if (scope.mode === 'selected_companies' && scope.companyIds.length === 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Selecione ao menos uma empresa do grupo.' })
+  }
+  if (scope.mode === 'all_companies' && scope.companyIds.length > 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'O modo todas as empresas nao recebe companyIds.' })
+  }
 })
+
+const approvalMatrixWorkflowSchema = approvalWorkflowObjectSchema.pick({
+  name: true,
+  description: true,
+  changeSummary: true,
+}).strict()
+
+export const approvalMatrixInputSchema = z.object({
+  scope: approvalMatrixScopeSchema,
+  stage: z.enum(['merit', 'cost']),
+  authorities: z.array(approvalAuthorityInputSchema).min(1).max(100),
+  workflow: approvalMatrixWorkflowSchema,
+}).strict().superRefine((matrix, context) => {
+  const levelOne = matrix.authorities.filter((authority) => authority.approvalLevel === 1)
+  const levelTwo = matrix.authorities.filter((authority) => authority.approvalLevel === 2)
+  if (levelOne.length === 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['authorities'], message: 'A matriz exige ao menos um autorizador de primeiro nivel.' })
+  }
+  if (levelOne.some((authority) => authority.approvalKind === 'second_level')) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['authorities'], message: 'O primeiro nivel nao pode usar o tipo second_level.' })
+  }
+  if (levelTwo.some((authority) => (
+    authority.approvalKind !== 'second_level' && authority.approvalKind !== matrix.stage
+  ))) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['authorities'],
+      message: 'Autorizadores de segundo nivel devem usar o stage da matriz ou second_level por compatibilidade.',
+    })
+  }
+  const firstLevelMemberships = new Set(levelOne.map((authority) => authority.membershipId))
+  if (levelTwo.some((authority) => firstLevelMemberships.has(authority.membershipId))) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['authorities'],
+      message: 'O mesmo usuario nao pode integrar o primeiro e o segundo nivel da matriz.',
+    })
+  }
+  const firstLevelKinds = new Set(levelOne.map((authority) => authority.approvalKind))
+  if (firstLevelKinds.size > 1) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['authorities'], message: 'Todos os autorizadores de primeiro nivel devem usar o mesmo approvalKind.' })
+  }
+  if (levelOne.some((authority) => authority.approvalKind !== matrix.stage)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['authorities'], message: 'O approvalKind do primeiro nivel deve ser igual ao stage da matriz.' })
+  }
+})
+
+export const approvalMatrixTransitionSchema = z.object({
+  action: z.enum(['submit_review', 'approve', 'publish', 'archive']),
+  expectedVersion: z.number().int().positive(),
+  reason: z.string().trim().min(10).max(2_000),
+}).strict()
+
+const approvalApproverGroupObjectSchema = z.object({
+  code: z.string().trim().min(2).max(80).regex(/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/),
+  name: z.string().trim().min(2).max(160),
+  description: z.string().trim().max(1_000).default(''),
+  companyId: z.string().trim().min(1).max(200).nullable().optional(),
+  businessGroupId: z.string().trim().min(1).max(200).nullable().optional(),
+  memberMembershipIds: z.array(z.string().uuid()).min(1).max(200),
+}).strict()
+
+function validateApprovalApproverGroupScope(
+  group: { companyId?: string | null; businessGroupId?: string | null },
+  context: z.RefinementCtx,
+) {
+  if (Boolean(group.companyId) === Boolean(group.businessGroupId)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'O grupo de aprovadores exige exatamente uma empresa ou um grupo economico.',
+    })
+  }
+}
+
+export const approvalApproverGroupInputSchema = approvalApproverGroupObjectSchema.superRefine(validateApprovalApproverGroupScope)
+
+export const approvalApproverGroupUpdateSchema = approvalApproverGroupObjectSchema.extend({
+  expectedVersion: z.number().int().positive(),
+  status: z.enum(['active', 'inactive', 'archived']).default('active'),
+}).strict().superRefine(validateApprovalApproverGroupScope)
+
+const approvalAudienceGroupMemberSchema = z.object({
+  employeeId: z.string().trim().min(1).max(200).nullable().optional(),
+  requesterId: z.string().trim().min(1).max(200).nullable().optional(),
+  userId: z.string().uuid().nullable().optional(),
+}).strict().superRefine((member, context) => {
+  if ([member.employeeId, member.requesterId, member.userId].filter(Boolean).length !== 1) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Membro do grupo exige exatamente um funcionario, solicitante ou usuario.' })
+  }
+})
+
+export const approvalAudienceGroupInputSchema = z.object({
+  code: z.string().trim().min(2).max(80).regex(/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/),
+  name: z.string().trim().min(2).max(160),
+  description: z.string().trim().max(1_000).default(''),
+  companyId: z.string().trim().min(1).max(200),
+  members: z.array(approvalAudienceGroupMemberSchema).min(1).max(2_000),
+}).strict()
+
+export const approvalAudienceGroupUpdateSchema = approvalAudienceGroupInputSchema.extend({
+  expectedVersion: z.number().int().positive(),
+  status: z.enum(['active', 'inactive', 'archived']).default('active'),
+}).strict()
 
 export type ApprovalWorkflowDraftInput = z.infer<typeof approvalWorkflowDraftInputSchema>
 export type ApprovalWorkflowVersionInput = z.infer<typeof approvalWorkflowVersionInputSchema>
@@ -220,3 +367,9 @@ export type CreateApprovalInstanceInput = z.infer<typeof createApprovalInstanceS
 export type ApprovalDecisionInput = z.infer<typeof approvalDecisionInputSchema>
 export type ApprovalDelegationInput = z.infer<typeof approvalDelegationInputSchema>
 export type ApprovalAuthorityInput = z.infer<typeof approvalAuthorityInputSchema>
+export type ApprovalMatrixInput = z.infer<typeof approvalMatrixInputSchema>
+export type ApprovalMatrixTransitionInput = z.infer<typeof approvalMatrixTransitionSchema>
+export type ApprovalApproverGroupInput = z.infer<typeof approvalApproverGroupInputSchema>
+export type ApprovalApproverGroupUpdate = z.infer<typeof approvalApproverGroupUpdateSchema>
+export type ApprovalAudienceGroupInput = z.infer<typeof approvalAudienceGroupInputSchema>
+export type ApprovalAudienceGroupUpdate = z.infer<typeof approvalAudienceGroupUpdateSchema>

@@ -4,6 +4,7 @@ import { Building2, Check, Network, ShieldCheck } from 'lucide-react'
 
 import { DateInput } from '@/components/ui/date-input'
 import {
+  CORPORATE_PERMISSION_KEYS,
   CORPORATE_PROFILE_LABELS,
   CORPORATE_PROFILES,
   permissionsForCorporateProfile,
@@ -397,7 +398,7 @@ export function CorporateAccessEditor({
         </label>
         {value.customPermissions && (
           <div className="mt-3 grid max-h-52 gap-1 overflow-y-auto sm:grid-cols-2">
-            {(Object.keys(value.permissions) as Array<keyof Permissoes>).map((permission) => (
+            {CORPORATE_PERMISSION_KEYS.map((permission) => (
               <label key={permission} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-bbt-gray-50 dark:hover:bg-slate-800">
                 <input
                   type="checkbox"

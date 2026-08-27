@@ -10,6 +10,7 @@ export type SessionUserRefreshDecision = 'keep' | 'update' | 'reload' | 'redirec
 interface SessionRefreshState {
   reachable: boolean
   user: User | null
+  representation?: { id: string; mode: string; expiresAt: string } | null
 }
 
 export function createSingleFlightRunner<T>(
@@ -31,15 +32,19 @@ export function createSingleFlightRunner<T>(
 export function decideSessionUserRefresh(
   currentUser: User,
   session: SessionRefreshState,
+  currentRepresentation?: { id: string; mode: string; expiresAt: string } | null,
 ): SessionUserRefreshDecision {
   if (!session.reachable) return 'keep'
   if (!session.user) return 'redirect'
-  return sessionAuthorizationFingerprint(currentUser) === sessionAuthorizationFingerprint(session.user)
+  return sessionAuthorizationFingerprint(currentUser, currentRepresentation) === sessionAuthorizationFingerprint(session.user, session.representation)
     ? 'update'
     : 'reload'
 }
 
-export function sessionAuthorizationFingerprint(user: User): string {
+export function sessionAuthorizationFingerprint(
+  user: User,
+  representation?: { id: string; mode: string; expiresAt: string } | null,
+): string {
   return JSON.stringify({
     id: user.id,
     tenantId: user.tenant_id || null,
@@ -56,6 +61,11 @@ export function sessionAuthorizationFingerprint(user: User): string {
     groupIds: sortedStrings(user.grupo_ids),
     permissions: sortedPermissions(user.permissoes),
     corporateAccess: authorizationCorporateAccess(user.corporate_access),
+    representation: representation ? {
+      id: representation.id,
+      mode: representation.mode,
+      expiresAt: representation.expiresAt,
+    } : null,
   })
 }
 

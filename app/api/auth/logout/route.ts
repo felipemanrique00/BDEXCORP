@@ -25,7 +25,7 @@ export async function POST(request: Request) {
       action: 'auth.logout',
       result: 'success',
       tenantId: guard.principal.tenantId,
-      actorUserId: guard.principal.user.id,
+      actorUserId: guard.principal.actor?.user.id || guard.principal.user.id,
       requestId: guard.requestId,
       ipAddress: getClientIp(request),
       userAgent: request.headers.get('user-agent'),

@@ -44,7 +44,6 @@ export async function listWintourEmissorMappings(
   requireMappingPermission(principal)
 
   return withTenantTransaction(principal.tenantId, async (client) => {
-    await bootstrapLegacyMappings(client, principal)
     const result = await client.query<WintourEmissorMappingRow>(
       `select mapping.id, mapping.external_actor_code, mapping.user_id,
               target.name as user_name, mapping.updated_at
@@ -82,6 +81,7 @@ export async function upsertWintourEmissorMapping(
   }
 
   const mapping = await withTenantTransaction(principal.tenantId, async (client) => {
+    await bootstrapLegacyMappings(client, principal)
     const target = await client.query<{ user_id: string; user_name: string }>(
       `select membership.user_id, target.name as user_name
        from tenant_memberships membership
@@ -254,18 +254,11 @@ function normalizeCode(value: string): string {
 }
 
 function requireMappingPermission(principal: RequestPrincipal): void {
-  const permissions = principal.user.permissoes
-  if (
-    principal.platformAdmin
-    || principal.roleKey === 'tenant_admin'
-    || permissions?.gerenciar_integracoes
-    || permissions?.gerenciar_usuarios
-    || permissions?.importar_planilhas
-  ) return
+  if (principal.platformAdmin || principal.roleKey === 'tenant_admin') return
 
   throw new WintourEmissorMappingError(
     'WINTOUR_EMISSOR_MAPPING_DENIED',
-    'Permissao insuficiente para gerenciar emissores Wintour.',
+    'Apenas administradores do tenant podem gerenciar emissores Wintour.',
     403,
   )
 }

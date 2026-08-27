@@ -5,8 +5,8 @@ import type { ApprovalWorkflowSnapshot } from '@/lib/approvals/types'
 
 export const approvalSelectorSchema = z.object({
   type: z.enum([
-    'person', 'role', 'job_title', 'level', 'group', 'company', 'branch', 'cost_center',
-    'project', 'account', 'requester', 'traveler', 'manager', 'authority',
+    'person', 'role', 'job_title', 'level', 'group', 'company', 'branch', 'department', 'cost_center',
+    'project', 'account', 'requester', 'traveler', 'manager', 'approver_group', 'authority',
     'amount', 'currency', 'product', 'destination', 'policy_violation', 'budget', 'risk',
   ]),
   value: z.union([z.string(), z.array(z.string()), z.number(), z.boolean()]).optional(),
@@ -20,7 +20,7 @@ export const approvalResolutionSchema = z.object({
   minimumApprovers: z.number().int().min(1).max(100),
   maximumApprovers: z.number().int().min(1).max(100).optional(),
   allowSelfApproval: z.boolean(),
-  separationOfDuties: z.array(z.enum(['requester', 'traveler', 'last_editor', 'financial_executor'])).max(4).optional(),
+  separationOfDuties: z.array(z.enum(['requester', 'traveler', 'last_editor', 'financial_executor', 'prior_approver'])).max(5).optional(),
 }).strict().superRefine((value, context) => {
   if (value.maximumApprovers !== undefined && value.maximumApprovers < value.minimumApprovers) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'maximumApprovers deve ser maior ou igual a minimumApprovers.' })

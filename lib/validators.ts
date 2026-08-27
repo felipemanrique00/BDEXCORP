@@ -42,6 +42,7 @@ export const empresaSchema = z.object({
   telefone: telefoneOpcional,
   centro_custo_padrao: z.string().optional().transform((v) => v ? normalizarTexto(v, { upper: true }) : ''),
   ativa: z.boolean().default(true),
+  portal_empresa_habilitado: z.boolean().default(false),
 })
 
 export const funcionarioSchema = z.object({

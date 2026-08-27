@@ -43,6 +43,68 @@ describe('requester demand governance UI', () => {
     expect(demandService).toContain('...(requester ? { solicitante_id: requester.id } : {})')
   })
 
+  it('recognizes every internal agency role before enabling assisted creation', () => {
+    expect(requesterPortal).toContain("import { isRequesterUser, userAccessKind } from '@/lib/user-access-kind'")
+    expect(requesterPortal).toContain("import { canCreateAgencyAssistedDemand } from '@/lib/demands/agency-assistance'")
+    expect(requesterPortal).toContain("userAccessKind(user) === 'internal'")
+    expect(requesterPortal).toContain('canCreateAgencyAssistedDemand({')
+    expect(requesterPortal).toContain('canCreateForClient={canCreateForClient}')
+  })
+
+  it('shows one common requester selector before every service-specific form', () => {
+    const commonSelector = requesterPortal.indexOf('data-agency-requester-selector')
+    const genericServiceFields = requesterPortal.indexOf("tipo !== 'Hotel' && tipo !== 'Aéreo'", commonSelector)
+    const hotelFields = requesterPortal.indexOf("tipo === 'Hotel'", commonSelector)
+    const airFields = requesterPortal.indexOf("tipo === 'Aéreo'", commonSelector)
+
+    expect(commonSelector).toBeGreaterThan(-1)
+    expect(genericServiceFields).toBeGreaterThan(commonSelector)
+    expect(hotelFields).toBeGreaterThan(commonSelector)
+    expect(airFields).toBeGreaterThan(commonSelector)
+    expect(requesterPortal).toContain('aria-label="Buscar solicitante responsavel pelo pedido"')
+    expect(requesterPortal).toContain('aria-label="Solicitante responsável pelo pedido"')
+    expect(requesterPortal).toContain('showRequesterField={!canCreateForClient}')
+  })
+
+  it('requires an active requester globally and persists assisted ownership for every service', () => {
+    const requesterRequired = requesterPortal.indexOf('if (canCreateForClient && !requesterId)')
+    const activeAccessRequired = requesterPortal.indexOf('if (canCreateForClient && !selectedRequester?.hasActivePortalAccess)')
+    const hotelValidation = requesterPortal.indexOf("if (tipo === 'Hotel')", requesterRequired)
+
+    expect(requesterRequired).toBeGreaterThan(-1)
+    expect(activeAccessRequired).toBeGreaterThan(requesterRequired)
+    expect(hotelValidation).toBeGreaterThan(activeAccessRequired)
+    expect(requesterPortal).toContain('...(requesterId ? { solicitante_id: requesterId } : {})')
+    expect(requesterPortal).toContain('...(requesterName ? { solicitante_nome: requesterName } : {})')
+    expect(requesterPortal).toContain('agency_assisted: canCreateForClient || undefined')
+    expect(requesterPortal).not.toContain("} : solicitanteAtual ? {")
+  })
+
+  it('keeps quote choice requester-only even when an internal consultant created the demand', () => {
+    expect(requesterPortal).toContain('{isRequesterUser(authenticatedUser) && (')
+    expect(requesterPortal).toContain('<OfflineQuoteChoicePanel')
+    expect(requesterPortal).toContain('<OfflineAirQuoteChoiceWorkspace')
+    expect(requesterPortal).not.toContain('{canCreateForClient && (\n        <div id={PORTAL_REQUESTS_CHOICE_PANEL_ID}')
+  })
+
+  it('blocks a requester without active portal access in the agency demand modal', () => {
+    const requesterRequired = demandModal.indexOf('if (agencyAssistedMode && !solicitanteId)')
+    const activeAccessRequired = demandModal.indexOf(
+      'requester.id === solicitanteId && requester.hasActivePortalAccess',
+      requesterRequired,
+    )
+    const travelerRequired = demandModal.indexOf(
+      'if (agencyAssistedMode && !effectiveEmployeeId',
+      activeAccessRequired,
+    )
+
+    expect(requesterRequired).toBeGreaterThan(-1)
+    expect(activeAccessRequired).toBeGreaterThan(requesterRequired)
+    expect(travelerRequired).toBeGreaterThan(activeAccessRequired)
+    expect(demandModal).toContain('O solicitante precisa ter acesso ativo ao portal para receber e escolher a cotação.')
+    expect(demandModal).toContain('disabled={!requester.hasActivePortalAccess}')
+  })
+
   it('keeps a manual demand in quotation before the governed approval queue', () => {
     expect(requesterPortal).toContain('booking_mode: bookingMode')
     expect(requesterPortal).toContain('shouldSubmitDemandOnCreate(bookingMode)')

@@ -300,6 +300,7 @@ export async function getPolicyDetail(principal: RequestPrincipal, policyId: str
 
 export async function createPolicyDraft(principal: RequestPrincipal, rawInput: unknown): Promise<PolicyDetail> {
   const input = policyDraftInputSchema.parse(rawInput)
+  assertGenericPolicyCodeAllowed(input.policyCode)
   await assertCanManageScopes(principal, input.scopes)
   const result = await withTenantTransaction(principal.tenantId, async (client) => {
     const contentHash = policyContentHash(input)
@@ -337,6 +338,7 @@ export async function createPolicyVersion(
   await assertCanManageScopes(principal, input.scopes)
   await withTenantTransaction(principal.tenantId, async (client) => {
     const definition = await loadDefinitionForUpdate(client, principal.tenantId, policyId, true)
+    assertGenericPolicyCodeAllowed(definition.policy_code)
     if (definition.current_version !== input.expectedCurrentVersion) {
       throw new PolicyServiceError('STALE_POLICY_VERSION', 'A politica foi alterada por outro usuario.', 409)
     }
@@ -369,6 +371,7 @@ export async function transitionPolicyVersion(
   const input = policyTransitionSchema.parse(rawInput)
   await withTenantTransaction(principal.tenantId, async (client) => {
     const definition = await loadDefinitionForUpdate(client, principal.tenantId, policyId, true)
+    assertGenericPolicyCodeAllowed(definition.policy_code)
     const versionResult = await client.query<PolicyVersionRow>(
       `select * from policy_versions
        where tenant_id = $1 and id = $2 and policy_definition_id = $3
@@ -444,6 +447,15 @@ export async function transitionPolicyVersion(
   return getPolicyDetail(principal, policyId)
 }
 
+export function assertGenericPolicyCodeAllowed(policyCode: string): void {
+  if (!policyCode.startsWith('matrix.trigger.')) return
+  throw new PolicyServiceError(
+    'POLICY_MATRIX_NAMESPACE_RESERVED',
+    'Politicas com prefixo matrix.trigger.* sao gerenciadas exclusivamente pela matriz corporativa.',
+    409,
+  )
+}
+
 export async function simulatePolicies(
   principal: RequestPrincipal,
   rawInput: unknown,
@@ -499,6 +511,7 @@ export async function evaluateAndPersistPoliciesInTransaction(
   input: PersistPolicyEvaluationInput,
 ): Promise<{ databaseEvaluationId: string; result: PolicyEvaluationResult }> {
   const startedAt = performance.now()
+  const actorUserId = principal.actor?.user.id || principal.user.id
   await validateEntityOwnership(client, principal.tenantId, input)
   const policies = await loadPublishedPolicies(client, principal.tenantId, input.context)
   const result = evaluatePolicies(policies, { ...input.context, mode: input.context.mode || 'enforce' })
@@ -514,7 +527,7 @@ export async function evaluateAndPersistPoliciesInTransaction(
       input.companyId, input.employeeId || null, input.context.checkpoint,
       input.context.mode || 'enforce', JSON.stringify(input.context.facts), result.factsHash,
       JSON.stringify(result), result.resultHash, result.passed, result.blocks.length > 0,
-      principal.user.id, Math.max(0, Math.round(performance.now() - startedAt)), '1.0.0',
+      actorUserId, Math.max(0, Math.round(performance.now() - startedAt)), '1.0.0',
     ],
   )
   const databaseEvaluationId = inserted.rows[0].id
@@ -731,6 +744,7 @@ async function assertPolicyPublishable(
   definition: PolicyDefinitionRow,
   version: PolicyVersionRow,
   scopes: PolicyScope[],
+  options: { skipScopePermission?: boolean } = {},
 ): Promise<void> {
   const executable = await hydrateExecutablePolicy(client, principal.tenantId, definition.policy_code, version)
   const available = await availableDependencies(client, principal)
@@ -754,7 +768,26 @@ async function assertPolicyPublishable(
   if (blocking.length) {
     throw new PolicyServiceError('POLICY_CONFLICTS_BLOCK_PUBLICATION', blocking.map((item) => item.explanation).join(' '), 409)
   }
-  await assertCanManageScopes(principal, scopes, 'publicar_politicas')
+  if (!options.skipScopePermission) {
+    await assertCanManageScopes(principal, scopes, 'publicar_politicas')
+  }
+}
+
+export async function assertPolicyVersionPublishableInTransaction(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  policyId: string,
+  versionId: string,
+): Promise<void> {
+  const definition = await loadDefinitionForUpdate(client, principal.tenantId, policyId, false)
+  const version = await client.query<PolicyVersionRow>(
+    `select * from policy_versions
+     where tenant_id = $1 and id = $2 and policy_definition_id = $3`,
+    [principal.tenantId, versionId, policyId],
+  )
+  if (!version.rows[0]) throw new PolicyServiceError('POLICY_VERSION_NOT_FOUND', 'Versao da politica nao encontrada.', 404)
+  const scopes = await loadVersionScopes(client, principal.tenantId, versionId)
+  await assertPolicyPublishable(client, principal, definition, version.rows[0], scopes, { skipScopePermission: true })
 }
 
 async function loadPolicyVersionsForConflict(

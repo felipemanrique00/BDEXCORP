@@ -186,10 +186,12 @@ async function seedTraveler(pool: Pool, fixture: TravelerFixture): Promise<void>
       [fixture.roleId],
     )
     await client.query(
-      `insert into companies (id, tenant_id, legal_name, trade_name, status)
+      `insert into companies (
+         id, tenant_id, legal_name, trade_name, status, company_portal_enabled
+       )
        values
-         ($1, $3, 'Empresa E2E Permitida SA', 'Empresa E2E Permitida', 'active'),
-         ($2, $3, 'Empresa E2E Restrita SA', 'Empresa E2E Restrita', 'active')`,
+         ($1, $3, 'Empresa E2E Permitida SA', 'Empresa E2E Permitida', 'active', false),
+         ($2, $3, 'Empresa E2E Restrita SA', 'Empresa E2E Restrita', 'active', false)`,
       [fixture.companyAllowed, fixture.companyDenied, fixture.tenantId],
     )
     await client.query(

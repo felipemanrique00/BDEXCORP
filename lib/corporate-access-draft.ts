@@ -7,7 +7,7 @@ import {
 
 const CORPORATE_PERMISSION_KEYS = Object.keys(
   CORPORATE_PROFILE_PERMISSIONS.owner,
-) as Array<keyof Permissoes>
+).filter((permission) => permission !== 'gerenciar_personificacoes') as Array<keyof Permissoes>
 
 export interface GroupAccessDraft {
   groupId: string
@@ -82,10 +82,13 @@ export function corporateDraftPermissionState(
     customPermissions: grants.some((grant) => (
       Object.keys(sparseCorporateOverrides(grant.profile, grant.permissionOverrides)).length > 0
     )),
-    permissions: Object.fromEntries(CORPORATE_PERMISSION_KEYS.map((permission) => [
-      permission,
-      effectivePermissions.every((value) => value[permission]),
-    ])) as unknown as Permissoes,
+    permissions: {
+      ...Object.fromEntries(CORPORATE_PERMISSION_KEYS.map((permission) => [
+        permission,
+        effectivePermissions.every((value) => value[permission]),
+      ])),
+      gerenciar_personificacoes: false,
+    } as unknown as Permissoes,
   }
 }
 
@@ -132,6 +135,7 @@ export function setCorporateDraftPermission(
   permission: keyof Permissoes,
   allowed: boolean,
 ): CorporateAccessDraft {
+  if (permission === 'gerenciar_personificacoes') return value
   const groupGrants = value.groupGrants.map((grant) => {
     const defaults = CORPORATE_PROFILE_PERMISSIONS[grant.profile]
     const permissions = {
@@ -199,10 +203,12 @@ function sparseCorporateOverrides(
   overrides: Partial<Permissoes>,
 ): Partial<Permissoes> {
   const defaults = CORPORATE_PROFILE_PERMISSIONS[profile]
-  return permissionOverridesFromEffective(
+  const normalized = permissionOverridesFromEffective(
     defaults,
     applyPermissionOverrides(defaults, overrides),
   )
+  delete normalized.gerenciar_personificacoes
+  return normalized
 }
 
 function parseContextKey(value: string): { type: 'company' | 'group'; id: string } | null {

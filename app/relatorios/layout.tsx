@@ -3,6 +3,7 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 
 import { ReportsShell } from '@/components/reports-shell'
+import { corporateDashboardRedirect } from '@/lib/company-portal-lab/access-boundary'
 import { resolveSession } from '@/lib/server/auth-service'
 import { sessionCookieName } from '@/lib/server-auth'
 
@@ -11,6 +12,8 @@ export default async function RelatoriosLayout({ children }: { children: ReactNo
   const principal = await resolveSession(cookieStore.get(sessionCookieName())?.value || null)
   if (!principal) redirect('/login')
   if (principal.user.must_change_password) redirect('/alterar-senha')
+  const corporateRedirect = corporateDashboardRedirect(principal.user, '/relatorios')
+  if (corporateRedirect) redirect(`${corporateRedirect}?section=reports`)
   if (!principal.user.permissoes?.ver_relatorios) redirect('/dashboard')
 
   return <ReportsShell user={principal.user}>{children}</ReportsShell>

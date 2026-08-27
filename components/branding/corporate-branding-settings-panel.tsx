@@ -94,8 +94,9 @@ const COLOR_FIELDS: ReadonlyArray<{
   },
 ]
 
-const ALLOWED_LOGO_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+const ALLOWED_LOGO_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'])
 const MAX_LOGO_BYTES = 5 * 1024 * 1024
+const MAX_SVG_LOGO_BYTES = 1 * 1024 * 1024
 const HEX_COLOR = /^#[0-9A-Fa-f]{6}$/
 const DOCUMENT_NUMBER = /^[A-Za-z0-9./-]+$/
 
@@ -191,7 +192,12 @@ export function CorporateBrandingSettingsPanel({
   async function uploadLogo(file: File | null) {
     if (!file || !configuration || uploading || saving || !canManage) return
     if (!ALLOWED_LOGO_TYPES.has(file.type)) {
-      toast.error('Selecione uma imagem PNG, JPEG ou WebP.')
+      toast.error('Selecione uma imagem PNG, JPEG, WebP ou SVG.')
+      clearUploadInput()
+      return
+    }
+    if (file.type === 'image/svg+xml' && file.size > MAX_SVG_LOGO_BYTES) {
+      toast.error('A logomarca SVG deve ter no máximo 1 MB.')
       clearUploadInput()
       return
     }
@@ -298,7 +304,7 @@ export function CorporateBrandingSettingsPanel({
                         ref={uploadInputRef}
                         id={uploadInputId}
                         type="file"
-                        accept="image/png,image/jpeg,image/webp"
+                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
                         className="sr-only"
                         disabled={!canManage || uploading || saving}
                         onChange={(event) => void uploadLogo(event.target.files?.[0] || null)}
@@ -320,7 +326,7 @@ export function CorporateBrandingSettingsPanel({
                         <RotateCcw className="h-4 w-4" aria-hidden="true" /> Herdar logomarca
                       </button>
                     </div>
-                    <p className="mt-2 text-xs leading-5 text-slate-500">PNG, JPEG ou WebP, com até 5 MB. O servidor valida e normaliza o arquivo.</p>
+                    <p className="mt-2 text-xs leading-5 text-slate-500">PNG, JPEG ou WebP com até 5 MB; SVG com até 1 MB. O servidor valida e normaliza o arquivo.</p>
                     <p className="mt-1 text-[11px] text-slate-500">
                       Origem efetiva: <strong>{sourceLabel(configuration.effective.sources.logoUrl)}</strong>
                       {draft.logoFileId !== configuration.declared.logoFileId ? ' · alteração pendente' : ''}

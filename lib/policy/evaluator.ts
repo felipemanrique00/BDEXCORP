@@ -148,17 +148,17 @@ export function resolveApplicablePolicies(
   for (const candidate of candidates) {
     const { policy, specificity } = candidate
     if (policy.inheritanceMode === 'disable') {
-      removeOverridable(selected, (current) => current.policy.category === policy.category, specificity)
+      removeOverridable(selected, (current) => current.policy.category === policy.category, specificity, policy)
       continue
     }
     if (policy.inheritanceMode === 'stop_inheritance') {
-      removeOverridable(selected, () => true, specificity)
+      removeOverridable(selected, () => true, specificity, policy)
     }
     if (policy.inheritanceMode === 'replace') {
-      removeOverridable(selected, (current) => current.policy.category === policy.category, specificity)
+      removeOverridable(selected, (current) => current.policy.category === policy.category, specificity, policy)
     }
     if (policy.inheritanceMode === 'override') {
-      removeOverridable(selected, (current) => current.policy.code === policy.code, specificity)
+      removeOverridable(selected, (current) => current.policy.code === policy.code, specificity, policy)
     }
     selected.push(candidate)
   }
@@ -256,10 +256,18 @@ function removeOverridable(
   selected: ApplicablePolicy[],
   predicate: (candidate: ApplicablePolicy) => boolean,
   specificity: number,
+  replacingPolicy: ExecutablePolicyVersion,
 ): void {
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     const current = selected[index]
-    if (current.specificity <= specificity && current.policy.overridable && predicate(current)) {
+    const canonicalMatrixTrigger = current.policy.code.startsWith('matrix.trigger.')
+    const canonicalMatrixReplacement = replacingPolicy.code.startsWith('matrix.trigger.')
+    if (
+      current.specificity <= specificity
+      && current.policy.overridable
+      && (!canonicalMatrixTrigger || canonicalMatrixReplacement)
+      && predicate(current)
+    ) {
       selected.splice(index, 1)
     }
   }

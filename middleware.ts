@@ -27,6 +27,7 @@ export function middleware(request: NextRequest) {
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-request-id', requestId)
   requestHeaders.set('x-nonce', nonce)
+  requestHeaders.set('x-current-path', request.nextUrl.pathname)
   requestHeaders.set('Content-Security-Policy', contentSecurityPolicy)
 
   const response = NextResponse.next({ request: { headers: requestHeaders } })
@@ -37,6 +38,9 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
+    {
+      source: '/dashboard/:path*',
+    },
     {
       source: '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)',
       missing: [

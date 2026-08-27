@@ -76,9 +76,10 @@ interface QuoteOptionDraft {
   hotelSupplierId: string
   supplierName: string
   supplierCode: string
-  pricingMode: 'catalog' | 'manual_override' | 'manual'
+  pricingMode: 'catalog' | 'manual_override' | 'last_emission' | 'manual'
   rateId: string
   rateVersion: number | null
+  rateObservationId: string
   rateScopeLabel: string
   rateOutsideValidity: boolean
   outOfPeriodPolicy: 'block' | 'warn' | 'allow'
@@ -313,13 +314,7 @@ export function OfflineHotelQuoteForm({
   function patchOption(clientId: string, patch: Partial<QuoteOptionDraft>) {
     setOptions((current) => current.map((option) => (
       option.clientId === clientId
-        ? {
-            ...option,
-            ...patch,
-            pricingMode: option.pricingMode === 'catalog' && changesCatalogRate(patch)
-              ? 'manual_override'
-              : (patch.pricingMode || option.pricingMode),
-          }
+        ? patchQuoteOption(option, patch)
         : option
     )))
     setConfirmed(false)
@@ -358,7 +353,7 @@ export function OfflineHotelQuoteForm({
       ))
       return {
         ...option,
-        ...(!suggestion && option.rateId ? {
+        ...(!suggestion && (option.rateId || option.rateObservationId) ? {
           mealPlan: '',
           nightlyRate: '',
           nightlyTaxes: '0,00',
@@ -408,6 +403,9 @@ export function OfflineHotelQuoteForm({
         pricingMode: option.pricingMode,
         rateReference: option.rateId && option.rateVersion
           ? { id: option.rateId, version: option.rateVersion }
+          : undefined,
+        emissionObservationReference: option.rateObservationId
+          ? { id: option.rateObservationId }
           : undefined,
         roomCategory: option.roomCategory,
         mealPlan: option.mealPlan,
@@ -761,9 +759,11 @@ function QuoteOptionEditor({
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                 option.pricingMode === 'catalog'
                   ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200'
+                  : option.pricingMode === 'last_emission'
+                    ? 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-200'
                   : 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'
               }`}>
-                {option.pricingMode === 'catalog'
+                {option.pricingMode === 'catalog' || option.pricingMode === 'last_emission'
                   ? option.rateScopeLabel
                   : `${option.rateScopeLabel} · editada`}
               </span>
@@ -794,15 +794,17 @@ function QuoteOptionEditor({
         </button>
       </div>
 
-      {rateSuggestion && option.pricingMode === 'manual_override' && (
+      {rateSuggestion && ['manual_override', 'manual'].includes(option.pricingMode) && (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-100">
-          <span>Os dados cadastrados foram editados manualmente e serao publicados como excecao auditavel.</span>
+          <span>Os dados sugeridos foram editados ou ainda nao foram aplicados; o preenchimento manual permanece auditavel.</span>
           <button
             type="button"
             onClick={() => onReapplySuggestion(rateSuggestion)}
             className="rounded-md border border-amber-300 px-2.5 py-1 font-semibold hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900/40"
           >
-            Reaplicar tarifa cadastrada
+            {rateSuggestion.source === 'last_emission'
+              ? 'Reaplicar ultima emissao'
+              : 'Reaplicar tarifa cadastrada'}
           </button>
         </div>
       )}
@@ -1058,6 +1060,7 @@ function emptyOptionDraft(clientId: string): QuoteOptionDraft {
     pricingMode: 'manual',
     rateId: '',
     rateVersion: null,
+    rateObservationId: '',
     rateScopeLabel: '',
     rateOutsideValidity: false,
     outOfPeriodPolicy: 'block',
@@ -1080,10 +1083,13 @@ function suggestionPatch(suggestion: HotelRateSuggestion | undefined): Partial<Q
     hotelSupplierId: suggestion.hotelSupplierId,
     supplierName: suggestion.supplierName,
     supplierCode: suggestion.supplierCode,
-    pricingMode: 'catalog',
-    rateId: suggestion.rateId,
+    pricingMode: suggestion.source === 'last_emission' ? 'last_emission' : 'catalog',
+    rateId: suggestion.rateId || '',
     rateVersion: suggestion.rateVersion,
-    rateScopeLabel: suggestion.scopeLabel,
+    rateObservationId: suggestion.emissionObservationId || '',
+    rateScopeLabel: suggestion.source === 'last_emission' && suggestion.observedAt
+      ? `${suggestion.scopeLabel} · ${formatDateOnly(suggestion.observedAt)}`
+      : suggestion.scopeLabel,
     rateOutsideValidity: suggestion.outsideValidity,
     outOfPeriodPolicy: suggestion.outOfPeriodPolicy,
     roomCategory: suggestion.roomCategory,
@@ -1105,6 +1111,7 @@ function supplierPatch(supplier: HotelCatalogSupplier | undefined): Partial<Quot
     pricingMode: 'manual',
     rateId: '',
     rateVersion: null,
+    rateObservationId: '',
     rateScopeLabel: '',
     rateOutsideValidity: false,
     outOfPeriodPolicy: 'block',
@@ -1113,6 +1120,31 @@ function supplierPatch(supplier: HotelCatalogSupplier | undefined): Partial<Quot
 
 function moneyField(value: number): string {
   return Number.isFinite(value) ? value.toFixed(2).replace('.', ',') : '0,00'
+}
+
+function patchQuoteOption(
+  option: QuoteOptionDraft,
+  patch: Partial<QuoteOptionDraft>,
+): QuoteOptionDraft {
+  if (patch.pricingMode) return { ...option, ...patch }
+  if (!changesCatalogRate(patch)) return { ...option, ...patch }
+  if (option.pricingMode === 'catalog') {
+    return { ...option, ...patch, pricingMode: 'manual_override' }
+  }
+  if (option.pricingMode === 'last_emission') {
+    return {
+      ...option,
+      ...patch,
+      pricingMode: 'manual',
+      rateObservationId: '',
+    }
+  }
+  return { ...option, ...patch }
+}
+
+function formatDateOnly(value: string): string {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/)
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : 'data indisponivel'
 }
 
 function changesCatalogRate(patch: Partial<QuoteOptionDraft>): boolean {

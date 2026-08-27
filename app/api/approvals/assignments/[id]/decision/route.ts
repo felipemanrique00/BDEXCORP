@@ -8,10 +8,14 @@ import { governanceBodyErrorResponse, governanceErrorResponse } from '@/lib/serv
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+const INTERNAL_APPROVAL_ROLES = ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator']
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'decidir_aprovacoes',
+    roleKeys: INTERNAL_APPROVAL_ROLES,
+    representationAction: 'approval.decide',
     rateLimit: { key: 'approval-assignments:decision', limit: 30, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

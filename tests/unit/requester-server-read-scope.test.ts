@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
+import type { PoolClient } from 'pg'
 
 import {
   isRequesterReadPrincipal,
@@ -9,6 +10,7 @@ import {
   requesterOwnVoucherExistsSql,
 } from '@/lib/server/requester-read-scope'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import { requireRequesterDemandReadAccess } from '@/lib/server/demand-service'
 
 describe('requester server read scope', () => {
   it('uses the canonical membership role before a stale corporate profile', () => {
@@ -21,6 +23,7 @@ describe('requester server read scope', () => {
   it('requires ownership through an active relational requester for demands', () => {
     const sql = requesterOwnDemandExistsSql('demand', '$3')
     expect(sql).toContain('requester_scope.id = demand.requester_id')
+    expect(sql).toContain('requester_scope.company_id = demand.company_id')
     expect(sql).toContain('requester_scope.user_id = $3::uuid')
     expect(sql).toContain("requester_scope.status = 'active'")
   })
@@ -33,7 +36,11 @@ describe('requester server read scope', () => {
     expect(fallbackStart).toBeGreaterThan(authoritativeStart)
     expect(sql).toContain('authoritative_requester.id = authoritative_demand.requester_id')
     expect(sql).not.toContain("authoritative_requester.status = 'active'")
-    expect(sql).toContain("voucher.metadata->>'solicitante_email'")
+    expect(sql).toContain('requester_demand.company_id = voucher.company_id')
+    expect(sql).toContain('requester_scope.company_id = voucher.company_id')
+    expect(sql).toContain('requester_metadata_scope.company_id = voucher.company_id')
+    expect(sql).toContain('requester_employee.company_id = voucher.company_id')
+    expect(sql).not.toContain("voucher.metadata->>'solicitante_email'")
   })
 
   it('is enforced by every company-wide requester read service', () => {
@@ -46,6 +53,25 @@ describe('requester server read scope', () => {
     expect(voucherService).toContain("clauses.push(requesterOwnVoucherExistsSql(")
     expect(voucherService).toContain('requireRequesterVoucherReadAccess(client, principal, row.id)')
     expect(travelService.match(/requesterOwnDemandExistsSql\('demand'/g)).toHaveLength(2)
+  })
+
+  it('returns 404 when a requester tries to mutate another requester demand', async () => {
+    const client = {
+      query: async () => ({ rows: [], rowCount: 0 }),
+    } as unknown as PoolClient
+
+    await expect(requireRequesterDemandReadAccess(
+      client,
+      principal('requester', 'requester'),
+      'demand-owned-by-another-requester',
+    )).rejects.toMatchObject({
+      code: 'DEMAND_NOT_FOUND',
+      status: 404,
+    })
+
+    expect(source('lib/server/demand-service.ts')).toMatch(
+      /updateDemandDetails[\s\S]*requireRequesterDemandReadAccess\(client, principal, demandId\)/,
+    )
   })
 })
 

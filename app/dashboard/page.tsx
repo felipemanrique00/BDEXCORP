@@ -23,6 +23,7 @@ import {
   ArrowUpRight,
   BarChart3,
   Building2,
+  BusFront,
   CalendarDays,
   Car,
   ChevronRight,
@@ -164,6 +165,7 @@ const SERVICE_META: Record<TipoServico, { icon: LucideIcon; label: string; unitL
   Aéreo: { icon: Plane, label: 'Aéreo', unitLabel: 'Bilhetes', accent: 'text-blue-600' },
   Hotel: { icon: Hotel, label: 'Hotel', unitLabel: 'Noites', accent: 'text-indigo-600' },
   Carro: { icon: Car, label: 'Carro', unitLabel: 'Reservas', accent: 'text-emerald-600' },
+  Rodoviário: { icon: BusFront, label: 'Rodoviário', unitLabel: 'Bilhetes', accent: 'text-orange-600' },
   Pacote: { icon: Package, label: 'Pacote', unitLabel: 'Pacotes', accent: 'text-amber-600' },
   Outro: { icon: FileText, label: 'Outros', unitLabel: 'Itens', accent: 'text-slate-600' },
 }
@@ -2390,7 +2392,7 @@ function calcularPolicyRate(atendimentos: Atendimento[]): number {
 }
 
 function calcularCO2(stats: Record<TipoServico, number>): number {
-  return stats.Aéreo * 136 + stats.Hotel * 22 + stats.Carro * 31 + stats.Pacote * 98
+  return stats.Aéreo * 136 + stats.Hotel * 22 + stats.Carro * 31 + stats.Rodoviário * 12 + stats.Pacote * 98
 }
 
 function normalizarNome(nome: string): string {

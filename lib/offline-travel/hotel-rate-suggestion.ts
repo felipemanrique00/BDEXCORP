@@ -1,6 +1,7 @@
 'use client'
 
 export type HotelRateSuggestionScope = 'company' | 'group' | 'global'
+export type HotelRateSuggestionSource = 'catalog' | 'last_emission'
 
 export interface HotelRateSuggestion {
   hotelId: string
@@ -8,10 +9,14 @@ export interface HotelRateSuggestion {
   supplierId: string
   supplierName: string
   supplierCode: string
-  roomTypeId: string
+  roomTypeId: string | null
   roomCategory: string
-  rateId: string
-  rateVersion: number
+  source: HotelRateSuggestionSource
+  rateId: string | null
+  rateVersion: number | null
+  emissionObservationId: string | null
+  emissionId: string | null
+  observedAt: string | null
   nightlyRate: number
   nightlyTaxes: number
   serviceFee: number

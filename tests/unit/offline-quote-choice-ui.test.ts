@@ -27,7 +27,10 @@ describe('offline hotel quote choice UI', () => {
   })
 
   it('refreshes pending choices from the relational server instead of trusting stale browser state', () => {
-    expect(choicePanelSource).toContain("listDemandsFromServer({ lifecycleStatus: 'pending_choice', limit: 200 })")
+    expect(choicePanelSource).toContain('listDemandsFromServer({')
+    expect(choicePanelSource).toContain("lifecycleStatus: 'pending_choice'")
+    expect(choicePanelSource).toContain("serviceType: 'hotel'")
+    expect(choicePanelSource).toContain('limit: 200')
     expect(choicePanelSource).toContain('result.items.map((item) => item.demand)')
     expect(choicePanelSource).toContain('[...demands, ...serverDemands]')
   })

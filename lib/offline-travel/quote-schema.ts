@@ -28,12 +28,17 @@ const rateReferenceSchema = z.object({
   version: z.coerce.number().int().positive(),
 }).strict()
 
+const emissionObservationReferenceSchema = z.object({
+  id: z.string().uuid(),
+}).strict()
+
 export const offlineHotelQuoteOptionSchema = z.object({
   clientId: identifier,
   hotelId: identifier,
   hotelSupplierId: z.string().uuid(),
-  pricingMode: z.enum(['catalog', 'manual_override', 'manual']).default('manual'),
+  pricingMode: z.enum(['catalog', 'manual_override', 'last_emission', 'manual']).default('manual'),
   rateReference: rateReferenceSchema.optional(),
+  emissionObservationReference: emissionObservationReferenceSchema.optional(),
   roomCategory: z.string().trim().min(1).max(200),
   mealPlan: optionalText(200),
   nightlyRate: money,
@@ -64,6 +69,27 @@ export const offlineHotelQuoteOptionSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ['rateReference'],
       message: 'Uma tarifa totalmente manual nao pode declarar referencia de catalogo.',
+    })
+  }
+  if (value.pricingMode === 'last_emission' && !value.emissionObservationReference) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['emissionObservationReference'],
+      message: 'A sugestao da ultima emissao deve preservar a observacao de origem.',
+    })
+  }
+  if (value.pricingMode !== 'last_emission' && value.emissionObservationReference) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['emissionObservationReference'],
+      message: 'A observacao de emissao somente pode ser usada no modo de ultima emissao.',
+    })
+  }
+  if (value.pricingMode === 'last_emission' && value.rateReference) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['rateReference'],
+      message: 'A sugestao da ultima emissao nao pode se declarar como tarifa contratual vigente.',
     })
   }
 })

@@ -14,6 +14,7 @@ import {
   updateDemandDetailsOnServer,
   updateDemandStatusOnServer,
 } from '@/lib/demands-client'
+import { shouldBlockAgencyAssistedLegacyFallback } from '@/lib/demands/agency-assistance'
 import { commitPendingRemoteStorage } from '@/lib/storage-quota'
 import type { Atendimento, StatusAtendimento } from '@/types'
 
@@ -52,7 +53,13 @@ export async function persistNewDemandWithCompatibility(
       localProjectionUpdated,
     }
   } catch (error) {
-    if (!(error instanceof DemandClientError) || error.code !== 'DEMAND_RELATIONAL_WRITE_DISABLED') {
+    if (!(error instanceof DemandClientError)) {
+      throw error
+    }
+    if (shouldBlockAgencyAssistedLegacyFallback(error.code, demand.agency_assisted === true)) {
+      throw error
+    }
+    if (error.code !== 'DEMAND_RELATIONAL_WRITE_DISABLED') {
       throw error
     }
   }

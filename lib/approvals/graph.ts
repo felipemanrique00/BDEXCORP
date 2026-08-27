@@ -66,6 +66,26 @@ export function validateApprovalWorkflow(raw: ApprovalWorkflowSnapshot): Workflo
         issues.push(blocking('QUORUM_EXCEEDS_MAX_APPROVERS', `O quorum do no ${node.name} excede o maximo de aprovadores.`, [node.id]))
       }
     }
+    if (isCanonicalSecondLevelNode(node)) {
+      if (!node.approverResolution?.separationOfDuties?.includes('prior_approver')) {
+        issues.push(blocking(
+          'SECOND_LEVEL_REQUIRES_PRIOR_APPROVER_SEPARATION',
+          `O no ${node.name} deve impedir que o aprovador do primeiro nivel aprove novamente.`,
+          [node.id],
+        ))
+      }
+      const hasRoutingEdge = workflow.edges.some((edge) => (
+        edge.targetNodeId === node.id
+        && isSecondLevelRoutingCondition(edge.condition)
+      ))
+      if (!hasRoutingEdge) {
+        issues.push(blocking(
+          'SECOND_LEVEL_REQUIRES_ROUTING_CONDITION',
+          `O no ${node.name} exige uma entrada condicionada por routing.requiresSecondLevel = true.`,
+          [node.id],
+        ))
+      }
+    }
   }
 
   const topologicalOrder = topologicalSort(workflow.nodes, outgoing)
@@ -81,6 +101,23 @@ export function validateApprovalWorkflow(raw: ApprovalWorkflowSnapshot): Workflo
   }
 
   return { valid: !issues.some((issue) => issue.severity === 'blocking'), issues, topologicalOrder }
+}
+
+function isCanonicalSecondLevelNode(node: ApprovalWorkflowNode): boolean {
+  if (node.type !== 'approval') return false
+  return Boolean(node.approverResolution?.selectors.some((selector) => (
+    selector.type === 'authority' && Number(selector.configuration?.level) === 2
+  )))
+}
+
+function isSecondLevelRoutingCondition(condition: ApprovalWorkflowSnapshot['edges'][number]['condition']): boolean {
+  return Boolean(
+    condition
+    && 'fact' in condition
+    && condition.fact === 'routing.requiresSecondLevel'
+    && condition.operator === 'eq'
+    && condition.value === true,
+  )
 }
 
 export function assertValidApprovalWorkflow(workflow: ApprovalWorkflowSnapshot): ApprovalWorkflowSnapshot {

@@ -5,6 +5,8 @@ import type { PoolClient, QueryResultRow } from 'pg'
 
 import {
   approvalAuthorityInputSchema,
+  approvalMatrixInputSchema,
+  approvalMatrixTransitionSchema,
   approvalActionTokenInputSchema,
   approvalDecisionInputSchema,
   approvalDelegationInputSchema,
@@ -23,12 +25,16 @@ import {
   validateApprovalDelegation,
   validateApprovalWorkflow,
   ApprovalWorkflowError,
+  approverConflictsWithSubject,
   type ApprovalAuthorityInput,
   type ApprovalCandidate,
   type ApprovalDecisionInput,
   type ApprovalDelegationCandidate,
   type ApprovalDelegationInput,
   type ApprovalKind,
+  type ApprovalMatrixInput,
+  type ApprovalMatrixTransitionInput,
+  type ApprovalRoutingFacts,
   type ApprovalSubject,
   type ApprovalWorkflowDraftInput,
   type ApprovalWorkflowNode,
@@ -41,13 +47,16 @@ import {
   type DelegationMembership,
 } from '@/lib/approvals'
 import { sha256 } from '@/lib/policy'
+import { INTERNAL_AGENCY_DEMAND_ROLE_KEYS as INTERNAL_AGENCY_APPROVAL_ROLE_KEYS } from '@/lib/demands/agency-assistance'
+import { createOpenDemandRequestAdjustment } from '@/lib/demands/request-adjustment'
+import { policyResultsRequireSecondLevel } from '@/lib/approvals/policy-routing'
 import { approvalVisibilityMode } from '@/lib/approvals/visibility'
 import {
   buildApprovalSubjectPresentation,
   type ApprovalPresentationContext,
   type ApprovalSubjectPresentation,
 } from '@/lib/approvals/subject-presentation'
-import { writeAuditEvent } from '@/lib/server/audit-log'
+import { writeAuditEvent, writeAuditEventInTransaction } from '@/lib/server/audit-log'
 import {
   normalizeMembershipPermissions,
   requireCompanyAccess,
@@ -56,8 +65,16 @@ import {
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
+import { assertPolicyVersionPublishableInTransaction } from '@/lib/server/policy-service'
+import {
+  realActorUserId,
+  requireActiveOperateRepresentation,
+  SupportRepresentationError,
+  type OperateRepresentationContext,
+} from '@/lib/server/support-representation-service'
 import { persistTravelTransitionInTransaction } from '@/lib/server/travel-lifecycle-persistence'
 import type { TravelLifecycleRecord, TravelLifecycleStatus } from '@/lib/travel-lifecycle'
+import type { CorporateAccessSummary, Permissoes } from '@/types'
 
 type GovernanceStatus = 'draft' | 'in_review' | 'approved' | 'published' | 'suspended' | 'archived'
 type WorkflowScope = { type: 'tenant' | 'group' | 'company'; id?: string | null; mode: 'include' | 'exclude'; specificity: number }
@@ -177,6 +194,25 @@ interface ApprovedQuoteSelectionProjectionRow extends QueryResultRow {
   active_approval_instance_id: string | null
 }
 
+interface ApprovalDemandProjectionRow extends QueryResultRow {
+  id: string
+  company_id: string
+  service_type: string
+  lifecycle_status: TravelLifecycleStatus
+  lifecycle_version: string | number
+  last_policy_evaluation_id: string | null
+  active_approval_instance_id: string | null
+  metadata: Record<string, unknown>
+}
+
+interface RejectedQuoteSelectionProjectionRow extends QueryResultRow {
+  selection_id: string
+  selection_status: string
+  snapshot_hash: string
+  quote_id: string
+  option_id: string
+}
+
 type ApprovalSlaExpirationAction = 'escalate' | 'reassign' | 'expire' | 'notify' | 'passive_approve'
 
 interface ApprovalEscalationRow extends QueryResultRow {
@@ -213,6 +249,9 @@ interface AuthorityRow extends QueryResultRow {
   group_id: string | null
   cost_center_id: string | null
   project_id: string | null
+  department: string | null
+  audience_group_id: string | null
+  approval_level: 1 | 2
   max_amount: string | number | null
   accumulated_amount_limit: string | number | null
   accumulation_period_days: number | null
@@ -353,6 +392,83 @@ export class ApprovalServiceError extends ApprovalWorkflowError {
   }
 }
 
+export function hasExplicitCorporateCompanyPermission(
+  access: CorporateAccessSummary,
+  companyId: string,
+  permission: keyof Permissoes,
+): boolean {
+  const company = access.companies.find((candidate) => candidate.companyId === companyId)
+  return Boolean(company?.delegationAuthorities?.some((authority) => (
+    authority.companyIds.includes(companyId) && authority.permissions[permission]
+  )))
+}
+
+export function isCorporateApprovalMembershipEligible(input: {
+  roleKey: string | null | undefined
+  platformAdmin: boolean
+  tenantWide: boolean
+}): boolean {
+  return !input.platformAdmin
+    && !input.tenantWide
+    && !INTERNAL_AGENCY_APPROVAL_ROLE_KEYS.has(String(input.roleKey || '').trim())
+}
+
+export function hasExplicitCorporateGroupAllPermission(
+  access: CorporateAccessSummary,
+  groupId: string,
+  permission: keyof Permissoes,
+): boolean {
+  const group = access.groups.find((candidate) => candidate.groupId === groupId)
+  return Boolean(group?.delegationAuthorities?.some((authority) => (
+    authority.source === 'group'
+    && authority.accessMode === 'all_companies'
+    && authority.permissions[permission]
+  )))
+}
+
+export interface CanonicalApprovalConflictFacts {
+  realActorUserId: string
+  representationActorUserId?: string | null
+  representationSubjectUserId?: string | null
+  demandCreatedByUserId?: string | null
+  demandUpdatedByUserId?: string | null
+  travelerUserIds?: readonly string[]
+}
+
+export function mergeCanonicalApprovalSubjectConflicts(
+  subject: Record<string, unknown>,
+  facts: CanonicalApprovalConflictFacts,
+): {
+  lastEditorUserId: string
+  assistedActorUserId: string | null
+  conflictedUserIds: string[]
+} {
+  const callerConflictedUserIds = Array.isArray(subject.conflictedUserIds)
+    ? subject.conflictedUserIds.filter(isString)
+    : []
+  const callerLastEditorUserId = isString(subject.lastEditorUserId) ? subject.lastEditorUserId : null
+  const callerAssistedActorUserId = isString(subject.assistedActorUserId) ? subject.assistedActorUserId : null
+  const lastEditorUserId = facts.demandUpdatedByUserId
+    || facts.demandCreatedByUserId
+    || facts.realActorUserId
+  const assistedActorUserId = facts.representationActorUserId || null
+  return {
+    lastEditorUserId,
+    assistedActorUserId,
+    conflictedUserIds: uniqueStrings([
+      ...callerConflictedUserIds,
+      callerLastEditorUserId || '',
+      callerAssistedActorUserId || '',
+      facts.realActorUserId,
+      facts.representationActorUserId || '',
+      facts.representationSubjectUserId || '',
+      facts.demandCreatedByUserId || '',
+      facts.demandUpdatedByUserId || '',
+      ...(facts.travelerUserIds || []),
+    ]),
+  }
+}
+
 export async function listApprovalWorkflows(
   principal: RequestPrincipal,
   filters: { status?: GovernanceStatus; type?: string; search?: string; limit?: number; offset?: number } = {},
@@ -453,6 +569,7 @@ export async function createApprovalWorkflowDraft(
   rawInput: unknown,
 ): Promise<ApprovalWorkflowDetail> {
   const input = approvalWorkflowDraftInputSchema.parse(rawInput)
+  assertGenericApprovalWorkflowCodeAllowed(input.workflowCode)
   await assertCanManageWorkflowScopes(principal, input.scopes)
   const workflowId = randomUUID()
   await withTenantTransaction(principal.tenantId, async (client) => {
@@ -485,6 +602,7 @@ export async function createApprovalWorkflowVersion(
   await assertCanManageWorkflowScopes(principal, input.scopes)
   await withTenantTransaction(principal.tenantId, async (client) => {
     const definition = await loadWorkflowDefinition(client, principal.tenantId, workflowId, true)
+    assertGenericApprovalWorkflowCodeAllowed(definition.workflow_code)
     if (definition.current_version !== input.expectedCurrentVersion) {
       throw new ApprovalServiceError('STALE_WORKFLOW_VERSION', 'O workflow foi alterado por outro usuario.', 409)
     }
@@ -516,6 +634,7 @@ export async function transitionApprovalWorkflow(
   const input = approvalWorkflowTransitionSchema.parse(rawInput)
   await withTenantTransaction(principal.tenantId, async (client) => {
     const definition = await loadWorkflowDefinition(client, principal.tenantId, workflowId, true)
+    assertGenericApprovalWorkflowCodeAllowed(definition.workflow_code)
     const versionResult = await client.query<WorkflowVersionRow>(
       `select * from approval_workflow_versions
        where tenant_id = $1 and id = $2 and workflow_definition_id = $3
@@ -564,11 +683,22 @@ export async function transitionApprovalWorkflow(
   return getApprovalWorkflowDetail(principal, workflowId)
 }
 
+export function assertGenericApprovalWorkflowCodeAllowed(workflowCode: string): void {
+  if (!workflowCode.startsWith('matrix.')) return
+  throw new ApprovalServiceError(
+    'APPROVAL_MATRIX_WORKFLOW_RESERVED',
+    'Workflows com prefixo matrix.* sao gerenciados exclusivamente pela matriz corporativa.',
+    409,
+  )
+}
+
 export async function listApprovalInstances(
   principal: RequestPrincipal,
   filters: {
     status?: ApprovalInstanceRow['status']
     companyId?: string
+    companyIds?: readonly string[]
+    demandId?: string
     assignedToMe?: boolean
     overdueOnly?: boolean
     search?: string
@@ -579,6 +709,19 @@ export async function listApprovalInstances(
   const companyIds = accessibleApprovalCompanyIds(principal, 'ver_aprovacoes')
   if (filters.companyId) {
     await requireCompanyAccess(principal, filters.companyId, 'ver_aprovacoes')
+  }
+  const scopedCompanyIds = filters.companyIds
+    ? [...new Set(filters.companyIds.map((companyId) => companyId.trim()).filter(Boolean))]
+    : null
+  if (filters.companyIds && !scopedCompanyIds?.length) {
+    throw new ApprovalServiceError(
+      'APPROVAL_COMPANY_SCOPE_EMPTY',
+      'Informe ao menos uma empresa autorizada para consultar aprovacoes.',
+      403,
+    )
+  }
+  for (const companyId of scopedCompanyIds || []) {
+    await requireCompanyAccess(principal, companyId, 'ver_aprovacoes')
   }
   return withTenantTransaction(principal.tenantId, async (client) => {
     const values: unknown[] = [principal.tenantId, companyIds, principal.user.id]
@@ -604,9 +747,17 @@ export async function listApprovalInstances(
       values.push(filters.companyId)
       clauses.push(`instance.company_id = $${values.length}`)
     }
+    if (scopedCompanyIds) {
+      values.push(scopedCompanyIds)
+      clauses.push(`instance.company_id = any($${values.length}::text[])`)
+    }
     if (filters.status) {
       values.push(filters.status)
       clauses.push(`instance.status = $${values.length}`)
+    }
+    if (filters.demandId) {
+      values.push(filters.demandId)
+      clauses.push(`instance.demand_id = $${values.length}`)
     }
     if (filters.assignedToMe) {
       clauses.push(`exists (
@@ -676,9 +827,13 @@ export async function listApprovalInstances(
        join approval_workflow_definitions definition
          on definition.tenant_id = instance.tenant_id and definition.id = instance.workflow_definition_id
        left join demands demand
-         on demand.tenant_id = instance.tenant_id and demand.id = instance.demand_id
+         on demand.tenant_id = instance.tenant_id
+        and demand.id = instance.demand_id
+        and demand.company_id = instance.company_id
        left join requesters requester
-         on requester.tenant_id = demand.tenant_id and requester.id = demand.requester_id
+         on requester.tenant_id = demand.tenant_id
+        and requester.id = demand.requester_id
+        and requester.company_id = instance.company_id
        where ${clauses.join(' and ')}
        order by instance.created_at desc, instance.id
        limit $${values.length - 1} offset $${values.length}`,
@@ -707,13 +862,38 @@ export async function createApprovalInstance(
   principal: RequestPrincipal,
   rawInput: unknown,
 ): Promise<ApprovalInstanceDetail> {
+  return createApprovalInstanceWithOrigin(principal, rawInput, 'public_api')
+}
+
+/**
+ * Reserved for server-side domain services that derive the approval subject
+ * from persisted demands, selections, reservations and policy evaluations.
+ * A JSON caller cannot opt in to this origin.
+ */
+export async function createTrustedApprovalInstance(
+  principal: RequestPrincipal,
+  rawInput: unknown,
+): Promise<ApprovalInstanceDetail> {
+  return createApprovalInstanceWithOrigin(principal, rawInput, 'trusted_domain')
+}
+
+async function createApprovalInstanceWithOrigin(
+  principal: RequestPrincipal,
+  rawInput: unknown,
+  origin: 'public_api' | 'trusted_domain',
+): Promise<ApprovalInstanceDetail> {
   const input = createApprovalInstanceSchema.parse(rawInput)
+  assertApprovalInstanceEntityOrigin(input, origin)
+  const actorUserId = realActorUserId(principal)
   await requireCompanyAccess(principal, input.companyId, 'criar_demandas')
   const inputHash = sha256({ ...input, tenantId: principal.tenantId })
   let instanceId = ''
   try {
     instanceId = await withTenantTransaction(principal.tenantId, async (client) => {
       await assertRequesterCanCreateApprovalInstance(client, principal, input)
+      if (origin === 'public_api') {
+        await assertPublicApprovalInstanceWorkflowAllowed(client, principal.tenantId, input)
+      }
       const existing = await client.query<ApprovalInstanceRow>(
         `select * from approval_instances
          where tenant_id = $1 and source_idempotency_key = $2 for update`,
@@ -729,15 +909,34 @@ export async function createApprovalInstance(
       const company = await loadCompanyContext(client, principal.tenantId, input.companyId)
       await validateApprovalEntityOwnership(client, principal.tenantId, input)
       const selected = await loadPublishedWorkflowForCompany(client, principal.tenantId, input, company.groupId)
+      assertApprovalInstanceWorkflowOrigin(selected.definition.workflow_code, origin)
       const parsedSubject = approvalSubjectInputSchema.parse(input.subject)
-      const subject: ApprovalSubject & Record<string, unknown> = {
+      const canonicalSubject = await loadCanonicalApprovalSubjectContext(client, principal, input, parsedSubject)
+      const policyRouting = await loadPolicyApprovalRouting(
+        client,
+        principal.tenantId,
+        input,
+        { ...parsedSubject, ...canonicalSubject },
+      )
+      const baseSubject: ApprovalSubject & Record<string, unknown> = {
         ...parsedSubject,
+        ...canonicalSubject,
         tenantId: principal.tenantId,
         companyId: input.companyId,
         groupId: company.groupId,
+        priorApproverUserIds: [],
+        routing: policyRouting,
       }
       const snapshot = approvalWorkflowSnapshotSchema.parse(selected.version.graph_snapshot)
       assertWorkflowPublishable(snapshot)
+      const preparedRouting = await prepareApprovalRouting(
+        client,
+        principal,
+        snapshot,
+        baseSubject,
+        policyRouting,
+      )
+      const subject = preparedRouting.subject
       const id = randomUUID()
       await client.query(
         `insert into approval_instances (
@@ -749,23 +948,23 @@ export async function createApprovalInstance(
           id, principal.tenantId, selected.definition.id, selected.version.id,
           input.demandId || null, input.reservationId || null, input.companyId,
           input.employeeId || null, input.instanceType, JSON.stringify(subject),
-          JSON.stringify(snapshot), inputHash, input.idempotencyKey, principal.user.id,
+          JSON.stringify(snapshot), inputHash, input.idempotencyKey, actorUserId,
         ],
       )
       await insertApprovalEvent(client, principal, id, null, 'instance_started', {
         workflowVersionId: selected.version.id,
         inputHash,
+        routing: subject.routing || null,
       })
       const start = snapshot.nodes.find((node) => node.type === 'start')
       if (!start) throw new ApprovalServiceError('WORKFLOW_START_NODE_MISSING', 'Workflow publicado sem no inicial.', 409)
-      const initialNodes = resolveNextWorkflowNodes(snapshot, start.id, subject)
       const instance = await loadApprovalInstance(client, principal.tenantId, id, true)
-      await activateWorkflowNodes(client, principal, instance, snapshot, initialNodes)
+      await activateWorkflowNodes(client, principal, instance, snapshot, preparedRouting.initialNodes)
       if (input.demandId) {
         await client.query(
           `update demands set active_approval_instance_id = $3, updated_by = $4
            where tenant_id = $1 and id = $2`,
-          [principal.tenantId, input.demandId, id, principal.user.id],
+          [principal.tenantId, input.demandId, id, actorUserId],
         )
       }
       return id
@@ -780,14 +979,67 @@ export async function createApprovalInstance(
   return getApprovalInstanceDetail(principal, instanceId)
 }
 
+function assertApprovalInstanceEntityOrigin(
+  input: CreateApprovalInstanceInput,
+  origin: 'public_api' | 'trusted_domain',
+): void {
+  if (origin === 'trusted_domain' || !(input.demandId || input.reservationId || input.employeeId)) return
+  throw new ApprovalServiceError(
+    'APPROVAL_ENTITY_INSTANCE_DOMAIN_ORIGIN_REQUIRED',
+    'Aprovacoes vinculadas a entidades de viagem so podem ser iniciadas pelo servico de dominio correspondente.',
+    403,
+  )
+}
+
+export function assertApprovalInstanceWorkflowOrigin(
+  workflowCode: string,
+  origin: 'public_api' | 'trusted_domain',
+): void {
+  if (origin === 'trusted_domain' || !workflowCode.startsWith('matrix.')) return
+  throw new ApprovalServiceError(
+    'APPROVAL_MATRIX_INSTANCE_DOMAIN_ORIGIN_REQUIRED',
+    'Instancias da matriz corporativa so podem ser iniciadas pelo fluxo de dominio que valida os fatos persistidos.',
+    403,
+  )
+}
+
+async function assertPublicApprovalInstanceWorkflowAllowed(
+  client: PoolClient,
+  tenantId: string,
+  input: CreateApprovalInstanceInput,
+): Promise<void> {
+  const values: unknown[] = [tenantId]
+  const selector = input.workflowDefinitionId
+    ? (values.push(input.workflowDefinitionId), `id = $${values.length}`)
+    : (values.push(input.workflowCode), `workflow_code = $${values.length}`)
+  const workflow = await client.query<{ workflow_code: string }>(
+    `select workflow_code from approval_workflow_definitions
+     where tenant_id = $1 and ${selector}`,
+    values,
+  )
+  if (workflow.rows[0]) assertApprovalInstanceWorkflowOrigin(workflow.rows[0].workflow_code, 'public_api')
+}
+
 export async function decideApprovalAssignment(
   principal: RequestPrincipal,
   assignmentId: string,
   rawInput: unknown,
+  options: { allowedCompanyIds?: readonly string[] } = {},
 ): Promise<ApprovalInstanceDetail> {
   assertUuid(assignmentId, 'APPROVAL_ASSIGNMENT_ID_INVALID')
   const input = approvalDecisionInputSchema.parse(rawInput)
+  const allowedCompanyIds = options.allowedCompanyIds
+    ? [...new Set(options.allowedCompanyIds.map((companyId) => companyId.trim()).filter(Boolean))]
+    : null
+  if (options.allowedCompanyIds && !allowedCompanyIds?.length) {
+    throw new ApprovalServiceError(
+      'APPROVAL_COMPANY_SCOPE_EMPTY',
+      'Informe ao menos uma empresa autorizada para decidir aprovacoes.',
+      403,
+    )
+  }
   let instanceId = ''
+  let replayed = false
   await withTenantTransaction(principal.tenantId, async (client) => {
     const assignmentResult = await client.query<ApprovalAssignmentRow>(
       `select * from approval_assignments where tenant_id = $1 and id = $2 for update`,
@@ -795,12 +1047,6 @@ export async function decideApprovalAssignment(
     )
     const assignment = assignmentResult.rows[0]
     if (!assignment) throw new ApprovalServiceError('APPROVAL_ASSIGNMENT_NOT_FOUND', 'Atribuicao de aprovacao nao encontrada.', 404)
-    if (assignment.assignee_user_id !== principal.user.id) {
-      throw new ApprovalServiceError('APPROVAL_ASSIGNMENT_ACCESS_DENIED', 'Esta decisao pertence a outro aprovador.', 403)
-    }
-    const actionTokenId = input.actionToken
-      ? await validateAndLockApprovalActionToken(client, principal, assignment, input)
-      : null
     const stepResult = await client.query<ApprovalStepRow>(
       `select * from approval_steps where tenant_id = $1 and id = $2 for update`,
       [principal.tenantId, assignment.approval_step_id],
@@ -808,21 +1054,46 @@ export async function decideApprovalAssignment(
     const step = stepResult.rows[0]
     if (!step) throw new ApprovalServiceError('APPROVAL_STEP_NOT_FOUND', 'Etapa de aprovacao nao encontrada.', 404)
     const instance = await loadApprovalInstance(client, principal.tenantId, step.approval_instance_id, true)
+    assertApprovalDecisionCompanyScope(instance.company_id, allowedCompanyIds)
     instanceId = instance.id
-    if (Number(step.version) !== input.expectedStepVersion) {
-      throw new ApprovalServiceError('STALE_APPROVAL_STEP', 'A etapa foi alterada por outra decisao. Atualize a tela.', 409)
-    }
-    const existingDecision = await client.query<{ id: string; assignment_id: string; decision: string; reason: string }>(
-      `select id, assignment_id, decision, reason from approval_decisions
+    await requireCompanyAccess(principal, instance.company_id, 'decidir_aprovacoes')
+    const existingDecision = await client.query<{
+      id: string
+      assignment_id: string
+      decision: string
+      reason: string
+      decided_by_user_id: string | null
+      acting_for_user_id: string | null
+      decision_source: string
+      impersonation_id: string | null
+      decision_snapshot: Record<string, unknown> | null
+    }>(
+      `select id, assignment_id, decision, reason, decided_by_user_id,
+              acting_for_user_id, decision_source, impersonation_id,
+              decision_snapshot
+       from approval_decisions
        where tenant_id = $1 and idempotency_key = $2`,
       [principal.tenantId, input.idempotencyKey],
     )
     if (existingDecision.rows[0]) {
       const existing = existingDecision.rows[0]
-      if (existing.assignment_id !== assignmentId || existing.decision !== input.decision || existing.reason !== input.reason) {
+      const replayActor = approvalDecisionActorIdentity(principal, assignment)
+      if (!approvalDecisionReplayMatches(existing, {
+        assignmentId,
+        input,
+        actor: replayActor,
+      })) {
         throw new ApprovalServiceError('APPROVAL_DECISION_IDEMPOTENCY_CONFLICT', 'A chave de idempotencia ja foi usada em outra decisao.', 409)
       }
+      replayed = true
       return
+    }
+    const decisionActor = await authorizeApprovalDecisionActor(client, principal, assignment, instance, step)
+    const actionTokenId = input.actionToken && !decisionActor.representation
+      ? await validateAndLockApprovalActionToken(client, principal, assignment, input)
+      : null
+    if (Number(step.version) !== input.expectedStepVersion) {
+      throw new ApprovalServiceError('STALE_APPROVAL_STEP', 'A etapa foi alterada por outra decisao. Atualize a tela.', 409)
     }
     if (assignment.status !== 'pending' || step.status !== 'pending' || !['pending', 'in_progress'].includes(instance.status)) {
       throw new ApprovalServiceError('APPROVAL_ASSIGNMENT_ALREADY_CLOSED', 'A atribuicao nao esta mais pendente.', 409)
@@ -833,19 +1104,24 @@ export async function decideApprovalAssignment(
       `insert into approval_decisions (
          tenant_id, approval_instance_id, approval_step_id, assignment_id,
          decision, reason, decided_by_user_id, acting_for_user_id,
-         idempotency_key, decision_snapshot
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+         idempotency_key, decision_snapshot, decision_source, impersonation_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
       [
         principal.tenantId, instance.id, step.id, assignment.id, input.decision,
-        input.reason, principal.user.id, assignment.delegated_from_user_id,
-        input.idempotencyKey, JSON.stringify({ expectedStepVersion: input.expectedStepVersion, confirmation: true }),
+        input.reason, decisionActor.actorUserId, decisionActor.actingForUserId,
+        input.idempotencyKey, JSON.stringify({
+          expectedStepVersion: input.expectedStepVersion,
+          confirmation: true,
+          representationId: decisionActor.representation?.id || null,
+        }),
+        decisionActor.source, decisionActor.representation?.id || null,
       ],
     )
     if (actionTokenId) {
       await client.query(
         `update approval_action_tokens set used_at = now(), used_by_user_id = $3
          where tenant_id = $1 and id = $2 and used_at is null`,
-        [principal.tenantId, actionTokenId, principal.user.id],
+        [principal.tenantId, actionTokenId, decisionActor.actorUserId],
       )
     }
     await client.query(
@@ -856,10 +1132,289 @@ export async function decideApprovalAssignment(
     await applyApprovalStepOutcome(client, principal, instance, step, 'decision_recorded', {
       assignmentId,
       decision: input.decision,
+      actorUserId: decisionActor.actorUserId,
+      actingForUserId: decisionActor.actingForUserId,
+      decisionSource: decisionActor.source,
+      impersonationId: decisionActor.representation?.id || null,
     })
   })
-  await auditApprovalChange(principal, 'approval.assignment.decided', assignmentId, { instanceId, decision: input.decision })
+  if (!replayed) {
+    await auditApprovalChange(principal, 'approval.assignment.decided', assignmentId, {
+      instanceId,
+      decision: input.decision,
+      representationId: principal.representation?.id || null,
+      representedUserId: principal.representation?.subject.id || null,
+    })
+  }
   return getApprovalInstanceDetail(principal, instanceId)
+}
+
+export async function findApprovalDecisionReplayAssignmentId(
+  principal: RequestPrincipal,
+  instanceId: string,
+  idempotencyKey: string,
+  allowedCompanyIds: readonly string[],
+): Promise<string | null> {
+  assertUuid(instanceId, 'APPROVAL_INSTANCE_ID_INVALID')
+  const normalizedIdempotencyKey = idempotencyKey.trim()
+  if (normalizedIdempotencyKey.length < 8 || normalizedIdempotencyKey.length > 200) {
+    throw new ApprovalServiceError('APPROVAL_IDEMPOTENCY_KEY_INVALID', 'Chave de idempotencia invalida.', 400)
+  }
+  const companyIds = [...new Set(allowedCompanyIds.map((companyId) => companyId.trim()).filter(Boolean))]
+  if (!companyIds.length) {
+    throw new ApprovalServiceError(
+      'APPROVAL_COMPANY_SCOPE_EMPTY',
+      'Informe ao menos uma empresa autorizada para decidir aprovacoes.',
+      403,
+    )
+  }
+  for (const companyId of companyIds) {
+    await requireCompanyAccess(principal, companyId, 'decidir_aprovacoes')
+  }
+  return withTenantTransaction(principal.tenantId, async (client) => {
+    const result = await client.query<{ assignment_id: string }>(
+      `select decision.assignment_id
+       from approval_decisions decision
+       join approval_instances instance
+         on instance.tenant_id = decision.tenant_id
+        and instance.id = decision.approval_instance_id
+       where decision.tenant_id = $1
+         and decision.approval_instance_id = $2
+         and decision.idempotency_key = $3
+         and instance.company_id = any($4::text[])
+       limit 1`,
+      [principal.tenantId, instanceId, normalizedIdempotencyKey, companyIds],
+    )
+    return result.rows[0]?.assignment_id || null
+  })
+}
+
+export function assertApprovalDecisionCompanyScope(
+  companyId: string,
+  allowedCompanyIds: readonly string[] | null,
+): void {
+  if (allowedCompanyIds && !allowedCompanyIds.includes(companyId)) {
+    throw new ApprovalServiceError(
+      'APPROVAL_INSTANCE_NOT_FOUND',
+      'Aprovacao nao encontrada.',
+      404,
+    )
+  }
+}
+
+export interface ApprovalDecisionActorContext {
+  actorUserId: string
+  actingForUserId: string | null
+  source: 'human' | 'delegated' | 'support_assisted'
+  representation: OperateRepresentationContext | null
+}
+
+export interface ApprovalDecisionReplayRecord {
+  assignment_id: string
+  decision: string
+  reason: string
+  decided_by_user_id: string | null
+  acting_for_user_id: string | null
+  decision_source: string
+  impersonation_id: string | null
+  decision_snapshot: Record<string, unknown> | null
+}
+
+export function approvalDecisionReplayMatches(
+  existing: ApprovalDecisionReplayRecord,
+  expected: {
+    assignmentId: string
+    input: ApprovalDecisionInput
+    actor: ApprovalDecisionActorContext
+  },
+): boolean {
+  const snapshot = existing.decision_snapshot && typeof existing.decision_snapshot === 'object'
+    ? existing.decision_snapshot
+    : {}
+  return existing.assignment_id === expected.assignmentId
+    && existing.decision === expected.input.decision
+    && existing.reason === expected.input.reason
+    && existing.decided_by_user_id === expected.actor.actorUserId
+    && existing.acting_for_user_id === expected.actor.actingForUserId
+    && existing.decision_source === expected.actor.source
+    && existing.impersonation_id === (expected.actor.representation?.id || null)
+    && Number(snapshot.expectedStepVersion) === expected.input.expectedStepVersion
+    && snapshot.confirmation === true
+    && (snapshot.representationId || null) === (expected.actor.representation?.id || null)
+}
+
+function approvalDecisionActorIdentity(
+  principal: RequestPrincipal,
+  assignment: ApprovalAssignmentRow,
+): ApprovalDecisionActorContext {
+  if (!assignment.assignee_user_id) {
+    throw new ApprovalServiceError('APPROVAL_ASSIGNMENT_USER_REQUIRED', 'A atribuicao nao possui um aprovador individual.', 409)
+  }
+  if (principal.representation) {
+    if (assignment.delegated_from_user_id) {
+      throw new ApprovalServiceError(
+        'APPROVAL_ASSISTED_DELEGATION_CONFLICT',
+        'Uma atribuicao delegada nao pode ser decidida por personificacao.',
+        409,
+      )
+    }
+    const actorUserId = principal.actor?.user.id
+    if (
+      principal.representation.mode !== 'operate'
+      || !actorUserId
+      || assignment.assignee_user_id !== principal.representation.subject.id
+      || principal.user.id !== principal.representation.subject.id
+    ) {
+      throw new ApprovalServiceError('APPROVAL_ASSIGNMENT_ACCESS_DENIED', 'A atribuicao nao pertence ao autorizador representado.', 403)
+    }
+    return {
+      actorUserId,
+      actingForUserId: principal.representation.subject.id,
+      source: 'support_assisted',
+      representation: {
+        id: principal.representation.id,
+        actorUserId,
+        targetUserId: principal.representation.subject.id,
+      },
+    }
+  }
+  if (assignment.assignee_user_id !== principal.user.id) {
+    throw new ApprovalServiceError('APPROVAL_ASSIGNMENT_ACCESS_DENIED', 'Esta decisao pertence a outro aprovador.', 403)
+  }
+  return assignment.delegated_from_user_id
+    ? {
+        actorUserId: realActorUserId(principal),
+        actingForUserId: assignment.delegated_from_user_id,
+        source: 'delegated',
+        representation: null,
+      }
+    : {
+        actorUserId: realActorUserId(principal),
+        actingForUserId: null,
+        source: 'human',
+        representation: null,
+      }
+}
+
+async function authorizeApprovalDecisionActor(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  assignment: ApprovalAssignmentRow,
+  instance: ApprovalInstanceRow,
+  step: ApprovalStepRow,
+): Promise<ApprovalDecisionActorContext> {
+  const identity = approvalDecisionActorIdentity(principal, assignment)
+  if (identity.representation) {
+    try {
+      const representation = await requireActiveOperateRepresentation(client, principal, {
+        action: 'approval.decide',
+        companyId: instance.company_id,
+        targetUserId: identity.representation.targetUserId,
+      })
+      const subject = asApprovalSubject(instance.subject_snapshot)
+      const node = approvalWorkflowSnapshotSchema.parse(instance.workflow_snapshot).nodes
+        .find((candidate) => candidate.id === step.node_id)
+      if (!node?.approverResolution) {
+        throw new ApprovalServiceError(
+          'APPROVAL_ASSISTED_NODE_INVALID',
+          'A etapa representada nao possui regras de aprovador validas.',
+          409,
+        )
+      }
+      if (approverConflictsWithSubject(representation.actorUserId, subject, node.approverResolution)) {
+        throw new ApprovalServiceError(
+          'APPROVAL_ASSISTED_SOD_CONFLICT',
+          'O operador real possui conflito de segregacao de funcoes e nao pode registrar esta decisao.',
+          403,
+        )
+      }
+      return {
+        actorUserId: representation.actorUserId,
+        actingForUserId: representation.targetUserId,
+        source: 'support_assisted',
+        representation,
+      }
+    } catch (error) {
+      if (error instanceof SupportRepresentationError) {
+        throw new ApprovalServiceError(error.code, error.message, error.status)
+      }
+      throw error
+    }
+  }
+  if (assignment.delegated_from_user_id) {
+    await assertActiveDelegatedAssignment(client, principal.tenantId, assignment, instance)
+    return identity
+  }
+  return identity
+}
+
+async function assertActiveDelegatedAssignment(
+  client: PoolClient,
+  tenantId: string,
+  assignment: ApprovalAssignmentRow,
+  instance: ApprovalInstanceRow,
+): Promise<void> {
+  if (!assignment.source_reference || !assignment.delegated_from_user_id || !assignment.assignee_user_id) {
+    throw new ApprovalServiceError('APPROVAL_DELEGATION_CONTEXT_MISSING', 'A atribuicao delegada perdeu sua referencia de origem.', 409)
+  }
+  const result = await client.query(
+    `select 1
+     from approval_delegations delegation
+     join tenant_memberships delegator
+       on delegator.tenant_id = delegation.tenant_id
+      and delegator.id = delegation.delegator_membership_id
+      and delegator.user_id = $4
+      and delegator.status = 'active'
+     join tenant_memberships delegate
+       on delegate.tenant_id = delegation.tenant_id
+      and delegate.id = delegation.delegate_membership_id
+      and delegate.user_id = $5
+      and delegate.status = 'active'
+     where delegation.tenant_id = $1 and delegation.id::text = $2
+       and delegation.status in ('active', 'scheduled')
+       and delegation.valid_from <= now() and delegation.valid_until > now()
+       and exists (
+         select 1 from approval_delegation_modules module
+         where module.tenant_id = delegation.tenant_id
+           and module.delegation_id = delegation.id and module.module_key = 'approvals'
+       )
+       and (
+         exists (
+           select 1 from approval_delegation_companies company_scope
+           where company_scope.tenant_id = delegation.tenant_id
+             and company_scope.delegation_id = delegation.id
+             and company_scope.company_id = $3
+         )
+         or exists (
+           select 1 from approval_instances scoped_instance
+           join approval_delegation_groups group_scope
+             on group_scope.tenant_id = delegation.tenant_id
+            and group_scope.delegation_id = delegation.id
+           join companies company
+             on company.tenant_id = scoped_instance.tenant_id
+            and company.id = scoped_instance.company_id
+            and company.group_id = group_scope.group_id
+           where scoped_instance.tenant_id = delegation.tenant_id
+             and scoped_instance.id = $6
+         )
+       )
+     for share of delegation`,
+    [
+      tenantId,
+      assignment.source_reference,
+      instance.company_id,
+      assignment.delegated_from_user_id,
+      assignment.assignee_user_id,
+      instance.id,
+    ],
+  )
+  if (!result.rows[0]) {
+    throw new ApprovalServiceError(
+      'APPROVAL_DELEGATION_NO_LONGER_VALID',
+      'A delegacao expirou, foi revogada ou nao cobre mais esta empresa. A atribuicao deve ser reavaliada.',
+      409,
+    )
+  }
 }
 
 async function applyApprovalStepOutcome(
@@ -911,8 +1466,61 @@ async function applyApprovalStepOutcome(
     return
   }
   const snapshot = approvalWorkflowSnapshotSchema.parse(instance.workflow_snapshot)
-  const nextNodes = resolveNextWorkflowNodes(snapshot, step.node_id, asRecord(instance.subject_snapshot))
-  await activateWorkflowNodes(client, principal, instance, snapshot, nextNodes)
+  const routingFacts = await persistApprovedStepRoutingContext(client, principal, instance, step)
+  const nextNodes = resolveNextWorkflowNodes(snapshot, step.node_id, routingFacts)
+  await activateWorkflowNodes(
+    client,
+    principal,
+    { ...instance, subject_snapshot: routingFacts },
+    snapshot,
+    nextNodes,
+  )
+}
+
+async function persistApprovedStepRoutingContext(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  instance: ApprovalInstanceRow,
+  step: ApprovalStepRow,
+): Promise<Record<string, unknown>> {
+  const approved = await client.query<{ user_id: string }>(
+    `select distinct approved_actor.user_id
+     from (
+       select assignment.assignee_user_id as user_id
+       from approval_assignments assignment
+       where assignment.tenant_id = $1 and assignment.approval_step_id = $2
+         and assignment.status = 'approved' and assignment.assignee_user_id is not null
+       union
+       select decision.decided_by_user_id as user_id
+       from approval_decisions decision
+       where decision.tenant_id = $1 and decision.approval_step_id = $2
+         and decision.decision = 'approved' and decision.decided_by_user_id is not null
+       union
+       select decision.acting_for_user_id as user_id
+       from approval_decisions decision
+       where decision.tenant_id = $1 and decision.approval_step_id = $2
+         and decision.decision = 'approved' and decision.acting_for_user_id is not null
+     ) approved_actor
+     order by approved_actor.user_id`,
+    [principal.tenantId, step.id],
+  )
+  const subject = asRecord(instance.subject_snapshot)
+  const priorApproverUserIds = uniqueStrings([
+    ...(Array.isArray(subject.priorApproverUserIds) ? subject.priorApproverUserIds.filter(isString) : []),
+    ...approved.rows.map((row) => row.user_id),
+  ])
+  const updated: Record<string, unknown> = { ...subject, priorApproverUserIds }
+  await client.query(
+    `update approval_instances
+     set subject_snapshot = $3::jsonb, version = version + 1
+     where tenant_id = $1 and id = $2`,
+    [principal.tenantId, instance.id, JSON.stringify(updated)],
+  )
+  await insertApprovalEvent(client, principal, instance.id, step.id, 'routing_context_updated', {
+    priorApproverUserIds,
+    routing: updated['routing'] || null,
+  })
+  return updated
 }
 
 export async function listApprovalDelegations(
@@ -1103,7 +1711,7 @@ export async function revokeApprovalDelegation(
 
 export async function listApprovalAuthorities(
   principal: RequestPrincipal,
-  filters: { membershipId?: string; kind?: ApprovalKind; status?: string; limit?: number; offset?: number } = {},
+  filters: { membershipId?: string; kind?: ApprovalKind; status?: string; companyId?: string; includeInherited?: boolean; approvalLevel?: 1 | 2; limit?: number; offset?: number } = {},
 ): Promise<{ items: Array<Record<string, unknown>>; total: number }> {
   return withTenantTransaction(principal.tenantId, async (client) => {
     const values: unknown[] = [principal.tenantId]
@@ -1120,6 +1728,21 @@ export async function listApprovalAuthorities(
     if (filters.status) {
       values.push(filters.status)
       clauses.push(`authority.status = $${values.length}`)
+    }
+    if (filters.companyId) {
+      values.push(filters.companyId)
+      const companyParameter = values.length
+      clauses.push(filters.includeInherited
+        ? `(authority.company_id = $${companyParameter} or authority.group_id = (
+             select company.group_id from companies company
+             where company.tenant_id = authority.tenant_id and company.id = $${companyParameter}
+               and company.deleted_at is null
+           ))`
+        : `authority.company_id = $${companyParameter}`)
+    }
+    if (filters.approvalLevel) {
+      values.push(filters.approvalLevel)
+      clauses.push(`authority.approval_level = $${values.length}`)
     }
     if (!principal.platformAdmin && principal.roleKey !== 'tenant_admin') {
       values.push(principal.membershipId)
@@ -1144,7 +1767,11 @@ export async function listApprovalAuthorities(
               authority.approval_kind as "approvalKind", authority.company_id as "companyId",
               authority.group_id as "groupId", authority.cost_center_id as "costCenterId",
               cost_center.code as "costCenterCode", cost_center.name as "costCenterName",
-              authority.project_id as "projectId", authority.max_amount::float8 as "maxAmount",
+              authority.project_id as "projectId", authority.department,
+              authority.audience_group_id as "audienceGroupId",
+              audience_group.name as "audienceGroupName",
+              authority.approval_level as "approvalLevel",
+              authority.max_amount::float8 as "maxAmount",
               authority.accumulated_amount_limit::float8 as "accumulatedAmountLimit",
               authority.accumulation_period_days as "accumulationPeriodDays",
               authority.max_percentage_above_lowest::float8 as "maxPercentageAboveLowest",
@@ -1163,6 +1790,9 @@ export async function listApprovalAuthorities(
          on cost_center.tenant_id = authority.tenant_id
         and cost_center.id = authority.cost_center_id
         and cost_center.deleted_at is null
+       left join approval_audience_groups audience_group
+         on audience_group.tenant_id = authority.tenant_id
+        and audience_group.id = authority.audience_group_id
        where ${clauses.join(' and ')}
        order by authority.created_at desc, authority.id
        limit $${values.length - 1} offset $${values.length}`,
@@ -1172,67 +1802,1711 @@ export async function listApprovalAuthorities(
   })
 }
 
+export async function listApprovalCandidates(
+  principal: RequestPrincipal,
+  filters: {
+    companyId?: string
+    companyIds?: readonly string[]
+    businessGroupId?: string
+    allCompanies?: boolean
+    search?: string
+    limit?: number
+    offset?: number
+  },
+): Promise<{ items: Array<Record<string, unknown>>; total: number }> {
+  const companyIds = uniqueStrings([
+    ...(filters.companyId ? [filters.companyId] : []),
+    ...(filters.companyIds || []),
+  ])
+  if (
+    !companyIds.length
+    || companyIds.length > 100
+    || (filters.companyId && filters.companyIds)
+    || Boolean(filters.businessGroupId) !== Boolean(filters.allCompanies)
+    || (filters.allCompanies && !filters.companyIds)
+  ) {
+    throw new ApprovalServiceError('APPROVAL_CANDIDATE_SCOPE_INVALID', 'Informe de uma a cem empresas em um unico modo de consulta.', 422)
+  }
+  const requireDecisionInEveryCompany = Boolean(filters.companyIds)
+  if (!principal.platformAdmin && principal.roleKey !== 'tenant_admin') {
+    for (const companyId of companyIds) {
+      const companyAccess = principal.corporateAccess?.companies.find((company) => company.companyId === companyId)
+      if (
+        !companyAccess?.permissions.gerenciar_workflows
+        && !companyAccess?.permissions.gerenciar_vinculos_acesso
+        && !companyAccess?.permissions.gerenciar_usuarios
+      ) {
+        throw new ApprovalServiceError('APPROVAL_CANDIDATE_SCOPE_DENIED', 'Sem permissao para consultar candidatos em todas as empresas.', 403)
+      }
+    }
+  }
+  if (filters.allCompanies && filters.businessGroupId) {
+    assertAllCompaniesMatrixActor(principal, filters.businessGroupId)
+  }
+  return withTenantTransaction(principal.tenantId, async (client) => {
+    const values: unknown[] = [principal.tenantId, companyIds]
+    let groupParameter: number | null = null
+    if (filters.allCompanies && filters.businessGroupId) {
+      const groupCompanies = await client.query<{ id: string }>(
+        `select id from companies
+         where tenant_id = $1 and group_id = $2 and deleted_at is null
+         order by id`,
+        [principal.tenantId, filters.businessGroupId],
+      )
+      const activeCompanyIds = groupCompanies.rows.map((company) => company.id).sort()
+      const requestedCompanyIds = [...companyIds].sort()
+      if (JSON.stringify(activeCompanyIds) !== JSON.stringify(requestedCompanyIds)) {
+        throw new ApprovalServiceError(
+          'APPROVAL_CANDIDATE_GROUP_COVERAGE_INVALID',
+          'companyIds precisa corresponder a todas as empresas ativas do grupo.',
+          422,
+        )
+      }
+      values.push(filters.businessGroupId)
+      groupParameter = values.length
+    }
+    const clauses = [
+      'membership.tenant_id = $1',
+      "membership.status = 'active'",
+      "user_row.status = 'active'",
+      'user_row.deleted_at is null',
+      'not user_row.platform_admin',
+      `not exists (
+        select 1 from roles internal_role
+        where internal_role.id = membership.role_id
+          and internal_role.role_key = any(array['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator']::text[])
+      )`,
+      groupParameter
+        ? `corporate_user_can_decide_for_group_all($1, membership.id, $${groupParameter})`
+        : requireDecisionInEveryCompany
+        ? `not exists (
+            select 1 from unnest($2::text[]) requested_company(company_id)
+            where not corporate_user_can_decide_for_company($1, membership.id, requested_company.company_id)
+          )`
+        : 'corporate_user_has_company_access($1, membership.id, ($2::text[])[1])',
+    ]
+    if (filters.search?.trim()) {
+      values.push(`%${filters.search.trim()}%`)
+      clauses.push(`(user_row.name ilike $${values.length} or user_row.email::text ilike $${values.length})`)
+    }
+    const count = await client.query<{ total: string }>(
+      `select count(*)::text as total
+       from tenant_memberships membership
+       join users user_row on user_row.id = membership.user_id
+       where ${clauses.join(' and ')}`,
+      values,
+    )
+    values.push(Math.min(200, Math.max(1, filters.limit || 100)), Math.max(0, filters.offset || 0))
+    const rows = await client.query<MembershipCandidateRow & { name: string; email: string }>(
+      `select membership.id as membership_id, membership.user_id,
+              membership.status as membership_status, membership.profile_key,
+              role_row.role_key, user_row.platform_admin, membership.company_id,
+              membership.allowed_company_ids, membership.allowed_group_ids,
+              coalesce((
+                select jsonb_object_agg(role_permission.permission_key, role_permission.allowed)
+                from role_permissions role_permission where role_permission.role_id = role_row.id
+              ), '{}'::jsonb) || membership.custom_permissions as permissions,
+              user_row.metadata as user_metadata, user_row.name, user_row.email::text
+       from tenant_memberships membership
+       join users user_row on user_row.id = membership.user_id
+       join roles role_row on role_row.id = membership.role_id
+       where ${clauses.join(' and ')}
+       order by lower(user_row.name), membership.id
+       limit $${values.length - 1} offset $${values.length}`,
+      values,
+    )
+    const items: Array<Record<string, unknown>> = []
+    for (const row of rows.rows) {
+      if (!isCorporateApprovalMembershipEligible({
+        roleKey: row.role_key,
+        platformAdmin: row.platform_admin,
+        tenantWide: false,
+      })) continue
+      const access = await resolveEffectiveCorporateAccessInTransaction(client, {
+        tenantId: principal.tenantId,
+        membershipId: row.membership_id,
+        roleKey: row.role_key,
+        platformAdmin: false,
+        membershipPermissions: normalizeMembershipPermissions(row.permissions, row.profile_key),
+        legacyCompanyId: row.company_id,
+        legacyCompanyIds: row.allowed_company_ids || [],
+        legacyGroupIds: row.allowed_group_ids || [],
+      })
+      if (access.summary.tenantWide) continue
+      const companies = companyIds.map((companyId) => (
+        access.summary.companies.find((candidate) => candidate.companyId === companyId) || null
+      ))
+      if (companies.some((company) => !company)) continue
+      const companyAccess = companies.filter((company): company is NonNullable<typeof company> => Boolean(company))
+      if (requireDecisionInEveryCompany && companyAccess.some((company) => (
+        !hasExplicitCorporateCompanyPermission(access.summary, company.companyId, 'decidir_aprovacoes')
+      ))) continue
+      if (filters.allCompanies && filters.businessGroupId && !hasExplicitCorporateGroupAllPermission(
+        access.summary,
+        filters.businessGroupId,
+        'decidir_aprovacoes',
+      )) continue
+      const effectiveProfiles = uniqueStrings(companyAccess.flatMap((company) => company.profiles))
+      const effectivePermissions = Object.fromEntries(
+        Object.keys(companyAccess[0].permissions).map((permission) => [
+          permission,
+          companyAccess.every((company) => company.permissions[permission as keyof Permissoes]),
+        ]),
+      ) as unknown as Permissoes
+      items.push({
+        membershipId: row.membership_id,
+        userId: row.user_id,
+        name: row.name,
+        email: row.email,
+        companyIds,
+        businessGroupId: filters.businessGroupId || null,
+        accessMode: filters.allCompanies ? 'all_companies' : null,
+        companyAccess: companyAccess.map((company) => ({
+          companyId: company.companyId,
+          effectiveProfiles: company.profiles,
+          effectivePermissions: company.permissions,
+        })),
+        effectiveProfiles,
+        effectivePermissions,
+        active: true,
+        canDecideApprovals: companyAccess.every((company) => company.permissions.decidir_aprovacoes),
+      })
+    }
+    return { items, total: Number(count.rows[0]?.total || 0) }
+  })
+}
+
 export async function createApprovalAuthority(
   principal: RequestPrincipal,
   rawInput: unknown,
 ): Promise<Record<string, unknown>> {
   const input = approvalAuthorityInputSchema.parse(rawInput)
-  const authorityId = await withTenantTransaction(principal.tenantId, async (client) => {
-    const target = await loadMembershipCandidate(client, principal.tenantId, input.membershipId)
-    const targetPermissions = normalizeMembershipPermissions(target.permissions, target.profile_key)
-    if (target.platform_admin || !targetPermissions.decidir_aprovacoes) {
-      throw new ApprovalServiceError('APPROVAL_AUTHORITY_TARGET_INELIGIBLE', 'O usuario nao esta apto a receber alcada de aprovacao.', 422)
-    }
-    const scopeCompanyId = await assertAuthorityScope(client, principal, input)
-    const targetAccess = await resolveEffectiveCorporateAccessInTransaction(client, {
-      tenantId: principal.tenantId,
-      membershipId: target.membership_id,
-      roleKey: target.role_key,
-      platformAdmin: false,
-      membershipPermissions: targetPermissions,
-      legacyCompanyId: target.company_id,
-      legacyCompanyIds: target.allowed_company_ids || [],
-      legacyGroupIds: target.allowed_group_ids || [],
-    })
-    if (scopeCompanyId && !targetAccess.summary.companyIds.includes(scopeCompanyId)) {
-      throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_DENIED', 'O usuario nao possui acesso a empresa da alcada.', 409)
-    }
-    if (input.groupId && !targetAccess.summary.groupIds.includes(input.groupId)) {
-      throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_DENIED', 'O usuario nao possui acesso ao grupo da alcada.', 409)
-    }
-    await assertAuthorityCanBeGranted(client, principal, input)
-    const inserted = await client.query<{ id: string }>(
-      `insert into approval_authorities (
-         tenant_id, membership_id, approval_kind, company_id, group_id,
-         cost_center_id, project_id, max_amount, accumulated_amount_limit,
-         accumulation_period_days, max_percentage_above_lowest,
-         max_percentage_above_average, requires_budget_available, urgent_allowed,
-         currency, products, destinations, risk_levels, valid_from, valid_until, justification,
-         status, created_by_membership_id
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                 $15, $16::text[], $17::text[], $18::text[], $19, $20, $21,
-                 case when $19 > now() then 'scheduled' else 'active' end, $22)
-       returning id`,
-      [
-        principal.tenantId, input.membershipId, input.approvalKind,
-        input.companyId || null, input.groupId || null, input.costCenterId || null,
-        input.projectId || null, input.maxAmount ?? null,
-        input.accumulatedAmountLimit ?? null, input.accumulationPeriodDays ?? null,
-        input.maxPercentageAboveLowest ?? null, input.maxPercentageAboveAverage ?? null,
-        input.requiresBudgetAvailable, input.urgentAllowed, input.currency || null,
-        uniqueStrings(input.products), uniqueStrings(input.destinations),
-        uniqueStrings(input.riskLevels), input.validFrom, input.validUntil || null,
-        input.justification, principal.membershipId,
-      ],
+  if (input.approvalKind === 'merit' || input.approvalKind === 'cost') {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_REQUIRED_FOR_TRAVEL_AUTHORITY',
+      'Alcadas de merito e custo devem ser criadas pela matriz governada de aprovacao.',
+      409,
     )
-    return inserted.rows[0].id
-  }).catch((error) => {
+  }
+  const authorityId = await withTenantTransaction(
+    principal.tenantId,
+    (client) => insertApprovalAuthorityInTransaction(client, principal, input, 'effective'),
+  ).catch((error) => {
     if (isUniqueViolation(error)) throw new ApprovalServiceError('APPROVAL_AUTHORITY_ALREADY_EXISTS', 'Ja existe uma alcada ativa equivalente.', 409)
     throw error
   })
   await auditApprovalChange(principal, 'approval.authority.created', authorityId, { membershipId: input.membershipId, kind: input.approvalKind })
   const result = await listApprovalAuthorities(principal, { membershipId: input.membershipId, limit: 200 })
   return result.items.find((item) => item.id === authorityId) || { id: authorityId }
+}
+
+async function insertApprovalAuthorityInTransaction(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  input: ApprovalAuthorityInput,
+  statusMode: 'draft' | 'effective',
+): Promise<string> {
+  const target = await loadMembershipCandidate(client, principal.tenantId, input.membershipId)
+  const targetPermissions = normalizeMembershipPermissions(target.permissions, target.profile_key)
+  if (target.platform_admin) {
+    throw new ApprovalServiceError('APPROVAL_AUTHORITY_TARGET_INELIGIBLE', 'O usuario nao esta apto a receber alcada de aprovacao.', 422)
+  }
+  const scopeCompanyId = await assertAuthorityScope(client, principal, input)
+  const scopedInput: ApprovalAuthorityInput = {
+    ...input,
+    companyId: scopeCompanyId || input.companyId || null,
+  }
+  const targetAccess = await resolveEffectiveCorporateAccessInTransaction(client, {
+    tenantId: principal.tenantId,
+    membershipId: target.membership_id,
+    roleKey: target.role_key,
+    platformAdmin: false,
+    membershipPermissions: targetPermissions,
+    legacyCompanyId: target.company_id,
+    legacyCompanyIds: target.allowed_company_ids || [],
+    legacyGroupIds: target.allowed_group_ids || [],
+  })
+  assertEligibleCorporateAuthorityTarget(target, targetAccess.summary, scopedInput)
+  if (scopeCompanyId && !targetAccess.summary.companies.some((company) => (
+    company.companyId === scopeCompanyId && company.permissions.decidir_aprovacoes
+  ))) {
+    throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_DENIED', 'O usuario nao possui acesso a empresa da alcada.', 409)
+  }
+  if (input.groupId && (
+    !targetAccess.summary.groupIds.includes(input.groupId)
+    || !targetAccess.summary.companies.some((company) => (
+      company.groupId === input.groupId && company.permissions.decidir_aprovacoes
+    ))
+  )) {
+    throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_DENIED', 'O usuario nao possui acesso ao grupo da alcada.', 409)
+  }
+  if (statusMode === 'effective') {
+    await assertAuthorityCanBeGranted(client, principal, scopedInput)
+  }
+  const inserted = await client.query<{ id: string }>(
+    `insert into approval_authorities (
+       tenant_id, membership_id, approval_kind, company_id, group_id,
+       cost_center_id, project_id, department, audience_group_id, approval_level,
+       max_amount, accumulated_amount_limit,
+       accumulation_period_days, max_percentage_above_lowest,
+       max_percentage_above_average, requires_budget_available, urgent_allowed,
+       currency, products, destinations, risk_levels, valid_from, valid_until, justification,
+       status, created_by_membership_id
+     ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+               $15, $16, $17, $18, $19::text[], $20::text[], $21::text[], $22, $23, $24,
+               case when $25 = 'draft' then 'draft'
+                    when $22 > now() then 'scheduled' else 'active' end, $26)
+     returning id`,
+    [
+      principal.tenantId, input.membershipId, input.approvalKind,
+      scopedInput.companyId || null, input.groupId || null, input.costCenterId || null,
+      input.projectId || null, input.department || null, input.audienceGroupId || null,
+      input.approvalLevel, input.maxAmount ?? null,
+      input.accumulatedAmountLimit ?? null, input.accumulationPeriodDays ?? null,
+      input.maxPercentageAboveLowest ?? null, input.maxPercentageAboveAverage ?? null,
+      input.requiresBudgetAvailable, input.urgentAllowed, input.currency || null,
+      uniqueStrings(input.products), uniqueStrings(input.destinations),
+      uniqueStrings(input.riskLevels), input.validFrom, input.validUntil || null,
+      input.justification, statusMode, principal.membershipId,
+    ],
+  )
+  return inserted.rows[0].id
+}
+
+function assertEligibleCorporateAuthorityTarget(
+  target: MembershipCandidateRow,
+  access: CorporateAccessSummary,
+  input: ApprovalAuthorityInput,
+): void {
+  if (!isCorporateApprovalMembershipEligible({
+    roleKey: target.role_key,
+    platformAdmin: target.platform_admin,
+    tenantWide: access.tenantWide,
+  })) {
+    throw new ApprovalServiceError(
+      'APPROVAL_AUTHORITY_TARGET_INTERNAL',
+      'A alcada deve ser atribuida a um usuario corporativo com acesso explicito, nao a uma identidade interna global.',
+      422,
+    )
+  }
+  if (input.groupId) {
+    if (!hasExplicitCorporateGroupAllPermission(access, input.groupId, 'decidir_aprovacoes')) {
+      throw new ApprovalServiceError(
+        'APPROVAL_AUTHORITY_GROUP_ALL_REQUIRED',
+        'A alcada de grupo exige um grant corporativo all_companies com permissao para decidir aprovacoes.',
+        409,
+      )
+    }
+    return
+  }
+  if (input.companyId) {
+    if (!hasExplicitCorporateCompanyPermission(access, input.companyId, 'decidir_aprovacoes')) {
+      throw new ApprovalServiceError(
+        'APPROVAL_AUTHORITY_SCOPE_DENIED',
+        'O usuario nao possui grant corporativo explicito para decidir aprovacoes nesta empresa.',
+        409,
+      )
+    }
+    return
+  }
+  const hasExplicitDecisionGrant = access.companies.some((company) => (
+    hasExplicitCorporateCompanyPermission(access, company.companyId, 'decidir_aprovacoes')
+  ))
+  if (!hasExplicitDecisionGrant) {
+    throw new ApprovalServiceError(
+      'APPROVAL_AUTHORITY_TARGET_EXPLICIT_ACCESS_REQUIRED',
+      'O usuario precisa de ao menos um grant corporativo explicito para receber alcada.',
+      409,
+    )
+  }
+}
+
+export interface ApprovalMatrixDraftResult {
+  matrixId: string
+  stage: 'merit' | 'cost'
+  scope: ApprovalMatrixInput['scope']
+  authorityIds: string[]
+  version: 1
+  workflow: { id: string; versionId: string; code: string; status: GovernanceStatus; reused: boolean }
+  policy: { id: string; versionId: string; code: string; status: GovernanceStatus; reused: boolean }
+  status: 'draft'
+  bindingState: 'draft_not_active'
+  nextAction: 'submit_review'
+}
+
+export async function createApprovalMatrixDraft(
+  principal: RequestPrincipal,
+  rawInput: unknown,
+): Promise<ApprovalMatrixDraftResult> {
+  const input = approvalMatrixInputSchema.parse(rawInput)
+  const ruleSlotKey = approvalMatrixRuleSlotKey(input)
+  const workflowScopes = matrixWorkflowScopes(input.scope)
+  await assertCanManageWorkflowScopes(principal, workflowScopes)
+  const matrixId = randomUUID()
+  return withTenantTransaction(principal.tenantId, async (client) => {
+    await validateMatrixRootScope(client, principal, input)
+    await assertCompatibleCanonicalMatrixScope(client, principal.tenantId, input)
+    const materializedAuthorities = await materializeMatrixAuthorities(client, principal, input)
+    const authorityIds: string[] = []
+    for (const authority of materializedAuthorities) {
+      authorityIds.push(await insertApprovalAuthorityInTransaction(client, principal, authority, 'draft'))
+    }
+
+    const key = canonicalMatrixKey(input.scope, input.stage)
+    const workflow = await ensureCanonicalMatrixWorkflow(client, principal, input, key, workflowScopes)
+    const policy = await ensureCanonicalMatrixPolicy(client, principal, input, key, workflow.code)
+    await client.query(
+      `insert into approval_matrices (
+         id, tenant_id, root_scope_type, company_id, business_group_id,
+         access_mode, selected_company_ids, stage, rule_slot_key, authority_ids,
+         workflow_definition_id, workflow_version_id,
+         policy_definition_id, policy_version_id, created_by
+       ) values ($1, $2, $3, $4, $5, $6, $7::text[], $8, $9, $10::uuid[], $11, $12, $13, $14, $15)`,
+      [
+        matrixId,
+        principal.tenantId,
+        input.scope.type,
+        input.scope.type === 'company' ? input.scope.companyId : null,
+        input.scope.type === 'business_group' ? input.scope.businessGroupId : null,
+        input.scope.type === 'business_group' ? input.scope.mode : null,
+        input.scope.type === 'business_group' ? uniqueStrings(input.scope.companyIds) : [],
+        input.stage,
+        ruleSlotKey,
+        authorityIds,
+        workflow.id,
+        workflow.versionId,
+        policy.id,
+        policy.versionId,
+        principal.user.id,
+      ],
+    )
+    await writeAuditEventInTransaction(client, {
+      action: 'approval.matrix.created',
+      result: 'success',
+      tenantId: principal.tenantId,
+      actorUserId: realActorUserId(principal),
+      entityType: 'approval_matrix',
+      entityId: matrixId,
+      metadata: {
+        stage: input.stage,
+        scope: input.scope,
+        authorityIds,
+        workflowId: workflow.id,
+        policyId: policy.id,
+        bindingState: 'draft_not_active',
+      },
+    })
+    return {
+      matrixId,
+      stage: input.stage,
+      scope: input.scope,
+      authorityIds,
+      version: 1 as const,
+      workflow,
+      policy,
+      status: 'draft' as const,
+      bindingState: 'draft_not_active' as const,
+      nextAction: 'submit_review' as const,
+    }
+  }).catch((error) => {
+    if (isUniqueViolation(error)) {
+      throw new ApprovalServiceError('APPROVAL_MATRIX_CONFLICT', 'Ja existe uma regra equivalente nesta matriz.', 409)
+    }
+    throw error
+  })
+}
+
+export function approvalMatrixRuleSlotKey(input: ApprovalMatrixInput): string {
+  const root = input.scope.type === 'company'
+    ? { type: 'company' as const, id: input.scope.companyId, mode: null, companyIds: [] as string[] }
+    : {
+        type: 'business_group' as const,
+        id: input.scope.businessGroupId,
+        mode: input.scope.mode,
+        companyIds: uniqueStrings(input.scope.companyIds),
+      }
+  const levelOnePredicates = input.authorities
+    .filter((authority) => authority.approvalLevel === 1)
+    .map((authority) => sha256({
+      root,
+      stage: input.stage,
+      organizationalScope: {
+        costCenterId: authority.costCenterId || null,
+        projectId: authority.projectId || null,
+        department: authority.department ? normalizeOrganizationalLabel(authority.department) : null,
+        audienceGroupId: authority.audienceGroupId || null,
+      },
+      applicability: {
+        currency: authority.currency?.toUpperCase() || null,
+        products: uniqueStrings(authority.products || []),
+        destinations: uniqueStrings(authority.destinations || []),
+        riskLevels: uniqueStrings(authority.riskLevels || []),
+      },
+    }))
+  const distinctSlots = uniqueStrings(levelOnePredicates)
+  if (distinctSlots.length !== 1) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_MULTIPLE_RULE_SLOTS',
+      'Uma matriz deve representar um unico recorte de regra; crie outra regra para predicados diferentes.',
+      422,
+    )
+  }
+  return distinctSlots[0]
+}
+
+export async function listApprovalMatrices(
+  principal: RequestPrincipal,
+  filters: {
+    companyId?: string
+    businessGroupId?: string
+    includeInherited?: boolean
+    stage?: 'merit' | 'cost'
+    status?: 'draft' | 'in_review' | 'approved' | 'published' | 'archived'
+    limit?: number
+    offset?: number
+  } = {},
+): Promise<{ items: Array<Record<string, unknown>>; total: number }> {
+  if (filters.companyId) await requireCompanyAccess(principal, filters.companyId, 'gerenciar_workflows')
+  if (filters.businessGroupId) await requireGroupAccess(principal, filters.businessGroupId, 'gerenciar_workflows')
+  return withTenantTransaction(principal.tenantId, async (client) => {
+    const values: unknown[] = [principal.tenantId]
+    const clauses = ['matrix.tenant_id = $1']
+    if (filters.companyId) {
+      values.push(filters.companyId)
+      const companyParameter = values.length
+      clauses.push(filters.includeInherited
+        ? `(matrix.company_id = $${companyParameter} or (
+             matrix.business_group_id = (
+               select company.group_id from companies company
+               where company.tenant_id = matrix.tenant_id and company.id = $${companyParameter}
+                 and company.deleted_at is null
+             )
+             and (matrix.access_mode = 'all_companies' or $${companyParameter} = any(matrix.selected_company_ids))
+           ))`
+        : `matrix.company_id = $${companyParameter}`)
+    }
+    if (filters.businessGroupId) {
+      values.push(filters.businessGroupId)
+      clauses.push(`matrix.business_group_id = $${values.length}`)
+    }
+    if (filters.stage) {
+      values.push(filters.stage)
+      clauses.push(`matrix.stage = $${values.length}`)
+    }
+    if (filters.status) {
+      values.push(filters.status)
+      clauses.push(`matrix.status = $${values.length}`)
+    }
+    if (!principal.platformAdmin && principal.roleKey !== 'tenant_admin' && !filters.companyId && !filters.businessGroupId) {
+      values.push(
+        principal.corporateAccess?.companies
+          .filter((company) => company.permissions.gerenciar_workflows)
+          .map((company) => company.companyId) || [],
+      )
+      const companiesParameter = values.length
+      values.push(principal.corporateAccess?.groupIds || [])
+      clauses.push(`(matrix.company_id = any($${companiesParameter}::text[]) or matrix.business_group_id = any($${values.length}::text[]))`)
+    }
+    const count = await client.query<{ total: string }>(
+      `select count(*)::text as total from approval_matrices matrix where ${clauses.join(' and ')}`,
+      values,
+    )
+    values.push(Math.min(200, Math.max(1, filters.limit || 50)), Math.max(0, filters.offset || 0))
+    const rows = await client.query<{
+      id: string
+      root_scope_type: 'company' | 'business_group'
+      company_id: string | null
+      business_group_id: string | null
+      access_mode: 'all_companies' | 'selected_companies' | null
+      selected_company_ids: string[]
+      stage: 'merit' | 'cost'
+      authority_ids: string[]
+      status: 'draft' | 'in_review' | 'approved' | 'published' | 'archived'
+      version: string | number
+      created_by: string
+      creator_name: string
+      created_at: string | Date
+      updated_at: string | Date
+      workflow_id: string
+      workflow_version_id: string
+      workflow_code: string
+      workflow_status: GovernanceStatus
+      policy_id: string
+      policy_version_id: string
+      policy_code: string
+      policy_status: GovernanceStatus
+    }>(
+      `select matrix.id, matrix.root_scope_type, matrix.company_id, matrix.business_group_id,
+              matrix.access_mode, matrix.selected_company_ids, matrix.stage, matrix.authority_ids,
+              matrix.status, matrix.version, matrix.created_by, creator.name as creator_name,
+              matrix.created_at, matrix.updated_at,
+              workflow.id as workflow_id, matrix.workflow_version_id,
+              workflow.workflow_code, workflow.status as workflow_status,
+              policy.id as policy_id, matrix.policy_version_id,
+              policy.policy_code, policy.status as policy_status
+       from approval_matrices matrix
+       join users creator on creator.id = matrix.created_by
+       join approval_workflow_definitions workflow
+         on workflow.tenant_id = matrix.tenant_id and workflow.id = matrix.workflow_definition_id
+       join policy_definitions policy
+         on policy.tenant_id = matrix.tenant_id and policy.id = matrix.policy_definition_id
+       where ${clauses.join(' and ')}
+       order by matrix.created_at desc, matrix.id
+       limit $${values.length - 1} offset $${values.length}`,
+      values,
+    )
+    return {
+      items: rows.rows.map((row) => ({
+        matrixId: row.id,
+        stage: row.stage,
+        scope: row.root_scope_type === 'company'
+          ? { type: 'company', companyId: row.company_id }
+          : {
+              type: 'business_group',
+              businessGroupId: row.business_group_id,
+              mode: row.access_mode,
+              companyIds: row.selected_company_ids,
+            },
+        authorityIds: row.authority_ids,
+        workflow: {
+          id: row.workflow_id,
+          versionId: row.workflow_version_id,
+          code: row.workflow_code,
+          status: row.workflow_status,
+        },
+        policy: {
+          id: row.policy_id,
+          versionId: row.policy_version_id,
+          code: row.policy_code,
+          status: row.policy_status,
+        },
+        status: row.status,
+        version: Number(row.version),
+        bindingState: row.status === 'published' ? 'active' : 'draft_not_active',
+        nextAction: matrixNextAction(row.status),
+        createdBy: { userId: row.created_by, name: row.creator_name },
+        isCreator: row.created_by === principal.user.id,
+        createdAt: iso(row.created_at),
+        updatedAt: iso(row.updated_at),
+      })),
+      total: Number(count.rows[0]?.total || 0),
+    }
+  })
+}
+
+function matrixNextAction(status: 'draft' | 'in_review' | 'approved' | 'published' | 'archived') {
+  if (status === 'draft') return 'submit_review'
+  if (status === 'in_review') return 'approve'
+  if (status === 'approved') return 'publish'
+  return 'none'
+}
+
+async function materializeMatrixAuthorities(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  input: ApprovalMatrixInput,
+): Promise<ApprovalAuthorityInput[]> {
+  const result: ApprovalAuthorityInput[] = []
+  for (const template of input.authorities) {
+    const stageBoundTemplate: ApprovalAuthorityInput = template.approvalLevel === 2
+      ? { ...template, approvalKind: input.stage }
+      : template
+    const hasExplicitScope = Boolean(
+      stageBoundTemplate.companyId || stageBoundTemplate.groupId || stageBoundTemplate.costCenterId || stageBoundTemplate.projectId
+      || stageBoundTemplate.department || stageBoundTemplate.audienceGroupId,
+    )
+    if (input.scope.type === 'business_group' && hasExplicitScope) {
+      throw new ApprovalServiceError(
+        'APPROVAL_MATRIX_SCOPE_MISMATCH',
+        'A matriz de grupo empresarial materializa a mesma regra em todas as empresas abrangidas e nao aceita recorte oculto por autoridade.',
+        422,
+      )
+    }
+    const candidates: ApprovalAuthorityInput[] = input.scope.type === 'company'
+      ? [{ ...stageBoundTemplate, companyId: stageBoundTemplate.companyId || input.scope.companyId, groupId: null }]
+      : input.scope.mode === 'all_companies'
+        ? [hasExplicitScope ? stageBoundTemplate : { ...stageBoundTemplate, companyId: null, groupId: input.scope.businessGroupId }]
+        : hasExplicitScope
+          ? [stageBoundTemplate]
+          : uniqueStrings(input.scope.companyIds).map((companyId) => ({ ...stageBoundTemplate, companyId, groupId: null }))
+
+    for (const candidate of candidates) {
+      if (input.scope.type === 'company' && candidate.groupId) {
+        throw new ApprovalServiceError('APPROVAL_MATRIX_SCOPE_MISMATCH', 'A regra da empresa nao pode usar escopo de grupo.', 422)
+      }
+      if (input.scope.type === 'business_group' && candidate.groupId && candidate.groupId !== input.scope.businessGroupId) {
+        throw new ApprovalServiceError('APPROVAL_MATRIX_SCOPE_MISMATCH', 'A regra referencia outro grupo empresarial.', 422)
+      }
+      if (input.scope.type === 'business_group' && input.scope.mode === 'selected_companies' && candidate.groupId) {
+        throw new ApprovalServiceError('APPROVAL_MATRIX_SCOPE_MISMATCH', 'Escopo de grupo inteiro nao e permitido no modo empresas selecionadas.', 422)
+      }
+      const companyId = await assertAuthorityScope(client, principal, candidate)
+      const normalized = approvalAuthorityInputSchema.parse({
+        ...candidate,
+        companyId: companyId || candidate.companyId || null,
+      })
+      if (input.scope.type === 'company' && normalized.companyId !== input.scope.companyId) {
+        throw new ApprovalServiceError('APPROVAL_MATRIX_SCOPE_MISMATCH', 'O recorte da regra pertence a outra empresa.', 422)
+      }
+      if (input.scope.type === 'business_group' && normalized.companyId) {
+        const belongs = await client.query(
+          `select 1 from companies
+           where tenant_id = $1 and id = $2 and group_id = $3 and deleted_at is null`,
+          [principal.tenantId, normalized.companyId, input.scope.businessGroupId],
+        )
+        if (!belongs.rowCount) {
+          throw new ApprovalServiceError('APPROVAL_MATRIX_SCOPE_MISMATCH', 'A empresa da regra nao pertence ao grupo.', 422)
+        }
+        if (input.scope.mode === 'selected_companies' && !input.scope.companyIds.includes(normalized.companyId)) {
+          throw new ApprovalServiceError('APPROVAL_MATRIX_SCOPE_MISMATCH', 'A empresa da regra nao esta entre as empresas selecionadas.', 422)
+        }
+      }
+      result.push(normalized)
+    }
+  }
+  return result
+}
+
+async function validateMatrixRootScope(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  input: ApprovalMatrixInput,
+): Promise<void> {
+  const { scope } = input
+  if (scope.type === 'company') {
+    await assertDatabaseEntity(client, principal.tenantId, 'companies', scope.companyId)
+    return
+  }
+  await assertDatabaseEntity(client, principal.tenantId, 'business_groups', scope.businessGroupId)
+  let coveredCompanyIds: string[]
+  if (scope.mode === 'selected_companies') {
+    const companyIds = uniqueStrings(scope.companyIds)
+    const companies = await client.query<{ id: string }>(
+      `select id from companies
+       where tenant_id = $1 and id = any($2::text[]) and group_id = $3 and deleted_at is null`,
+      [principal.tenantId, companyIds, scope.businessGroupId],
+    )
+    if (companies.rowCount !== companyIds.length) {
+      throw new ApprovalServiceError('APPROVAL_MATRIX_SCOPE_MISMATCH', 'Uma empresa selecionada nao pertence ao grupo.', 422)
+    }
+    coveredCompanyIds = companies.rows.map((company) => company.id)
+  } else {
+    const companies = await client.query<{ id: string }>(
+      `select id from companies
+       where tenant_id = $1 and group_id = $2 and deleted_at is null
+       order by id`,
+      [principal.tenantId, scope.businessGroupId],
+    )
+    coveredCompanyIds = companies.rows.map((company) => company.id)
+  }
+  if (!coveredCompanyIds.length) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_GROUP_EMPTY',
+      'O grupo empresarial nao possui empresas ativas para receber a matriz.',
+      422,
+    )
+  }
+  for (const companyId of coveredCompanyIds) {
+    await requireCompanyAccess(principal, companyId, 'gerenciar_workflows')
+  }
+  if (scope.mode === 'all_companies') {
+    assertAllCompaniesMatrixActor(principal, scope.businessGroupId)
+  }
+
+  for (const membershipId of uniqueStrings(input.authorities.map((authority) => authority.membershipId))) {
+    await assertApprovalMatrixTargetCoverage(client, principal.tenantId, membershipId, {
+      coveredCompanyIds,
+      allCompaniesGroupId: scope.mode === 'all_companies' ? scope.businessGroupId : null,
+      lock: false,
+    })
+  }
+}
+
+function assertAllCompaniesMatrixActor(principal: RequestPrincipal, groupId: string): void {
+  if (principal.platformAdmin || principal.roleKey === 'tenant_admin' || principal.corporateAccess?.tenantWide) return
+  if (principal.corporateAccess && hasExplicitCorporateGroupAllPermission(
+    principal.corporateAccess,
+    groupId,
+    'gerenciar_workflows',
+  )) return
+  throw new ApprovalServiceError(
+    'APPROVAL_MATRIX_ALL_COMPANIES_ACCESS_REQUIRED',
+    'A matriz para todas as empresas exige grant corporativo all_companies com permissao para gerenciar workflows.',
+    403,
+  )
+}
+
+async function assertApprovalMatrixTargetCoverage(
+  client: PoolClient,
+  tenantId: string,
+  membershipId: string,
+  options: {
+    coveredCompanyIds: string[]
+    allCompaniesGroupId: string | null
+    lock: boolean
+  },
+): Promise<void> {
+  const target = await loadMembershipCandidate(client, tenantId, membershipId, options.lock)
+  const access = await resolveEffectiveCorporateAccessInTransaction(client, {
+    tenantId,
+    membershipId: target.membership_id,
+    roleKey: target.role_key,
+    platformAdmin: false,
+    membershipPermissions: normalizeMembershipPermissions(target.permissions, target.profile_key),
+    legacyCompanyId: target.company_id,
+    legacyCompanyIds: target.allowed_company_ids || [],
+    legacyGroupIds: target.allowed_group_ids || [],
+  })
+  if (!isCorporateApprovalMembershipEligible({
+    roleKey: target.role_key,
+    platformAdmin: target.platform_admin,
+    tenantWide: access.summary.tenantWide,
+  })) {
+    throw new ApprovalServiceError(
+      'APPROVAL_AUTHORITY_TARGET_INTERNAL',
+      'A matriz deve usar autorizadores corporativos com grants explicitos, nao identidades internas globais.',
+      422,
+    )
+  }
+  const complete = options.allCompaniesGroupId
+    ? hasExplicitCorporateGroupAllPermission(access.summary, options.allCompaniesGroupId, 'decidir_aprovacoes')
+    : options.coveredCompanyIds.every((companyId) => (
+        hasExplicitCorporateCompanyPermission(access.summary, companyId, 'decidir_aprovacoes')
+      ))
+  if (!complete) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_APPROVER_SCOPE_INCOMPLETE',
+      options.allCompaniesGroupId
+        ? 'Cada autorizador precisa de grant corporativo all_companies para decidir inclusive em empresas futuras do grupo.'
+        : 'Cada autorizador da matriz precisa de grant corporativo explicito para decidir em todas as empresas abrangidas.',
+      409,
+    )
+  }
+}
+
+async function lockCorporateApprovalTargetGrants(
+  client: PoolClient,
+  tenantId: string,
+  membershipIds: string[],
+): Promise<void> {
+  if (!membershipIds.length) return
+  await client.query(
+    `select id from corporate_group_access_grants
+     where tenant_id = $1 and membership_id = any($2::uuid[])
+     for share`,
+    [tenantId, membershipIds],
+  )
+  await client.query(
+    `select id from corporate_company_access_grants
+     where tenant_id = $1 and membership_id = any($2::uuid[])
+     for share`,
+    [tenantId, membershipIds],
+  )
+  await client.query(
+    `select selected.group_access_grant_id, selected.company_id
+     from corporate_group_access_companies selected
+     join corporate_group_access_grants grant_row
+       on grant_row.tenant_id = selected.tenant_id
+      and grant_row.id = selected.group_access_grant_id
+     where selected.tenant_id = $1 and grant_row.membership_id = any($2::uuid[])
+     for share of selected`,
+    [tenantId, membershipIds],
+  )
+}
+
+async function assertCompatibleCanonicalMatrixScope(
+  client: PoolClient,
+  tenantId: string,
+  input: ApprovalMatrixInput,
+): Promise<void> {
+  if (input.scope.type !== 'business_group') return
+  const existing = await client.query<{ access_mode: string; selected_company_ids: string[] }>(
+    `select access_mode, selected_company_ids
+     from approval_matrices
+     where tenant_id = $1 and business_group_id = $2 and stage = $3
+     order by created_at limit 1`,
+    [tenantId, input.scope.businessGroupId, input.stage],
+  )
+  const row = existing.rows[0]
+  if (!row) return
+  const sameMode = row.access_mode === input.scope.mode
+  const sameCompanies = JSON.stringify(uniqueStrings(row.selected_company_ids || []))
+    === JSON.stringify(uniqueStrings(input.scope.companyIds))
+  if (!sameMode || !sameCompanies) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_SCOPE_VERSION_REQUIRED',
+      'A abrangencia do workflow-base deste grupo ja foi definida. Altere-a por uma nova versao revisada.',
+      409,
+    )
+  }
+}
+
+function matrixWorkflowScopes(scope: ApprovalMatrixInput['scope']): WorkflowScope[] {
+  if (scope.type === 'company') {
+    return [{ type: 'company', id: scope.companyId, mode: 'include', specificity: 100 }]
+  }
+  return [{ type: 'group', id: scope.businessGroupId, mode: 'include', specificity: 50 }]
+}
+
+function canonicalMatrixKey(scope: ApprovalMatrixInput['scope'], stage: 'merit' | 'cost') {
+  const rootId = scope.type === 'company' ? scope.companyId : scope.businessGroupId
+  const rootType = scope.type === 'company' ? 'company' : 'group'
+  const fingerprint = sha256({ rootType, rootId, stage }).slice(0, 20)
+  return {
+    workflowCode: `matrix.${stage}.${rootType}.${fingerprint}`,
+    policyCode: `matrix.trigger.${stage}.${rootType}.${fingerprint}`,
+  }
+}
+
+function generatedMatrixWorkflowInput(
+  input: ApprovalMatrixInput,
+  workflowCode: string,
+  scopes: WorkflowScope[],
+): ApprovalWorkflowDraftInput {
+  return approvalWorkflowDraftInputSchema.parse({
+    workflowCode,
+    name: input.workflow.name,
+    description: input.workflow.description,
+    workflowType: input.stage,
+    scopes,
+    nodes: [
+      { id: 'start', key: 'start', name: 'Inicio', type: 'start' },
+      {
+        id: 'level_1', key: 'level_1', name: 'Autorizacao de primeiro nivel', type: 'approval',
+        approvalKind: input.stage, completionMode: 'any',
+        approverResolution: {
+          selectors: [{ type: 'authority', configuration: { level: 1, onLimitExceeded: 'escalate' } }],
+          combination: 'all', minimumApprovers: 1, maximumApprovers: 1,
+          allowSelfApproval: false, separationOfDuties: ['requester', 'traveler'],
+        },
+      },
+      {
+        id: 'level_2', key: 'level_2', name: 'Autorizacao de segundo nivel', type: 'approval',
+        approvalKind: input.stage, completionMode: 'any',
+        approverResolution: {
+          selectors: [{ type: 'authority', configuration: { level: 2 } }],
+          combination: 'all', minimumApprovers: 1, maximumApprovers: 1,
+          allowSelfApproval: false, separationOfDuties: ['requester', 'traveler', 'prior_approver'],
+        },
+      },
+      { id: 'end', key: 'end', name: 'Fim', type: 'end' },
+    ],
+    edges: [
+      { id: 'start_l1', sourceNodeId: 'start', targetNodeId: 'level_1', sequence: 0 },
+      {
+        id: 'l1_l2', sourceNodeId: 'level_1', targetNodeId: 'level_2', sequence: 0,
+        condition: { fact: 'routing.requiresSecondLevel', operator: 'eq', value: true },
+      },
+      {
+        id: 'l1_end', sourceNodeId: 'level_1', targetNodeId: 'end', sequence: 1,
+        condition: { fact: 'routing.requiresSecondLevel', operator: 'neq', value: true },
+      },
+      { id: 'l2_end', sourceNodeId: 'level_2', targetNodeId: 'end', sequence: 0 },
+    ],
+    rules: [],
+    slas: [],
+    changeSummary: input.workflow.changeSummary,
+    validFrom: null,
+    validUntil: null,
+  })
+}
+
+async function ensureCanonicalMatrixWorkflow(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  input: ApprovalMatrixInput,
+  key: { workflowCode: string },
+  scopes: WorkflowScope[],
+): Promise<{ id: string; versionId: string; code: string; status: GovernanceStatus; reused: boolean }> {
+  const existing = await client.query<WorkflowDefinitionRow & { version_id: string; graph_snapshot: unknown }>(
+    `select definition.*, version.id as version_id, version.graph_snapshot
+     from approval_workflow_definitions definition
+     join approval_workflow_versions version
+       on version.tenant_id = definition.tenant_id
+      and version.workflow_definition_id = definition.id
+      and version.version_number = definition.current_version
+     where definition.tenant_id = $1 and definition.workflow_code = $2`,
+    [principal.tenantId, key.workflowCode],
+  )
+  if (existing.rows[0]) {
+    if (existing.rows[0].status === 'archived') {
+      throw new ApprovalServiceError('APPROVAL_MATRIX_BASE_ARCHIVED', 'O workflow-base canonico esta arquivado.', 409)
+    }
+    await assertCanonicalMatrixWorkflowReuse(client, principal.tenantId, input, scopes, existing.rows[0])
+    return {
+      id: existing.rows[0].id,
+      versionId: existing.rows[0].version_id,
+      code: key.workflowCode,
+      status: existing.rows[0].status,
+      reused: true,
+    }
+  }
+  const workflowId = randomUUID()
+  const prepared = prepareWorkflowSnapshot(workflowId, randomUUID(), 1, generatedMatrixWorkflowInput(input, key.workflowCode, scopes))
+  await client.query(
+    `insert into approval_workflow_definitions (
+       id, tenant_id, workflow_code, name, description, workflow_type,
+       status, current_version, created_by
+     ) values ($1, $2, $3, $4, $5, $6, 'draft', 1, $7)`,
+    [workflowId, principal.tenantId, key.workflowCode, input.workflow.name, input.workflow.description, input.stage, principal.user.id],
+  )
+  const workflowInput = generatedMatrixWorkflowInput(input, key.workflowCode, scopes)
+  await insertWorkflowVersion(client, principal, workflowId, prepared, input.workflow.changeSummary)
+  await insertWorkflowChildren(client, principal.tenantId, prepared, workflowInput)
+  await insertWorkflowChangeAudit(
+    client, principal, workflowId, prepared.snapshot.workflowVersionId,
+    'matrix_base_created', input.workflow.changeSummary, null, prepared.snapshot,
+  )
+  return {
+    id: workflowId,
+    versionId: prepared.snapshot.workflowVersionId,
+    code: key.workflowCode,
+    status: 'draft',
+    reused: false,
+  }
+}
+
+async function assertCanonicalMatrixWorkflowReuse(
+  client: PoolClient,
+  tenantId: string,
+  input: ApprovalMatrixInput,
+  scopes: WorkflowScope[],
+  existing: WorkflowDefinitionRow & { version_id: string; graph_snapshot: unknown },
+): Promise<void> {
+  const provenance = await client.query(
+    `select 1 from approval_matrices matrix
+     where matrix.tenant_id = $1 and matrix.workflow_definition_id = $2 and matrix.stage = $3
+       and (
+         ($4 = 'company' and matrix.root_scope_type = 'company' and matrix.company_id = $5)
+         or ($4 = 'business_group' and matrix.root_scope_type = 'business_group' and matrix.business_group_id = $5)
+       )
+     limit 1`,
+    [
+      tenantId,
+      existing.id,
+      input.stage,
+      input.scope.type,
+      input.scope.type === 'company' ? input.scope.companyId : input.scope.businessGroupId,
+    ],
+  )
+  const actualScopes = await loadWorkflowScopes(client, tenantId, existing.version_id)
+  const actualSnapshot = approvalWorkflowSnapshotSchema.safeParse(existing.graph_snapshot)
+  const expectedInput = generatedMatrixWorkflowInput(input, existing.workflow_code, scopes)
+  if (
+    !provenance.rowCount
+    || existing.workflow_type !== input.stage
+    || !actualSnapshot.success
+    || matrixWorkflowShapeHash(actualSnapshot.success ? actualSnapshot.data.nodes : [], actualSnapshot.success ? actualSnapshot.data.edges : [])
+      !== matrixWorkflowShapeHash(expectedInput.nodes, expectedInput.edges)
+    || sha256(normalizeWorkflowScopes(actualScopes)) !== sha256(normalizeWorkflowScopes(scopes))
+  ) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_CANONICAL_WORKFLOW_COLLISION',
+      'O codigo canonico da matriz ja existe sem proveniencia ou formato compativel.',
+      409,
+    )
+  }
+}
+
+function matrixWorkflowShapeHash(
+  nodes: ApprovalWorkflowDraftInput['nodes'],
+  edges: ApprovalWorkflowDraftInput['edges'],
+): string {
+  const keyById = new Map(nodes.map((node) => [node.id, node.key]))
+  return sha256({
+    nodes: nodes.map(({ id: _id, ...node }) => node).sort((left, right) => left.key.localeCompare(right.key)),
+    edges: edges.map(({ id: _id, sourceNodeId, targetNodeId, ...edge }) => ({
+      ...edge,
+      source: keyById.get(sourceNodeId) || sourceNodeId,
+      target: keyById.get(targetNodeId) || targetNodeId,
+    })).sort((left, right) => (
+      left.source.localeCompare(right.source) || left.target.localeCompare(right.target) || left.sequence - right.sequence
+    )),
+  })
+}
+
+function normalizeWorkflowScopes(scopes: WorkflowScope[]): WorkflowScope[] {
+  return [...scopes].sort((left, right) => (
+    left.type.localeCompare(right.type)
+    || String(left.id || '').localeCompare(String(right.id || ''))
+    || left.mode.localeCompare(right.mode)
+    || left.specificity - right.specificity
+  ))
+}
+
+async function ensureCanonicalMatrixPolicy(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  input: ApprovalMatrixInput,
+  key: { policyCode: string },
+  workflowCode: string,
+): Promise<{ id: string; versionId: string; code: string; status: GovernanceStatus; reused: boolean }> {
+  const existing = await client.query<{
+    id: string
+    status: GovernanceStatus
+    version_id: string
+    category: string
+    condition_ast: unknown
+    actions_ast: unknown
+    checkpoints: string[]
+  }>(
+    `select definition.id, definition.status, definition.category,
+            version.id as version_id, version.condition_ast, version.actions_ast, version.checkpoints
+     from policy_definitions definition
+     join policy_versions version
+       on version.tenant_id = definition.tenant_id
+      and version.policy_definition_id = definition.id
+      and version.version_number = definition.current_version
+     where definition.tenant_id = $1 and definition.policy_code = $2`,
+    [principal.tenantId, key.policyCode],
+  )
+  if (existing.rows[0]) {
+    if (existing.rows[0].status === 'archived') {
+      throw new ApprovalServiceError('APPROVAL_MATRIX_BASE_ARCHIVED', 'A politica-base canonica esta arquivada.', 409)
+    }
+    await assertCanonicalMatrixPolicyReuse(
+      client,
+      principal.tenantId,
+      input,
+      workflowCode,
+      existing.rows[0],
+    )
+    return {
+      id: existing.rows[0].id,
+      versionId: existing.rows[0].version_id,
+      code: key.policyCode,
+      status: existing.rows[0].status,
+      reused: true,
+    }
+  }
+  const policyId = randomUUID()
+  const versionId = randomUUID()
+  const checkpoints = input.stage === 'merit' ? ['submission'] : ['selection', 'reservation']
+  const condition = input.scope.type === 'business_group' && input.scope.mode === 'selected_companies'
+    ? { all: [
+        { fact: 'operation.checkpoint', operator: 'in', value: checkpoints },
+        { fact: 'organization.companyId', operator: 'in', value: uniqueStrings(input.scope.companyIds) },
+      ] }
+    : { fact: 'operation.checkpoint', operator: 'in', value: checkpoints }
+  const action = {
+    type: 'request_approval',
+    message: `Autorizacao ${input.stage === 'merit' ? 'de merito' : 'de custo'} obrigatoria.`,
+    configuration: { workflow: workflowCode },
+  }
+  const scope = input.scope.type === 'company'
+    ? { type: 'company', id: input.scope.companyId, specificity: 100 }
+    : { type: 'group', id: input.scope.businessGroupId, specificity: 50 }
+  const content = {
+    code: key.policyCode,
+    condition,
+    actions: [action],
+    checkpoints,
+    scope,
+    dependency: workflowCode,
+  }
+  await client.query(
+    `insert into policy_definitions (
+       id, tenant_id, policy_code, name, description, category, status, priority,
+       severity, inheritance_mode, overridable, business_justification, tags,
+       current_version, created_by
+     ) values ($1, $2, $3, $4, $5, $6, 'draft', 100, 'warning', 'replace', true, $7, $8::text[], 1, $9)`,
+    [
+      policyId, principal.tenantId, key.policyCode,
+      `Gatilho da matriz - ${input.workflow.name}`,
+      `Politica-base canonica para encaminhar solicitacoes ao workflow ${workflowCode}.`,
+      `approval_matrix_${input.stage}`,
+      'Matriz de autorizacao corporativa parametrizada e sujeita a maker-checker.',
+      ['approval_matrix', input.stage],
+      principal.user.id,
+    ],
+  )
+  await client.query(
+    `insert into policy_versions (
+       id, tenant_id, policy_definition_id, version_number, status, name, description,
+       category, priority, severity, inheritance_mode, overridable, condition_ast,
+       actions_ast, exception_ast, checkpoints, timezone, valid_from, valid_until, tags,
+       business_justification, content_hash, change_summary, created_by
+     ) values ($1, $2, $3, 1, 'draft', $4, $5, $6, 100, 'warning', 'replace', true,
+               $7::jsonb, $8::jsonb, '[]'::jsonb, $9::text[], 'America/Sao_Paulo', null, null,
+               $10::text[], $11, $12, $13, $14)`,
+    [
+      versionId, principal.tenantId, policyId,
+      `Gatilho da matriz - ${input.workflow.name}`,
+      `Politica-base canonica para encaminhar solicitacoes ao workflow ${workflowCode}.`,
+      `approval_matrix_${input.stage}`,
+      JSON.stringify(condition), JSON.stringify([action]), checkpoints,
+      ['approval_matrix', input.stage],
+      'Matriz de autorizacao corporativa parametrizada e sujeita a maker-checker.',
+      sha256(content), input.workflow.changeSummary, principal.user.id,
+    ],
+  )
+  await client.query(
+    `insert into policy_scopes (
+       tenant_id, policy_version_id, scope_type, scope_id, mode, specificity
+     ) values ($1, $2, $3, $4, 'include', $5)`,
+    [principal.tenantId, versionId, scope.type, scope.id, scope.specificity],
+  )
+  const ruleSet = await client.query<{ id: string }>(
+    `insert into policy_rule_sets (tenant_id, policy_version_id, name, logical_operator)
+     values ($1, $2, 'Gatilho da matriz', 'all') returning id`,
+    [principal.tenantId, versionId],
+  )
+  await client.query(
+    `insert into policy_conditions (tenant_id, rule_set_id, sequence, condition_ast)
+     values ($1, $2, 0, $3::jsonb)`,
+    [principal.tenantId, ruleSet.rows[0].id, JSON.stringify(condition)],
+  )
+  await client.query(
+    `insert into policy_actions (
+       tenant_id, policy_version_id, action_type, sequence, configuration, idempotency_scope
+     ) values ($1, $2, 'request_approval', 0, $3::jsonb, $4)`,
+    [
+      principal.tenantId, versionId,
+      JSON.stringify({ message: action.message, ...action.configuration }),
+      `${versionId}:0`,
+    ],
+  )
+  await client.query(
+    `insert into policy_dependencies (
+       tenant_id, policy_version_id, dependency_type, dependency_key, required, configuration
+     ) values ($1, $2, 'workflow', $3, true, '{}'::jsonb)`,
+    [principal.tenantId, versionId, workflowCode],
+  )
+  return { id: policyId, versionId, code: key.policyCode, status: 'draft', reused: false }
+}
+
+async function assertCanonicalMatrixPolicyReuse(
+  client: PoolClient,
+  tenantId: string,
+  input: ApprovalMatrixInput,
+  workflowCode: string,
+  existing: {
+    id: string
+    version_id: string
+    category: string
+    condition_ast: unknown
+    actions_ast: unknown
+    checkpoints: string[]
+  },
+): Promise<void> {
+  const rootId = input.scope.type === 'company' ? input.scope.companyId : input.scope.businessGroupId
+  const provenance = await client.query(
+    `select 1 from approval_matrices matrix
+     where matrix.tenant_id = $1 and matrix.policy_definition_id = $2 and matrix.stage = $3
+       and (
+         ($4 = 'company' and matrix.root_scope_type = 'company' and matrix.company_id = $5)
+         or ($4 = 'business_group' and matrix.root_scope_type = 'business_group' and matrix.business_group_id = $5)
+       )
+     limit 1`,
+    [tenantId, existing.id, input.stage, input.scope.type, rootId],
+  )
+  const scopes = await client.query<{
+    scope_type: string
+    scope_id: string | null
+    mode: string
+    specificity: number
+  }>(
+    `select scope_type, scope_id, mode, specificity from policy_scopes
+     where tenant_id = $1 and policy_version_id = $2`,
+    [tenantId, existing.version_id],
+  )
+  const dependencies = await client.query<{ dependency_key: string }>(
+    `select dependency_key from policy_dependencies
+     where tenant_id = $1 and policy_version_id = $2 and dependency_type = 'workflow' and required
+     order by dependency_key`,
+    [tenantId, existing.version_id],
+  )
+  const checkpoints = input.stage === 'merit' ? ['submission'] : ['selection', 'reservation']
+  const expectedCondition = input.scope.type === 'business_group' && input.scope.mode === 'selected_companies'
+    ? { all: [
+        { fact: 'operation.checkpoint', operator: 'in', value: checkpoints },
+        { fact: 'organization.companyId', operator: 'in', value: uniqueStrings(input.scope.companyIds) },
+      ] }
+    : { fact: 'operation.checkpoint', operator: 'in', value: checkpoints }
+  const expectedScope = input.scope.type === 'company'
+    ? [{ scope_type: 'company', scope_id: input.scope.companyId, mode: 'include', specificity: 100 }]
+    : [{ scope_type: 'group', scope_id: input.scope.businessGroupId, mode: 'include', specificity: 50 }]
+  const actions = Array.isArray(existing.actions_ast) ? existing.actions_ast.map(asRecord) : []
+  const canonicalAction = actions.length === 1
+    && actions[0].type === 'request_approval'
+    && asRecord(actions[0].configuration).workflow === workflowCode
+  if (
+    !provenance.rowCount
+    || existing.category !== `approval_matrix_${input.stage}`
+    || !canonicalAction
+    || sha256(existing.condition_ast) !== sha256(expectedCondition)
+    || sha256(uniqueStrings(existing.checkpoints || [])) !== sha256(uniqueStrings(checkpoints))
+    || sha256(scopes.rows) !== sha256(expectedScope)
+    || dependencies.rows.length !== 1
+    || dependencies.rows[0].dependency_key !== workflowCode
+  ) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_CANONICAL_POLICY_COLLISION',
+      'O codigo canonico da politica ja existe sem proveniencia ou formato compativel.',
+      409,
+    )
+  }
+}
+
+export async function transitionApprovalMatrix(
+  principal: RequestPrincipal,
+  matrixId: string,
+  rawInput: unknown,
+): Promise<Record<string, unknown>> {
+  assertUuid(matrixId, 'APPROVAL_MATRIX_ID_INVALID')
+  const input = approvalMatrixTransitionSchema.parse(rawInput)
+  return withTenantTransaction(principal.tenantId, async (client) => {
+    const result = await client.query<{
+      id: string
+      root_scope_type: 'company' | 'business_group'
+      company_id: string | null
+      business_group_id: string | null
+      access_mode: 'all_companies' | 'selected_companies' | null
+      selected_company_ids: string[]
+      stage: 'merit' | 'cost'
+      rule_slot_key: string
+      authority_ids: string[]
+      workflow_definition_id: string
+      workflow_version_id: string
+      policy_definition_id: string
+      policy_version_id: string
+      status: 'draft' | 'in_review' | 'approved' | 'published' | 'archived'
+      version: string | number
+      created_by: string
+    }>(
+      `select * from approval_matrices where tenant_id = $1 and id = $2 for update`,
+      [principal.tenantId, matrixId],
+    )
+    const matrix = result.rows[0]
+    if (!matrix) throw new ApprovalServiceError('APPROVAL_MATRIX_NOT_FOUND', 'Matriz de aprovacao nao encontrada.', 404)
+    await assertCanManageWorkflowScopes(principal, [{
+      type: matrix.root_scope_type === 'company' ? 'company' : 'group',
+      id: matrix.company_id || matrix.business_group_id,
+    }])
+    let coveredCompanyIds = matrix.company_id ? [matrix.company_id] : []
+    if (matrix.root_scope_type === 'business_group' && matrix.business_group_id) {
+      const coveredCompanies = matrix.access_mode === 'selected_companies'
+        ? await client.query<{ id: string }>(
+            `select id from companies
+             where tenant_id = $1 and group_id = $2 and id = any($3::text[]) and deleted_at is null
+             order by id`,
+            [principal.tenantId, matrix.business_group_id, uniqueStrings(matrix.selected_company_ids || [])],
+          )
+        : await client.query<{ id: string }>(
+            `select id from companies
+             where tenant_id = $1 and group_id = $2 and deleted_at is null
+             order by id`,
+            [principal.tenantId, matrix.business_group_id],
+          )
+      const expectedCoverage = matrix.access_mode === 'selected_companies'
+        ? uniqueStrings(matrix.selected_company_ids || []).length
+        : coveredCompanies.rowCount
+      if (!coveredCompanies.rowCount || coveredCompanies.rowCount !== expectedCoverage) {
+        throw new ApprovalServiceError(
+          'APPROVAL_MATRIX_SCOPE_DRIFT',
+          'A abrangencia empresarial da matriz mudou e precisa ser revisada antes da transicao.',
+          409,
+        )
+      }
+      for (const company of coveredCompanies.rows) {
+        await requireCompanyAccess(principal, company.id, 'gerenciar_workflows')
+      }
+      coveredCompanyIds = coveredCompanies.rows.map((company) => company.id)
+      if (matrix.access_mode === 'all_companies') {
+        assertAllCompaniesMatrixActor(principal, matrix.business_group_id)
+      }
+    }
+    if (Number(matrix.version) !== input.expectedVersion) {
+      throw new ApprovalServiceError('STALE_APPROVAL_MATRIX', 'A matriz foi alterada por outro usuario.', 409)
+    }
+    const allowed: Record<ApprovalMatrixTransitionInput['action'], typeof matrix.status[]> = {
+      submit_review: ['draft'],
+      approve: ['in_review'],
+      publish: ['approved'],
+      archive: ['draft', 'in_review', 'approved'],
+    }
+    if (!allowed[input.action].includes(matrix.status)) {
+      throw new ApprovalServiceError('INVALID_APPROVAL_MATRIX_TRANSITION', 'Transicao invalida para o estado atual da matriz.', 409)
+    }
+    if (['approve', 'publish'].includes(input.action) && matrix.created_by === principal.user.id) {
+      throw new ApprovalServiceError(
+        'APPROVAL_MATRIX_SEPARATION_OF_DUTIES',
+        'O autor da matriz nao pode aprovar nem publicar a propria alteracao.',
+        409,
+      )
+    }
+
+    let nextStatus: typeof matrix.status
+    let nextAction: string
+    if (input.action === 'submit_review') {
+      await client.query(
+        `update approval_workflow_versions set status = 'in_review'
+         where tenant_id = $1 and id = $2 and status = 'draft'`,
+        [principal.tenantId, matrix.workflow_version_id],
+      )
+      await client.query(
+        `update approval_workflow_definitions set status = 'in_review'
+         where tenant_id = $1 and id = $2 and status = 'draft'`,
+        [principal.tenantId, matrix.workflow_definition_id],
+      )
+      await client.query(
+        `update policy_versions set status = 'in_review'
+         where tenant_id = $1 and id = $2 and status = 'draft'`,
+        [principal.tenantId, matrix.policy_version_id],
+      )
+      await client.query(
+        `update policy_definitions set status = 'in_review'
+         where tenant_id = $1 and id = $2 and status = 'draft'`,
+        [principal.tenantId, matrix.policy_definition_id],
+      )
+      nextStatus = 'in_review'
+      nextAction = 'approve'
+    } else if (input.action === 'approve') {
+      const workflowVersion = await client.query<WorkflowVersionRow>(
+        `select * from approval_workflow_versions
+         where tenant_id = $1 and id = $2 and workflow_definition_id = $3 for update`,
+        [principal.tenantId, matrix.workflow_version_id, matrix.workflow_definition_id],
+      )
+      const workflowRow = workflowVersion.rows[0]
+      if (!workflowRow) throw new ApprovalServiceError('WORKFLOW_VERSION_NOT_FOUND', 'Versao do workflow-base nao encontrada.', 404)
+      if (workflowRow.status === 'in_review') {
+        if (workflowRow.created_by === principal.user.id) {
+          throw new ApprovalServiceError(
+            'APPROVAL_MATRIX_DEPENDENCY_SEPARATION_OF_DUTIES',
+            'O autor do workflow-base nao pode aprovar a propria versao por outra regra da matriz.',
+            409,
+          )
+        }
+        assertWorkflowPublishable(approvalWorkflowSnapshotSchema.parse(workflowRow.graph_snapshot))
+        await client.query(
+          `update approval_workflow_versions
+           set status = 'approved', approved_by = $3, approved_at = now()
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.workflow_version_id, principal.user.id],
+        )
+        await client.query(
+          `update approval_workflow_definitions set status = 'approved'
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.workflow_definition_id],
+        )
+      } else if (!['approved', 'published'].includes(workflowRow.status)) {
+        throw new ApprovalServiceError('APPROVAL_MATRIX_DEPENDENCY_STATE_INVALID', 'O workflow-base nao esta em revisao.', 409)
+      }
+
+      const policyVersion = await client.query<{ status: GovernanceStatus; created_by: string }>(
+        `select status, created_by from policy_versions
+         where tenant_id = $1 and id = $2 and policy_definition_id = $3 for update`,
+        [principal.tenantId, matrix.policy_version_id, matrix.policy_definition_id],
+      )
+      const policyStatus = policyVersion.rows[0]?.status
+      if (policyStatus === 'in_review') {
+        if (policyVersion.rows[0].created_by === principal.user.id) {
+          throw new ApprovalServiceError(
+            'APPROVAL_MATRIX_DEPENDENCY_SEPARATION_OF_DUTIES',
+            'O autor da politica-base nao pode aprovar a propria versao por outra regra da matriz.',
+            409,
+          )
+        }
+        await client.query(
+          `update policy_versions
+           set status = 'approved', approved_by = $3, approved_at = now()
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.policy_version_id, principal.user.id],
+        )
+        await client.query(
+          `update policy_definitions set status = 'approved'
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.policy_definition_id],
+        )
+      } else if (!policyStatus || !['approved', 'published'].includes(policyStatus)) {
+        throw new ApprovalServiceError('APPROVAL_MATRIX_DEPENDENCY_STATE_INVALID', 'A politica-base nao esta em revisao.', 409)
+      }
+      nextStatus = 'approved'
+      nextAction = 'publish'
+    } else if (input.action === 'publish') {
+      await assertApprovalMatrixRuleSlotAvailable(
+        client,
+        principal.tenantId,
+        matrix.id,
+        matrix.rule_slot_key,
+      )
+      const dependencies = await client.query<{
+        workflow_status: GovernanceStatus
+        workflow_approved_by: string | null
+        workflow_created_by: string
+        policy_status: GovernanceStatus
+        policy_approved_by: string | null
+        policy_created_by: string
+      }>(
+        `select workflow_version.status as workflow_status,
+                workflow_version.approved_by as workflow_approved_by,
+                workflow_version.created_by as workflow_created_by,
+                policy_version.status as policy_status,
+                policy_version.approved_by as policy_approved_by,
+                policy_version.created_by as policy_created_by
+         from approval_workflow_versions workflow_version, policy_versions policy_version
+         where workflow_version.tenant_id = $1 and workflow_version.id = $2
+           and workflow_version.workflow_definition_id = $3
+           and policy_version.tenant_id = $1 and policy_version.id = $4
+           and policy_version.policy_definition_id = $5
+         for update`,
+        [
+          principal.tenantId,
+          matrix.workflow_version_id,
+          matrix.workflow_definition_id,
+          matrix.policy_version_id,
+          matrix.policy_definition_id,
+        ],
+      )
+      const dependency = dependencies.rows[0]
+      if (!dependency || !['approved', 'published'].includes(dependency.workflow_status)
+        || !['approved', 'published'].includes(dependency.policy_status)) {
+        throw new ApprovalServiceError(
+          'APPROVAL_MATRIX_DEPENDENCIES_NOT_APPROVED',
+          'O workflow-base e a politica de gatilho precisam estar aprovados antes da publicacao.',
+          409,
+        )
+      }
+      if (
+        (dependency.workflow_status === 'approved' && dependency.workflow_created_by === principal.user.id)
+        || (dependency.policy_status === 'approved' && dependency.policy_created_by === principal.user.id)
+      ) {
+        throw new ApprovalServiceError(
+          'APPROVAL_MATRIX_DEPENDENCY_SEPARATION_OF_DUTIES',
+          'O autor do workflow-base ou da politica-base nao pode publicar a propria versao.',
+          409,
+        )
+      }
+      if (dependency.workflow_status === 'approved') {
+        await client.query(
+          `update approval_workflow_versions
+           set status = 'published', published_by = $3, published_at = now()
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.workflow_version_id, principal.user.id],
+        )
+        await client.query(
+          `update approval_workflow_definitions set status = 'published'
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.workflow_definition_id],
+        )
+      }
+      const expectedAuthorityIds = uniqueStrings(matrix.authority_ids)
+      const draftAuthorities = await client.query<AuthorityRow>(
+        `select * from approval_authorities
+         where tenant_id = $1 and id = any($2::uuid[]) and status = 'draft'
+         for update`,
+        [principal.tenantId, expectedAuthorityIds],
+      )
+      if (draftAuthorities.rowCount !== expectedAuthorityIds.length) {
+        throw new ApprovalServiceError(
+          'APPROVAL_MATRIX_AUTHORITY_SET_INVALID',
+          'O conjunto de alcadas em rascunho foi alterado e nao pode ser publicado.',
+          409,
+        )
+      }
+      const targetMembershipIds = uniqueStrings(draftAuthorities.rows.map((authority) => authority.membership_id))
+      await lockCorporateApprovalTargetGrants(client, principal.tenantId, targetMembershipIds)
+      for (const membershipId of targetMembershipIds) {
+        await assertApprovalMatrixTargetCoverage(client, principal.tenantId, membershipId, {
+          coveredCompanyIds,
+          allCompaniesGroupId: matrix.root_scope_type === 'business_group'
+            && matrix.access_mode === 'all_companies'
+            ? matrix.business_group_id
+            : null,
+          lock: true,
+        })
+      }
+      await replaceEquivalentAuthoritiesBeforeMatrixPublication(
+        client,
+        principal,
+        expectedAuthorityIds,
+        input.reason,
+      )
+      const activatedAuthorities = await client.query(
+        `update approval_authorities
+         set status = case
+           when valid_until is not null and valid_until <= now() then 'expired'
+           when valid_from > now() then 'scheduled'
+           else 'active'
+         end
+         where tenant_id = $1 and id = any($2::uuid[]) and status = 'draft'`,
+        [principal.tenantId, expectedAuthorityIds],
+      )
+      if (activatedAuthorities.rowCount !== expectedAuthorityIds.length) {
+        throw new ApprovalServiceError(
+          'APPROVAL_MATRIX_AUTHORITY_ACTIVATION_FAILED',
+          'Nem todas as alcadas da matriz puderam ser ativadas.',
+          409,
+        )
+      }
+      if (dependency.policy_status === 'approved') {
+        await assertPolicyVersionPublishableInTransaction(
+          client,
+          principal,
+          matrix.policy_definition_id,
+          matrix.policy_version_id,
+        )
+        await client.query(
+          `update policy_publications
+           set effective_until = case when effective_from < now() then now() else effective_until end,
+               status = case when effective_from > now() then 'revoked' else 'expired' end
+           where tenant_id = $1 and policy_definition_id = $2
+             and status in ('active', 'scheduled')`,
+          [principal.tenantId, matrix.policy_definition_id],
+        )
+        await client.query(
+          `update policy_versions
+           set status = 'published', published_by = $3, published_at = now()
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.policy_version_id, principal.user.id],
+        )
+        await client.query(
+          `update policy_definitions set status = 'published'
+           where tenant_id = $1 and id = $2`,
+          [principal.tenantId, matrix.policy_definition_id],
+        )
+        await client.query(
+          `insert into policy_publications (
+             tenant_id, policy_definition_id, policy_version_id, status,
+             effective_from, effective_until, published_by, approved_by, publication_reason
+           ) values ($1, $2, $3, 'active', now(), null, $4, $5, $6)`,
+          [
+            principal.tenantId,
+            matrix.policy_definition_id,
+            matrix.policy_version_id,
+            principal.user.id,
+            dependency.policy_approved_by,
+            input.reason,
+          ],
+        )
+      } else {
+        const activePublication = await client.query(
+          `select 1 from policy_publications
+           where tenant_id = $1 and policy_definition_id = $2 and policy_version_id = $3
+             and status = 'active' and effective_from <= now()
+             and (effective_until is null or effective_until > now())
+           limit 1`,
+          [principal.tenantId, matrix.policy_definition_id, matrix.policy_version_id],
+        )
+        if (!activePublication.rowCount) {
+          throw new ApprovalServiceError(
+            'APPROVAL_MATRIX_POLICY_PUBLICATION_INACTIVE',
+            'A versao publicada da politica-base nao possui uma publicacao ativa.',
+            409,
+          )
+        }
+      }
+      nextStatus = 'published'
+      nextAction = 'none'
+    } else {
+      await client.query(
+        `update approval_authorities
+         set status = 'revoked', revoked_by_membership_id = $3,
+             revoked_at = now(), revocation_reason = $4
+         where tenant_id = $1 and id = any($2::uuid[]) and status = 'draft'`,
+        [principal.tenantId, matrix.authority_ids, principal.membershipId, input.reason],
+      )
+      nextStatus = 'archived'
+      nextAction = 'none'
+    }
+    await client.query(
+      `update approval_matrices
+       set status = $3, version = version + 1,
+           approved_by = case when $4 = 'approve' then $5 else approved_by end,
+           approved_at = case when $4 = 'approve' then now() else approved_at end,
+           published_by = case when $4 = 'publish' then $5 else published_by end,
+           published_at = case when $4 = 'publish' then now() else published_at end
+       where tenant_id = $1 and id = $2`,
+      [principal.tenantId, matrixId, nextStatus, input.action, principal.user.id],
+    )
+    await writeAuditEventInTransaction(client, {
+      action: `approval.matrix.${input.action}`,
+      result: 'success',
+      tenantId: principal.tenantId,
+      actorUserId: realActorUserId(principal),
+      entityType: 'approval_matrix',
+      entityId: matrixId,
+      metadata: { fromStatus: matrix.status, toStatus: nextStatus, reason: input.reason },
+    })
+    return {
+      matrixId,
+      status: nextStatus,
+      version: Number(matrix.version) + 1,
+      authorityIds: matrix.authority_ids,
+      workflowId: matrix.workflow_definition_id,
+      workflowVersionId: matrix.workflow_version_id,
+      policyId: matrix.policy_definition_id,
+      policyVersionId: matrix.policy_version_id,
+      bindingState: nextStatus === 'published' ? 'active' : 'draft_not_active',
+      nextAction,
+    }
+  })
+}
+
+async function assertApprovalMatrixRuleSlotAvailable(
+  client: PoolClient,
+  tenantId: string,
+  matrixId: string,
+  ruleSlotKey: string,
+): Promise<void> {
+  await client.query(
+    `select pg_advisory_xact_lock(hashtextextended($1, 0))`,
+    [`approval-matrix-rule-slot:${tenantId}:${ruleSlotKey}`],
+  )
+  const conflict = await client.query<{ id: string }>(
+    `select id from approval_matrices
+     where tenant_id = $1 and rule_slot_key = $2 and id <> $3 and status = 'published'
+     limit 1
+     for update`,
+    [tenantId, ruleSlotKey, matrixId],
+  )
+  if (conflict.rowCount) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_REVISION_REQUIRED',
+      'Ja existe uma regra publicada para este mesmo recorte. Crie uma revisao governada da regra existente.',
+      409,
+    )
+  }
+}
+
+async function replaceEquivalentAuthoritiesBeforeMatrixPublication(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  authorityIds: string[],
+  reason: string,
+): Promise<void> {
+  await client.query(
+    `update approval_authorities current_authority
+     set status = 'revoked', revoked_by_membership_id = $3,
+         revoked_at = now(), revocation_reason = $4
+     from approval_authorities replacement
+     where replacement.tenant_id = $1 and replacement.id = any($2::uuid[])
+       and replacement.status = 'draft'
+       and current_authority.tenant_id = replacement.tenant_id
+       and current_authority.id <> replacement.id
+       and current_authority.status in ('active', 'scheduled')
+       and current_authority.membership_id = replacement.membership_id
+       and current_authority.approval_kind = replacement.approval_kind
+       and current_authority.approval_level = replacement.approval_level
+       and current_authority.company_id is not distinct from replacement.company_id
+       and current_authority.group_id is not distinct from replacement.group_id
+       and current_authority.cost_center_id is not distinct from replacement.cost_center_id
+       and current_authority.project_id is not distinct from replacement.project_id
+       and current_authority.department is not distinct from replacement.department
+       and current_authority.audience_group_id is not distinct from replacement.audience_group_id
+       and current_authority.currency is not distinct from replacement.currency
+       and current_authority.max_amount is not distinct from replacement.max_amount
+       and current_authority.accumulated_amount_limit is not distinct from replacement.accumulated_amount_limit
+       and current_authority.accumulation_period_days is not distinct from replacement.accumulation_period_days
+       and current_authority.max_percentage_above_lowest is not distinct from replacement.max_percentage_above_lowest
+       and current_authority.max_percentage_above_average is not distinct from replacement.max_percentage_above_average
+       and current_authority.requires_budget_available = replacement.requires_budget_available
+       and current_authority.urgent_allowed = replacement.urgent_allowed
+       and current_authority.products = replacement.products
+       and current_authority.destinations = replacement.destinations
+       and current_authority.risk_levels = replacement.risk_levels`,
+    [principal.tenantId, authorityIds, principal.membershipId, reason],
+  )
 }
 
 export async function revokeApprovalAuthority(
@@ -1249,6 +3523,19 @@ export async function revokeApprovalAuthority(
     )
     const authority = result.rows[0]
     if (!authority) throw new ApprovalServiceError('APPROVAL_AUTHORITY_NOT_FOUND', 'Alcada nao encontrada.', 404)
+    const matrixOwner = await client.query(
+      `select id from approval_matrices
+       where tenant_id = $1 and status = 'published' and $2::uuid = any(authority_ids)
+       limit 1 for share`,
+      [principal.tenantId, authorityId],
+    )
+    if (matrixOwner.rowCount) {
+      throw new ApprovalServiceError(
+        'APPROVAL_MATRIX_AUTHORITY_MANAGED',
+        'A alcada pertence a uma matriz publicada e deve ser alterada por uma nova versao governada da matriz.',
+        409,
+      )
+    }
     await assertAuthorityCanBeGranted(client, principal, {
       membershipId: authority.membership_id,
       approvalKind: authority.approval_kind,
@@ -1256,6 +3543,9 @@ export async function revokeApprovalAuthority(
       groupId: authority.group_id,
       costCenterId: authority.cost_center_id,
       projectId: authority.project_id,
+      department: authority.department,
+      audienceGroupId: authority.audience_group_id,
+      approvalLevel: authority.approval_level,
       maxAmount: authority.max_amount === null ? null : Number(authority.max_amount),
       accumulatedAmountLimit: authority.accumulated_amount_limit === null ? null : Number(authority.accumulated_amount_limit),
       accumulationPeriodDays: authority.accumulation_period_days,
@@ -1771,7 +4061,7 @@ async function escalateApprovalStep(
 
   const assignedUserIds = new Set(assignments.map((assignment) => assignment.assignee_user_id).filter(isString))
   const subject = asApprovalSubject(instance.subject_snapshot)
-  const candidates = (await loadApprovalCandidates(client, principal, node.approvalKind, subject))
+  const candidates = (await loadApprovalCandidates(client, principal, node.approvalKind, subject, snapshot))
     .filter((candidate) => !assignedUserIds.has(candidate.userId))
   const resolved = resolveApprovers(node.approvalKind, {
     selectors,
@@ -1782,15 +4072,21 @@ async function escalateApprovalStep(
     separationOfDuties: node.approverResolution.separationOfDuties,
   }, subject, candidates)
 
-  const newAssignments: Array<{ userId: string; delegatedFromUserId: string | null }> = []
+  const newAssignments: Array<{
+    userId: string
+    delegatedFromUserId: string | null
+    delegationId: string | null
+  }> = []
   const resolvedUsers = new Set<string>()
   for (const approver of resolved.approvers) {
     const delegated = await resolveDelegatedAssignment(client, principal.tenantId, approver, subject)
+    if (approverConflictsWithSubject(delegated.userId, subject, node.approverResolution)) continue
     if (assignedUserIds.has(delegated.userId) || resolvedUsers.has(delegated.userId)) continue
     resolvedUsers.add(delegated.userId)
     newAssignments.push({
       userId: delegated.userId,
       delegatedFromUserId: delegated.delegationId ? approver.userId : null,
+      delegationId: delegated.delegationId,
     })
   }
   if (newAssignments.length < configuration.minimumApprovers) {
@@ -1818,8 +4114,10 @@ async function escalateApprovalStep(
         principal.tenantId,
         step.id,
         assignment.userId,
-        action === 'reassign' ? 'sla_reassignment' : 'sla_escalation',
-        escalation.id,
+        assignment.delegationId
+          ? `sla_${action}_delegation`
+          : action === 'reassign' ? 'sla_reassignment' : 'sla_escalation',
+        assignment.delegationId || escalation.id,
         assignment.delegatedFromUserId,
       ],
     )
@@ -1998,7 +4296,12 @@ function approvalErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 500) : 'Falha desconhecida no processamento do SLA.'
 }
 
-async function loadMembershipCandidate(client: PoolClient, tenantId: string, membershipId: string): Promise<MembershipCandidateRow> {
+async function loadMembershipCandidate(
+  client: PoolClient,
+  tenantId: string,
+  membershipId: string,
+  lock = false,
+): Promise<MembershipCandidateRow> {
   const result = await client.query<MembershipCandidateRow>(
     `select membership.id as membership_id, membership.user_id,
             membership.status as membership_status, membership.profile_key,
@@ -2010,9 +4313,13 @@ async function loadMembershipCandidate(client: PoolClient, tenantId: string, mem
             ), '{}'::jsonb) || membership.custom_permissions as permissions,
             user_row.metadata as user_metadata
      from tenant_memberships membership
-     join users user_row on user_row.id = membership.user_id and user_row.deleted_at is null
+     join users user_row
+       on user_row.id = membership.user_id
+      and user_row.status = 'active'
+      and user_row.deleted_at is null
      join roles role_row on role_row.id = membership.role_id
-     where membership.tenant_id = $1 and membership.id = $2 and membership.status = 'active'`,
+     where membership.tenant_id = $1 and membership.id = $2 and membership.status = 'active'
+     ${lock ? 'for update of membership, user_row' : ''}`,
     [tenantId, membershipId],
   )
   if (!result.rows[0]) throw new ApprovalServiceError('MEMBERSHIP_NOT_FOUND', 'Vinculo do usuario nao encontrado.', 404)
@@ -2020,31 +4327,47 @@ async function loadMembershipCandidate(client: PoolClient, tenantId: string, mem
 }
 
 async function assertAuthorityScope(client: PoolClient, principal: RequestPrincipal, input: ApprovalAuthorityInput): Promise<string | null> {
-  if (!input.companyId && !input.groupId && !input.costCenterId && !input.projectId) {
+  if (!input.companyId && !input.groupId && !input.costCenterId && !input.projectId && !input.department && !input.audienceGroupId) {
     if (!principal.platformAdmin && principal.roleKey !== 'tenant_admin') {
       throw new ApprovalServiceError('TENANT_APPROVAL_AUTHORITY_DENIED', 'Somente administrador do tenant pode criar alcada global.', 403)
     }
     return null
-  }
-  if (input.companyId) {
-    await requireCompanyAccess(principal, input.companyId, 'gerenciar_workflows')
-    await assertDatabaseEntity(client, principal.tenantId, 'companies', input.companyId)
-    return input.companyId
   }
   if (input.groupId) {
     await requireGroupAccess(principal, input.groupId, 'gerenciar_workflows')
     await assertDatabaseEntity(client, principal.tenantId, 'business_groups', input.groupId)
     return null
   }
-  const table = input.costCenterId ? 'cost_centers' : 'projects'
-  const id = input.costCenterId || input.projectId as string
-  const result = await client.query<{ company_id: string }>(
-    `select company_id from ${table} where tenant_id = $1 and id = $2 and deleted_at is null`,
-    [principal.tenantId, id],
-  )
-  if (!result.rows[0]) throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_NOT_FOUND', 'Escopo da alcada nao encontrado.', 404)
-  await requireCompanyAccess(principal, result.rows[0].company_id, 'gerenciar_workflows')
-  return result.rows[0].company_id
+  let resolvedCompanyId = input.companyId || null
+  if (input.costCenterId || input.projectId) {
+    const table = input.costCenterId ? 'cost_centers' : 'projects'
+    const id = input.costCenterId || input.projectId as string
+    const result = await client.query<{ company_id: string }>(
+      `select company_id from ${table} where tenant_id = $1 and id = $2 and deleted_at is null`,
+      [principal.tenantId, id],
+    )
+    if (!result.rows[0]) throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_NOT_FOUND', 'Escopo da alcada nao encontrado.', 404)
+    if (resolvedCompanyId && resolvedCompanyId !== result.rows[0].company_id) {
+      throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_MISMATCH', 'O recorte da alcada pertence a outra empresa.', 409)
+    }
+    resolvedCompanyId = result.rows[0].company_id
+  }
+  if (input.audienceGroupId) {
+    const result = await client.query<{ company_id: string }>(
+      `select company_id from approval_audience_groups
+       where tenant_id = $1 and id = $2 and status = 'active'`,
+      [principal.tenantId, input.audienceGroupId],
+    )
+    if (!result.rows[0]) throw new ApprovalServiceError('APPROVAL_AUDIENCE_GROUP_NOT_FOUND', 'Grupo alvo de usuarios nao encontrado.', 404)
+    if (resolvedCompanyId && resolvedCompanyId !== result.rows[0].company_id) {
+      throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_MISMATCH', 'O grupo alvo pertence a outra empresa.', 409)
+    }
+    resolvedCompanyId = result.rows[0].company_id
+  }
+  if (!resolvedCompanyId) throw new ApprovalServiceError('APPROVAL_AUTHORITY_COMPANY_REQUIRED', 'O recorte da alcada exige uma empresa.', 422)
+  await requireCompanyAccess(principal, resolvedCompanyId, 'gerenciar_workflows')
+  await assertDatabaseEntity(client, principal.tenantId, 'companies', resolvedCompanyId)
+  return resolvedCompanyId
 }
 
 async function assertAuthorityCanBeGranted(client: PoolClient, principal: RequestPrincipal, input: ApprovalAuthorityInput): Promise<void> {
@@ -2058,10 +4381,14 @@ async function assertAuthorityCanBeGranted(client: PoolClient, principal: Reques
        and group_id is not distinct from $5
        and cost_center_id is not distinct from $6
        and project_id is not distinct from $7
+       and department is not distinct from $8
+       and audience_group_id is not distinct from $9
+       and approval_level = $10
      order by max_amount desc nulls first limit 1`,
     [
       principal.tenantId, principal.membershipId, input.approvalKind,
       input.companyId || null, input.groupId || null, input.costCenterId || null, input.projectId || null,
+      input.department || null, input.audienceGroupId || null, input.approvalLevel,
     ],
   )
   const actor = result.rows[0]
@@ -2214,6 +4541,7 @@ async function assertRequesterCanCreateApprovalInstance(
      join requesters requester_identity
        on requester_identity.tenant_id = requester_demand.tenant_id
        and requester_identity.id = requester_demand.requester_id
+       and requester_identity.company_id = requester_demand.company_id
      where requester_demand.tenant_id = $1
        and requester_demand.id = $2
        and requester_demand.company_id = $3
@@ -2276,6 +4604,303 @@ async function loadCompanyContext(client: PoolClient, tenantId: string, companyI
   return { groupId: result.rows[0].group_id }
 }
 
+export async function loadCanonicalApprovalSubjectContext(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  input: CreateApprovalInstanceInput,
+  subject: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const tenantId = principal.tenantId
+  const result: Record<string, unknown> = {}
+  let employeeId = input.employeeId || null
+  let requesterId: string | null = null
+  let requesterUserId: string | null = null
+  let department: string | null = null
+  let costCenterId: string | null = null
+  let demandCreatedByUserId: string | null = null
+  let demandUpdatedByUserId: string | null = null
+  let audienceEmployeeIds: string[] = []
+  let travelerUserIds: string[] = []
+  let primaryTravelerUserId: string | null = null
+
+  if (input.demandId) {
+    const demand = await client.query<{
+      employee_id: string | null
+      requester_id: string | null
+      employee_department: string | null
+      requester_department: string | null
+      demand_cost_center_id: string | null
+      employee_cost_center_id: string | null
+      requester_cost_center_id: string | null
+      requester_user_id: string | null
+      demand_created_by: string | null
+      demand_updated_by: string | null
+    }>(
+      `select demand.employee_id, demand.requester_id,
+              employee.department as employee_department,
+              requester.department as requester_department,
+              demand.cost_center_id as demand_cost_center_id,
+              employee.cost_center_id as employee_cost_center_id,
+              requester.cost_center_id as requester_cost_center_id,
+              requester.user_id as requester_user_id,
+              demand.created_by as demand_created_by,
+              demand.updated_by as demand_updated_by
+       from demands demand
+       left join employees employee
+         on employee.tenant_id = demand.tenant_id
+        and employee.id = demand.employee_id
+        and employee.company_id = demand.company_id
+        and employee.deleted_at is null
+       left join requesters requester
+         on requester.tenant_id = demand.tenant_id
+        and requester.id = demand.requester_id
+        and requester.company_id = demand.company_id
+        and requester.deleted_at is null
+       where demand.tenant_id = $1 and demand.id = $2 and demand.company_id = $3
+         and demand.deleted_at is null`,
+      [tenantId, input.demandId, input.companyId],
+    )
+    const row = demand.rows[0]
+    if (row) {
+      employeeId = row.employee_id || employeeId
+      requesterId = row.requester_id
+      requesterUserId = row.requester_user_id
+      department = row.employee_department || row.requester_department
+      costCenterId = row.demand_cost_center_id || row.employee_cost_center_id || row.requester_cost_center_id
+      demandCreatedByUserId = row.demand_created_by
+      demandUpdatedByUserId = row.demand_updated_by
+    }
+    const travelers = await client.query<{ employee_id: string; user_id: string | null; is_primary: boolean }>(
+      `with traveler_employee_candidates as (
+         select traveler.employee_id, traveler.is_primary
+         from demand_travelers traveler
+         where traveler.tenant_id = $1
+           and traveler.demand_id = $2
+           and traveler.company_id = $3
+           and traveler.employee_id is not null
+           and traveler.deleted_at is null
+         union all
+         select $4::text, true
+         where $4::text is not null
+       ), traveler_employees as (
+         select employee_id, bool_or(is_primary) as is_primary
+         from traveler_employee_candidates
+         where employee_id is not null
+         group by employee_id
+       )
+       select distinct traveler_employee.employee_id, requester.user_id, traveler_employee.is_primary
+       from traveler_employees traveler_employee
+       join employees traveler_profile
+         on traveler_profile.tenant_id = $1
+        and traveler_profile.company_id = $3
+        and traveler_profile.id = traveler_employee.employee_id
+        and traveler_profile.status = 'active'
+        and traveler_profile.deleted_at is null
+       left join requesters requester
+         on requester.tenant_id = $1
+        and requester.company_id = $3
+        and requester.employee_id = traveler_employee.employee_id
+        and requester.status = 'active'
+        and requester.deleted_at is null
+        and requester.user_id is not null`,
+      [tenantId, input.demandId, input.companyId, employeeId],
+    )
+    audienceEmployeeIds = uniqueStrings(travelers.rows.map((traveler) => traveler.employee_id))
+    travelerUserIds = uniqueStrings(travelers.rows.flatMap((traveler) => traveler.user_id ? [traveler.user_id] : []))
+    const primaryTravelerUserIds = uniqueStrings(
+      travelers.rows.flatMap((traveler) => traveler.is_primary && traveler.user_id ? [traveler.user_id] : []),
+    )
+    primaryTravelerUserId = primaryTravelerUserIds.length === 1
+      ? primaryTravelerUserIds[0]
+      : travelerUserIds.length === 1 ? travelerUserIds[0] : null
+  } else if (employeeId) {
+    const employee = await client.query<{ department: string | null; cost_center_id: string | null }>(
+      `select department, cost_center_id from employees
+       where tenant_id = $1 and id = $2 and company_id = $3
+         and status = 'active' and deleted_at is null`,
+      [tenantId, employeeId, input.companyId],
+    )
+    department = employee.rows[0]?.department || null
+    costCenterId = employee.rows[0]?.cost_center_id || null
+    audienceEmployeeIds = employee.rows[0] ? [employeeId] : []
+  }
+
+  if (department) result.department = department
+  if (costCenterId) result.costCenterId = costCenterId
+  if (requesterUserId) result.requesterUserId = requesterUserId
+  if (primaryTravelerUserId) result.travelerUserId = primaryTravelerUserId
+  Object.assign(result, mergeCanonicalApprovalSubjectConflicts(subject, {
+    realActorUserId: realActorUserId(principal),
+    representationActorUserId: principal.representation?.actor.id || principal.actor?.user.id || null,
+    representationSubjectUserId: principal.representation?.subject.id || null,
+    demandCreatedByUserId,
+    demandUpdatedByUserId,
+    travelerUserIds,
+  }))
+
+  const subjectUserIds = uniqueStrings([
+    requesterUserId || '',
+    ...travelerUserIds,
+  ])
+  const audienceGroups = await client.query<{ id: string }>(
+    `select distinct audience_group.id
+     from approval_audience_groups audience_group
+     join approval_audience_group_members member
+       on member.tenant_id = audience_group.tenant_id
+      and member.audience_group_id = audience_group.id
+      and member.status = 'active'
+     where audience_group.tenant_id = $1
+       and audience_group.company_id = $2
+       and audience_group.status = 'active'
+       and (
+         (cardinality($3::text[]) > 0 and member.employee_id = any($3::text[]))
+         or ($4::text is not null and member.requester_id = $4)
+         or (cardinality($5::uuid[]) > 0 and member.user_id = any($5::uuid[]))
+       )`,
+    [tenantId, input.companyId, audienceEmployeeIds, requesterId, subjectUserIds],
+  )
+  result.audienceGroupIds = audienceGroups.rows.map((row) => row.id).sort()
+  return result
+}
+
+async function loadPolicyApprovalRouting(
+  client: PoolClient,
+  tenantId: string,
+  input: CreateApprovalInstanceInput,
+  subject: Record<string, unknown>,
+): Promise<ApprovalRoutingFacts> {
+  const referencedEvaluationIds = extractApprovalPolicyEvaluationIds(subject)
+  const domainEvaluationIds: string[] = []
+  if (input.demandId) {
+    const demand = await client.query<{ last_policy_evaluation_id: string | null }>(
+      `select last_policy_evaluation_id from demands
+       where tenant_id = $1 and id = $2 and company_id = $3 and deleted_at is null`,
+      [tenantId, input.demandId, input.companyId],
+    )
+    if (demand.rows[0]?.last_policy_evaluation_id) domainEvaluationIds.push(demand.rows[0].last_policy_evaluation_id)
+  }
+  if (input.reservationId) {
+    const reservation = await client.query<{ last_policy_evaluation_id: string | null }>(
+      `select last_policy_evaluation_id from reservations
+       where tenant_id = $1 and id = $2 and company_id = $3`,
+      [tenantId, input.reservationId, input.companyId],
+    )
+    if (reservation.rows[0]?.last_policy_evaluation_id) domainEvaluationIds.push(reservation.rows[0].last_policy_evaluation_id)
+  }
+  const evaluationIds = uniqueStrings([...referencedEvaluationIds, ...domainEvaluationIds])
+  if (!evaluationIds.length) {
+    return { requiredLevel: 1, requiresSecondLevel: false, reasons: [], sourcePolicyEvaluationIds: [] }
+  }
+  const evaluations = await client.query<{ id: string; result: unknown }>(
+    `select id, result from policy_evaluations
+     where tenant_id = $1 and id = any($2::uuid[]) and company_id = $3
+       and ($4::text is null or demand_id is null or demand_id = $4)
+       and ($5::text is null or reservation_id is null or reservation_id = $5)`,
+    [tenantId, evaluationIds, input.companyId, input.demandId || null, input.reservationId || null],
+  )
+  if (evaluations.rowCount !== evaluationIds.length) {
+    throw new ApprovalServiceError(
+      'APPROVAL_POLICY_ROUTING_CONTEXT_INVALID',
+      'Uma avaliacao de politica informada nao pertence ao mesmo contexto da aprovacao.',
+      409,
+    )
+  }
+  const requiresSecondLevel = policyResultsRequireSecondLevel(
+    evaluations.rows.map((evaluation) => evaluation.result),
+  )
+  return {
+    requiredLevel: requiresSecondLevel ? 2 : 1,
+    requiresSecondLevel,
+    reasons: requiresSecondLevel ? ['policy_required_second_level'] : [],
+    sourcePolicyEvaluationIds: evaluations.rows.map((evaluation) => evaluation.id).sort(),
+  }
+}
+
+function extractApprovalPolicyEvaluationIds(subject: Record<string, unknown>): string[] {
+  const explicit = Array.isArray(subject.policyEvaluationIds)
+    ? subject.policyEvaluationIds.filter(isString)
+    : []
+  const offline = Array.isArray(subject.offlinePolicyEvaluations)
+    ? subject.offlinePolicyEvaluations.flatMap((item) => {
+        const record = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : null
+        return typeof record?.databaseEvaluationId === 'string' ? [record.databaseEvaluationId] : []
+      })
+    : []
+  return uniqueStrings([...explicit, ...offline])
+}
+
+async function prepareApprovalRouting(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  snapshot: ApprovalWorkflowSnapshot,
+  baseSubject: ApprovalSubject & Record<string, unknown>,
+  policyRouting: ApprovalRoutingFacts,
+): Promise<{
+  subject: ApprovalSubject & Record<string, unknown>
+  initialNodes: ApprovalWorkflowNode[]
+}> {
+  const start = snapshot.nodes.find((node) => node.type === 'start')
+  if (!start) throw new ApprovalServiceError('WORKFLOW_START_NODE_MISSING', 'Workflow publicado sem no inicial.', 409)
+  let subject: ApprovalSubject & Record<string, unknown> = { ...baseSubject, routing: policyRouting }
+  let initialNodes = resolveNextWorkflowNodes(snapshot, start.id, subject)
+  const preliminaryApproverUserIds = new Set<string>()
+  let authorityOverflow = false
+
+  for (const node of initialNodes) {
+    if (node.type !== 'approval' || !node.approvalKind || !node.approverResolution) continue
+    const candidates = await loadApprovalCandidates(client, principal, node.approvalKind, subject, snapshot)
+    const resolution = resolveApprovers(node.approvalKind, node.approverResolution, subject, candidates)
+    resolution.approvers.forEach((approver) => preliminaryApproverUserIds.add(approver.userId))
+    authorityOverflow ||= resolution.requiresEscalation
+  }
+
+  const reasons = Array.from(new Set<ApprovalRoutingFacts['reasons'][number]>([
+    ...policyRouting.reasons,
+    ...(authorityOverflow ? ['authority_limit_exceeded' as const] : []),
+  ]))
+  const routing: ApprovalRoutingFacts = {
+    requiredLevel: reasons.length ? 2 : 1,
+    requiresSecondLevel: reasons.length > 0,
+    reasons,
+    sourcePolicyEvaluationIds: policyRouting.sourcePolicyEvaluationIds,
+  }
+  subject = { ...subject, routing }
+  initialNodes = resolveNextWorkflowNodes(snapshot, start.id, subject)
+
+  if (routing.requiresSecondLevel) {
+    const secondLevelNodes = Array.from(new Map(initialNodes.flatMap((node) => (
+      node.type === 'approval'
+        ? resolveNextWorkflowNodes(snapshot, node.id, subject).filter((candidate) => (
+            candidate.type === 'approval' && isSecondLevelApprovalNode(candidate)
+          ))
+        : []
+    )).map((node) => [node.id, node])).values())
+    if (!secondLevelNodes.length) {
+      throw new ApprovalServiceError(
+        'APPROVAL_SECOND_LEVEL_NOT_CONFIGURED',
+        'A operacao exige segundo nivel, mas o workflow nao possui esse no.',
+        422,
+      )
+    }
+    const prevalidationSubject: ApprovalSubject = {
+      ...subject,
+      priorApproverUserIds: [...preliminaryApproverUserIds],
+    }
+    for (const node of secondLevelNodes) {
+      if (!node.approverResolution || !node.approvalKind) continue
+      const candidates = await loadApprovalCandidates(client, principal, node.approvalKind, prevalidationSubject, snapshot)
+      resolveApprovers(node.approvalKind, node.approverResolution, prevalidationSubject, candidates)
+    }
+  }
+  return { subject, initialNodes }
+}
+
+function isSecondLevelApprovalNode(node: ApprovalWorkflowNode): boolean {
+  return Boolean(node.approverResolution?.selectors.some((selector) => (
+    selector.type === 'authority' && Number(selector.configuration?.level) === 2
+  )))
+}
+
 async function activateWorkflowNodes(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -2313,10 +4938,12 @@ async function activateWorkflowNodes(
     )
     if (!inserted.rowCount) continue
     const subject = asApprovalSubject(instance.subject_snapshot)
-    const candidates = await loadApprovalCandidates(client, principal, node.approvalKind, subject)
+    const candidates = await loadApprovalCandidates(client, principal, node.approvalKind, subject, snapshot)
     const resolved = resolveApprovers(node.approvalKind, node.approverResolution, subject, candidates)
+    let assignmentCount = 0
     for (const approver of resolved.approvers) {
       const delegated = await resolveDelegatedAssignment(client, principal.tenantId, approver, subject)
+      if (approverConflictsWithSubject(delegated.userId, subject, node.approverResolution)) continue
       await client.query(
         `insert into approval_assignments (
            tenant_id, approval_step_id, assignee_user_id, resolution_source,
@@ -2340,6 +4967,7 @@ async function activateWorkflowNodes(
         message: 'Uma nova solicitacao aguarda sua decisao.',
         payload: { nodeId: node.id, approvalKind: node.approvalKind },
       })
+      assignmentCount += 1
       for (const reminderAt of sla?.reminderAt || []) {
         await client.query(
           `insert into approval_escalations (
@@ -2350,6 +4978,13 @@ async function activateWorkflowNodes(
           [principal.tenantId, instance.id, stepId, delegated.userId, reminderAt],
         )
       }
+    }
+    if (assignmentCount < node.approverResolution.minimumApprovers) {
+      throw new ApprovalServiceError(
+        'NO_APPROVER_AVAILABLE_AFTER_DELEGATION',
+        'A delegacao resultou em conflito de segregacao de funcoes e nao ha aprovadores suficientes.',
+        422,
+      )
     }
     if (sla) {
       await client.query(
@@ -2420,7 +5055,105 @@ async function maybeCompleteApprovalInstance(
   )
   if (!completed.rowCount) return
   await insertApprovalEvent(client, principal, instance.id, null, 'instance_approved', {})
+  await reconcileApprovedMeritApproval(client, principal, instance)
   await reconcileApprovedQuoteSelection(client, principal, instance)
+}
+
+async function reconcileApprovedMeritApproval(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  instance: ApprovalInstanceRow,
+): Promise<void> {
+  if (instance.instance_type !== 'merit' || !instance.demand_id) return
+
+  const demandResult = await client.query<ApprovalDemandProjectionRow>(
+    `select id, company_id, service_type, lifecycle_status, lifecycle_version,
+            last_policy_evaluation_id, active_approval_instance_id, metadata
+     from demands
+     where tenant_id = $1 and id = $2 and deleted_at is null
+     for update`,
+    [principal.tenantId, instance.demand_id],
+  )
+  const demand = demandResult.rows[0]
+  if (!demand) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MERIT_DEMAND_NOT_FOUND',
+      'A demanda vinculada a aprovacao de merito nao foi encontrada.',
+      409,
+    )
+  }
+  if (demand.active_approval_instance_id !== instance.id) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MERIT_DEMAND_SUPERSEDED',
+      'A demanda nao possui mais esta aprovacao de merito como instancia ativa.',
+      409,
+    )
+  }
+  if (demand.lifecycle_status !== 'pending_merit_approval') {
+    throw new ApprovalServiceError(
+      'APPROVAL_MERIT_DEMAND_STATE_CONFLICT',
+      `A demanda esta no estado ${demand.lifecycle_status} e nao pode concluir a aprovacao de merito.`,
+      409,
+    )
+  }
+  if (!demand.last_policy_evaluation_id) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MERIT_POLICY_MISSING',
+      'A demanda aprovada nao possui a avaliacao de politica que originou a decisao.',
+      409,
+    )
+  }
+  const policyResult = await client.query<{ passed: boolean; has_blocks: boolean }>(
+    `select passed, has_blocks
+     from policy_evaluations
+     where tenant_id = $1 and id = $2 and demand_id = $3`,
+    [principal.tenantId, demand.last_policy_evaluation_id, demand.id],
+  )
+  const policy = policyResult.rows[0]
+  if (!policy || !policy.passed || policy.has_blocks) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MERIT_POLICY_INVALID',
+      'A avaliacao de politica da demanda aprovada nao esta valida.',
+      409,
+    )
+  }
+
+  await persistTravelTransitionInTransaction(
+    client,
+    principal,
+    approvalDemandLifecycleRecord(demand),
+    'approve_merit',
+    {
+      idempotencyKey: `approval:${instance.id}:merit-approved`,
+      requirements: {
+        policyEvaluationId: demand.last_policy_evaluation_id,
+        policyPassed: true,
+        policyHasBlocks: false,
+        approvalInstanceId: instance.id,
+        approvalsSatisfied: true,
+      },
+      metadata: {
+        channel: 'offline',
+        source: 'approval_decision',
+        outcome: 'approved',
+        approvalInstanceId: instance.id,
+      },
+    },
+  )
+  await writeAuditEventInTransaction(client, {
+    action: 'travel.approval.merit.approved_reconciled',
+    result: 'success',
+    tenantId: principal.tenantId,
+    actorUserId: realActorUserId(principal),
+    entityType: 'demand',
+    entityId: demand.id,
+    metadata: {
+      approvalInstanceId: instance.id,
+      policyEvaluationId: demand.last_policy_evaluation_id,
+      fromLifecycleStatus: 'pending_merit_approval',
+      toLifecycleStatus: 'approved_for_quotation',
+    },
+  })
 }
 
 async function reconcileApprovedQuoteSelection(
@@ -2546,23 +5279,23 @@ async function reconcileApprovedQuoteSelection(
      where tenant_id = $1 and id = $2 and status = 'pending_approval'`,
     [principal.tenantId, projection.selection_id],
   )
-  await client.query(
-    `insert into audit_logs (
-       tenant_id, actor_user_id, action, entity_type, entity_id, result, metadata
-     ) values ($1, $2, 'travel.quote.selection.approved', 'travel_quote_selection', $3, 'success', $4::jsonb)`,
-    [
-      principal.tenantId,
-      principal.user.id,
-      projection.selection_id,
-      JSON.stringify({
-        demandId: projection.demand_id,
-        quoteId: projection.quote_id,
-        quoteOptionId: projection.option_id,
-        snapshotHash: projection.snapshot_hash,
-        approvalInstanceId: instance.id,
-      }),
-    ],
-  )
+  await writeAuditEventInTransaction(client, {
+    action: 'travel.quote.selection.approved',
+    result: 'success',
+    tenantId: principal.tenantId,
+    actorUserId: realActorUserId(principal),
+    entityType: 'travel_quote_selection',
+    entityId: projection.selection_id,
+    metadata: {
+      demandId: projection.demand_id,
+      quoteId: projection.quote_id,
+      quoteOptionId: projection.option_id,
+      snapshotHash: projection.snapshot_hash,
+      approvalInstanceId: instance.id,
+      representationId: principal.representation?.id || null,
+      representedUserId: principal.representation?.subject.id || null,
+    },
+  })
 }
 
 async function rejectApprovalInstance(
@@ -2597,6 +5330,229 @@ async function rejectApprovalInstance(
     [principal.tenantId, instance.id],
   )
   await insertApprovalEvent(client, principal, instance.id, stepId, 'instance_rejected', { explanation })
+  await reconcileRejectedApproval(client, principal, instance, explanation)
+}
+
+async function reconcileRejectedApproval(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  instance: ApprovalInstanceRow,
+  explanation: string,
+): Promise<void> {
+  if (!instance.demand_id || !['merit', 'cost'].includes(instance.instance_type)) return
+
+  const demandResult = await client.query<ApprovalDemandProjectionRow>(
+    `select id, company_id, service_type, lifecycle_status, lifecycle_version,
+            last_policy_evaluation_id, active_approval_instance_id, metadata
+     from demands
+     where tenant_id = $1 and id = $2 and deleted_at is null
+     for update`,
+    [principal.tenantId, instance.demand_id],
+  )
+  const demand = demandResult.rows[0]
+  if (!demand) return
+  if (
+    demand.active_approval_instance_id
+    && demand.active_approval_instance_id !== instance.id
+  ) {
+    throw new ApprovalServiceError(
+      'APPROVAL_REJECTION_DEMAND_SUPERSEDED',
+      'A demanda possui outra aprovacao ativa e nao pode receber esta rejeicao.',
+      409,
+    )
+  }
+
+  if (instance.instance_type === 'cost') {
+    await reconcileRejectedCostApproval(client, principal, instance, demand, explanation)
+    return
+  }
+  await reconcileRejectedMeritApproval(client, principal, instance, demand, explanation)
+}
+
+async function reconcileRejectedCostApproval(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  instance: ApprovalInstanceRow,
+  demand: ApprovalDemandProjectionRow,
+  explanation: string,
+): Promise<void> {
+  const selectionResult = await client.query<RejectedQuoteSelectionProjectionRow>(
+    `select selection.id as selection_id, selection.status as selection_status,
+            selection.snapshot_hash, selection.quote_id, selection.option_id
+     from travel_quote_selections selection
+     where selection.tenant_id = $1 and selection.demand_id = $2
+       and selection.approval_instance_id = $3
+       and selection.status in ('pending_approval', 'rejected')
+     order by selection.chosen_at desc
+     limit 1
+     for update`,
+    [principal.tenantId, demand.id, instance.id],
+  )
+  const selection = selectionResult.rows[0] || null
+
+  if (demand.lifecycle_status === 'pending_cost_approval') {
+    await persistTravelTransitionInTransaction(
+      client,
+      principal,
+      approvalDemandLifecycleRecord(demand),
+      'return_to_choice',
+      {
+        idempotencyKey: `approval:${instance.id}:cost-rejected:return-to-choice`,
+        requirements: {
+          approvalInstanceId: instance.id,
+          humanConfirmed: true,
+        },
+        metadata: {
+          source: 'approval_decision',
+          outcome: 'rejected',
+          approvalInstanceId: instance.id,
+          reason: explanation,
+          selectionId: selection?.selection_id || null,
+        },
+      },
+    )
+  } else if (demand.lifecycle_status !== 'pending_choice') {
+    throw new ApprovalServiceError(
+      'APPROVAL_REJECTION_DEMAND_STATE_CONFLICT',
+      `A demanda esta no estado ${demand.lifecycle_status} e nao pode voltar para escolha.`,
+      409,
+    )
+  }
+
+  if (selection?.selection_status === 'pending_approval') {
+    await client.query(
+      `update travel_quote_selections
+       set status = 'rejected', version = version + 1
+       where tenant_id = $1 and id = $2 and status = 'pending_approval'`,
+      [principal.tenantId, selection.selection_id],
+    )
+  }
+  if (selection) {
+    await client.query(
+      `update travel_quotes
+       set status = 'completed', updated_at = now()
+       where tenant_id = $1 and id = $2 and status = 'selected'`,
+      [principal.tenantId, selection.quote_id],
+    )
+  }
+
+  const adjustment = createOpenDemandRequestAdjustment({
+    source: 'cost_approval_rejected',
+    reason: explanation,
+    approvalInstanceId: instance.id,
+    allowedActions: ['choose_another_option', 'edit_request'],
+    requestedAt: new Date().toISOString(),
+    requestedBy: realActorUserId(principal),
+  })
+  await client.query(
+    `update demands
+     set final_amount = null,
+         metadata = coalesce(metadata, '{}'::jsonb)
+           || jsonb_build_object('requestAdjustment', $3::jsonb),
+         version = version + 1,
+         updated_by = $4,
+         updated_at = now()
+     where tenant_id = $1 and id = $2`,
+    [principal.tenantId, demand.id, JSON.stringify(adjustment), realActorUserId(principal)],
+  )
+  await writeAuditEventInTransaction(client, {
+    action: 'travel.approval.cost.rejected_reconciled',
+    result: 'success',
+    tenantId: principal.tenantId,
+    actorUserId: realActorUserId(principal),
+    entityType: 'demand',
+    entityId: demand.id,
+    metadata: {
+      approvalInstanceId: instance.id,
+      selectionId: selection?.selection_id || null,
+      quoteId: selection?.quote_id || null,
+      quoteOptionId: selection?.option_id || null,
+      snapshotHash: selection?.snapshot_hash || null,
+      reason: explanation,
+      allowedActions: adjustment.allowedActions,
+    },
+  })
+}
+
+async function reconcileRejectedMeritApproval(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  instance: ApprovalInstanceRow,
+  demand: ApprovalDemandProjectionRow,
+  explanation: string,
+): Promise<void> {
+  if (demand.lifecycle_status === 'pending_merit_approval') {
+    await persistTravelTransitionInTransaction(
+      client,
+      principal,
+      approvalDemandLifecycleRecord(demand),
+      'return_for_adjustment',
+      {
+        idempotencyKey: `approval:${instance.id}:merit-rejected:return-for-adjustment`,
+        requirements: {
+          approvalInstanceId: instance.id,
+          humanConfirmed: true,
+        },
+        metadata: {
+          source: 'approval_decision',
+          outcome: 'rejected',
+          approvalInstanceId: instance.id,
+          reason: explanation,
+        },
+      },
+    )
+  } else if (demand.lifecycle_status !== 'submitted') {
+    throw new ApprovalServiceError(
+      'APPROVAL_REJECTION_DEMAND_STATE_CONFLICT',
+      `A demanda esta no estado ${demand.lifecycle_status} e nao pode voltar para ajuste.`,
+      409,
+    )
+  }
+
+  const adjustment = createOpenDemandRequestAdjustment({
+    source: 'merit_approval_rejected',
+    reason: explanation,
+    approvalInstanceId: instance.id,
+    allowedActions: ['edit_request'],
+    requestedAt: new Date().toISOString(),
+    requestedBy: realActorUserId(principal),
+  })
+  await client.query(
+    `update demands
+     set metadata = coalesce(metadata, '{}'::jsonb)
+           || jsonb_build_object('requestAdjustment', $3::jsonb),
+         version = version + 1,
+         updated_by = $4,
+         updated_at = now()
+     where tenant_id = $1 and id = $2`,
+    [principal.tenantId, demand.id, JSON.stringify(adjustment), realActorUserId(principal)],
+  )
+  await writeAuditEventInTransaction(client, {
+    action: 'travel.approval.merit.rejected_returned_for_adjustment',
+    result: 'success',
+    tenantId: principal.tenantId,
+    actorUserId: realActorUserId(principal),
+    entityType: 'demand',
+    entityId: demand.id,
+    metadata: {
+      approvalInstanceId: instance.id,
+      reason: explanation,
+      allowedActions: adjustment.allowedActions,
+    },
+  })
+}
+
+function approvalDemandLifecycleRecord(
+  demand: ApprovalDemandProjectionRow,
+): TravelLifecycleRecord {
+  return {
+    demandId: demand.id,
+    companyId: demand.company_id,
+    status: demand.lifecycle_status,
+    version: Number(demand.lifecycle_version),
+    lastPolicyEvaluationId: demand.last_policy_evaluation_id,
+    activeApprovalInstanceId: demand.active_approval_instance_id,
+  }
 }
 
 async function calculateNodeSla(
@@ -2689,6 +5645,7 @@ async function loadApprovalCandidates(
   principal: RequestPrincipal,
   kind: ApprovalKind,
   subject: ApprovalSubject,
+  workflow: Pick<ApprovalWorkflowSnapshot, 'code'>,
 ): Promise<ApprovalCandidate[]> {
   const members = await client.query<MembershipCandidateRow>(
     `select membership.id as membership_id, membership.user_id,
@@ -2707,13 +5664,35 @@ async function loadApprovalCandidates(
     [principal.tenantId],
   )
   const memberIds = members.rows.map((member) => member.membership_id)
+  const matrixWorkflow = workflow.code.startsWith('matrix.')
   const authorityRows = memberIds.length
     ? await client.query<AuthorityRow>(
         `select * from approval_authorities
          where tenant_id = $1 and membership_id = any($2::uuid[])
            and approval_kind = $3 and status in ('active', 'scheduled')
-           and valid_from <= now() and (valid_until is null or valid_until > now())`,
-        [principal.tenantId, memberIds, kind],
+           and valid_from <= now() and (valid_until is null or valid_until > now())
+           and (
+             not $4::boolean
+             or exists (
+               select 1 from approval_matrices matrix
+               where matrix.tenant_id = approval_authorities.tenant_id
+                 and matrix.status = 'published'
+                 and matrix.stage = $3
+                 and approval_authorities.id = any(matrix.authority_ids)
+                 and (
+                   (matrix.root_scope_type = 'company' and matrix.company_id = $5)
+                   or (
+                     matrix.root_scope_type = 'business_group'
+                     and matrix.business_group_id = $6
+                     and (
+                       matrix.access_mode = 'all_companies'
+                       or $5 = any(matrix.selected_company_ids)
+                     )
+                   )
+                 )
+             )
+           )`,
+        [principal.tenantId, memberIds, kind, matrixWorkflow, subject.companyId, subject.groupId || null],
       )
     : { rows: [] as AuthorityRow[] }
   const authoritiesByMembership = new Map<string, AuthorityRow[]>()
@@ -2721,12 +5700,35 @@ async function loadApprovalCandidates(
     authority.membership_id,
     [...(authoritiesByMembership.get(authority.membership_id) || []), authority],
   ))
+  const approverGroups = memberIds.length
+    ? await client.query<{ membership_id: string; group_ids: string[] }>(
+        `select group_member.membership_id, array_agg(approver_group.id::text order by approver_group.id)::text[] as group_ids
+         from approval_approver_group_members group_member
+         join approval_approver_groups approver_group
+           on approver_group.tenant_id = group_member.tenant_id
+          and approver_group.id = group_member.approver_group_id
+          and approver_group.status = 'active'
+         where group_member.tenant_id = $1
+           and group_member.membership_id = any($2::uuid[])
+           and group_member.status = 'active'
+           and (
+             approver_group.company_id = $3
+             or ($4::text is not null and approver_group.business_group_id = $4)
+           )
+         group by group_member.membership_id`,
+        [principal.tenantId, memberIds, subject.companyId, subject.groupId || null],
+      )
+    : { rows: [] as Array<{ membership_id: string; group_ids: string[] }> }
+  const approverGroupsByMembership = new Map(approverGroups.rows.map((row) => [row.membership_id, row.group_ids]))
 
   const candidates: ApprovalCandidate[] = []
   for (const member of members.rows) {
-    if (member.platform_admin) continue
+    if (!isCorporateApprovalMembershipEligible({
+      roleKey: member.role_key,
+      platformAdmin: member.platform_admin,
+      tenantWide: false,
+    })) continue
     const permissions = normalizeMembershipPermissions(member.permissions, member.profile_key)
-    if (!permissions.decidir_aprovacoes) continue
     const access = await resolveEffectiveCorporateAccessInTransaction(client, {
       tenantId: principal.tenantId,
       membershipId: member.membership_id,
@@ -2756,6 +5758,9 @@ async function loadApprovalCandidates(
       branchIds: metadataStringArray(member.user_metadata, 'branchIds'),
       costCenterIds: [],
       projectIds: [],
+      departments: [],
+      audienceGroupIds: [],
+      approverGroupIds: approverGroupsByMembership.get(member.membership_id) || [],
       approvalKinds: ALL_APPROVAL_KINDS,
       policyViolationCodes: metadataStringArray(member.user_metadata, 'policyViolationCodes'),
     }
@@ -2769,6 +5774,10 @@ async function loadApprovalCandidates(
         authorityMatched: true,
         costCenterIds: authority.cost_center_id ? [authority.cost_center_id] : [],
         projectIds: authority.project_id ? [authority.project_id] : [],
+        departments: authority.department ? [authority.department] : [],
+        audienceGroupIds: authority.audience_group_id ? [authority.audience_group_id] : [],
+        authorityLevel: authority.approval_level,
+        authoritySpecificity: authoritySpecificity(authority),
         maxAmount: authority.max_amount === null ? null : Number(authority.max_amount),
         accumulatedAmountLimit: authority.accumulated_amount_limit === null ? null : Number(authority.accumulated_amount_limit),
         maxPercentageAboveLowest: authority.max_percentage_above_lowest === null ? null : Number(authority.max_percentage_above_lowest),
@@ -2790,7 +5799,23 @@ function authorityApplies(authority: AuthorityRow, subject: ApprovalSubject): bo
   if (authority.group_id && authority.group_id !== subject.groupId) return false
   if (authority.cost_center_id && authority.cost_center_id !== subject.costCenterId) return false
   if (authority.project_id && authority.project_id !== subject.projectId) return false
+  if (authority.department && normalizeOrganizationalLabel(authority.department) !== normalizeOrganizationalLabel(subject.department || '')) return false
+  if (authority.audience_group_id && !(subject.audienceGroupIds || []).includes(authority.audience_group_id)) return false
   return true
+}
+
+function authoritySpecificity(authority: AuthorityRow): number {
+  if (authority.audience_group_id) return 500
+  if (authority.project_id) return 450
+  if (authority.cost_center_id) return 400
+  if (authority.department) return 300
+  if (authority.company_id) return 200
+  if (authority.group_id) return 100
+  return 0
+}
+
+function normalizeOrganizationalLabel(value: string): string {
+  return value.trim().toLocaleLowerCase('pt-BR')
 }
 
 async function resolveDelegatedAssignment(
@@ -2862,9 +5887,13 @@ async function loadApprovalInstance(
      join approval_workflow_definitions definition
        on definition.tenant_id = instance.tenant_id and definition.id = instance.workflow_definition_id
      left join demands demand
-       on demand.tenant_id = instance.tenant_id and demand.id = instance.demand_id
+       on demand.tenant_id = instance.tenant_id
+      and demand.id = instance.demand_id
+      and demand.company_id = instance.company_id
      left join requesters requester
-       on requester.tenant_id = demand.tenant_id and requester.id = demand.requester_id
+       on requester.tenant_id = demand.tenant_id
+      and requester.id = demand.requester_id
+      and requester.company_id = instance.company_id
      where instance.tenant_id = $1 and instance.id = $2${lock ? ' for update of instance' : ''}`,
     [tenantId, instanceId],
   )
@@ -2939,7 +5968,8 @@ async function hydrateApprovalInstanceDetail(
     : await client.query<QueryResultRow>(
         `select id, approval_step_id as "stepId", assignment_id as "assignmentId",
                 decision, reason, decided_by_user_id as "decidedByUserId",
-                acting_for_user_id as "actingForUserId", decided_at as "decidedAt"
+                acting_for_user_id as "actingForUserId", decision_source as "decisionSource",
+                impersonation_id as "impersonationId", decided_at as "decidedAt"
          from approval_decisions where tenant_id = $1 and approval_instance_id = $2
          order by decided_at, id`,
         [principal.tenantId, instance.id],
@@ -3102,7 +6132,7 @@ async function insertApprovalEvent(
     `insert into approval_events (
        tenant_id, approval_instance_id, approval_step_id, event_type, actor_user_id, payload
      ) values ($1, $2, $3, $4, $5, $6::jsonb)`,
-    [principal.tenantId, instanceId, stepId, type, principal.user.id, JSON.stringify(payload)],
+    [principal.tenantId, instanceId, stepId, type, realActorUserId(principal), JSON.stringify(payload)],
   )
 }
 
@@ -3154,12 +6184,16 @@ function requesterApprovalOwnershipSql(instanceAlias: 'instance' | 'requester_in
         and requester_owned_identity.id = requester_owned_demand.requester_id
       where requester_owned_demand.tenant_id = ${instanceAlias}.tenant_id
         and requester_owned_demand.id = ${instanceAlias}.demand_id
+        and requester_owned_demand.company_id = ${instanceAlias}.company_id
+        and requester_owned_demand.deleted_at is null
+        and requester_owned_identity.company_id = ${instanceAlias}.company_id
         and requester_owned_identity.user_id = ${userParameter}::uuid
         and requester_owned_identity.status = 'active'
         and requester_owned_identity.deleted_at is null
     )
     or (
       ${instanceAlias}.subject_snapshot ->> 'requesterUserId' = (${userParameter}::uuid)::text
+      and ${instanceAlias}.subject_snapshot ->> 'companyId' = ${instanceAlias}.company_id
       and not exists (
         select 1
         from demands requester_authoritative_demand
@@ -3527,7 +6561,7 @@ async function auditApprovalChange(
     action,
     result: 'success',
     tenantId: principal.tenantId,
-    actorUserId: principal.user.id,
+    actorUserId: realActorUserId(principal),
     entityType: 'approval',
     entityId,
     metadata,

@@ -59,6 +59,27 @@ describe('employee air profile form', () => {
     expect(employeePage).toContain('max={todayISODate()}')
   })
 
+  it('separates view, create and manage company scopes in the employee UI', () => {
+    expect(employeePage).toContain('const [user, setUser] = useState<ReturnType<typeof getCurrentUser>>(null)')
+    expect(employeePage).toContain('setUser(getCurrentUser())')
+    expect(employeePage).toContain('if (!user) return')
+    expect(employeePage).toContain('const empresasDoEscopo = getEmpresasPermitidas(')
+    expect(employeePage).toContain("includesCompany(empresa.id, 'cadastrar_funcionarios')")
+    expect(employeePage).toContain("|| includesCompany(empresa.id, 'gerenciar_funcionarios')")
+    expect(employeePage).toContain('const empresasPermitidasParaGerenciamento = empresasDoEscopo')
+    expect(employeePage).toContain('empresas={editing ? empresasPermitidasParaGerenciamento : empresasPermitidasParaCadastro}')
+  })
+
+  it('keeps validation and row actions accessible', () => {
+    expect(employeePage).toContain('ref={formRef}')
+    expect(employeePage).toContain('noValidate aria-busy={saving}')
+    expect(employeePage).toContain("querySelector<HTMLElement>('[aria-invalid=\"true\"]')")
+    expect(employeePage).toContain('<caption className="sr-only">')
+    expect(employeePage).toContain('<th scope="col"')
+    expect(employeePage).toContain('aria-label={`Editar ${f.nome}`}')
+    expect(employeePage).toContain("value={form.cpf ? maskCPF(onlyDigits(form.cpf).slice(0, 11)) : ''}")
+  })
+
   it('reports every missing mandatory air identity field', () => {
     const result = validateEmployeeAirProfileForm({
       nome: '',

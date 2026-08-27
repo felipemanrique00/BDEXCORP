@@ -39,6 +39,14 @@ as evidencias locais de aplicacao, PostgreSQL e navegador.
 - Wintour possui parser e importacao relacional de demandas, mas a criacao
   compativel de empresas/funcionarios/hoteis e o lote de demandas ainda nao
   formam uma unica transacao PostgreSQL ponta a ponta.
+- A sincronizacao BDEX → Wintour permanece desabilitada ate a Digirotas liberar
+  o PIN, homologar os de-para de produto/FOP e, se contratada, a consulta
+  detalhada DGR-034. Receber um protocolo SOAP nao confirma importacao; a
+  alteracao ainda exige processamento humano na mesa do Wintour.
+- A exportacao automatica inicial cobre somente Aereo `manual-offline`, em BRL
+  e uma venda por bilhete com dados relacionais completos. Hotel, Locacao,
+  Rodoviario, moeda estrangeira e rateios financeiros ambiguos permanecem
+  bloqueados deliberadamente, sem payload aproximado.
 - Nao existem adapters homologados para GDS, NDC, locadoras, contabilidade ou
   ERP. Cadastro no catalogo nao equivale a integracao real.
 - IA, WhatsApp e SMTP dependem de credenciais externas e aceite de privacidade.

@@ -27,6 +27,8 @@ import { formatMinorUnits, moneyToMinorUnits, sumMoneyInputs } from '@/lib/offli
 import { isOfflineDemandEligibleForOperation } from '@/lib/offline-travel/operation-eligibility'
 import { hotelGuestNames } from '@/lib/offline-travel/hotel-guests'
 import { listOfflineAirQuotesFromServer } from '@/lib/offline-travel/services/air/client'
+import { listOfflineGroundQuotesFromServer } from '@/lib/offline-ground/quote-client'
+import type { OfflineGroundQuoteOptionReadModel } from '@/lib/offline-ground/quote-schema'
 import { listOfflineHotelQuotesFromServer } from '@/lib/offline-travel/quote-client'
 import type { OfflineHotelQuoteOptionReadModel } from '@/lib/offline-travel/quote-schema'
 import {
@@ -67,6 +69,9 @@ interface OfflineTravelOperationFormProps {
   companies: Empresa[]
   reservations: GovernedTravelReservationSummary[]
   initialDemandId?: string
+  initialOperation?: OfflineOperation
+  /** Prevents operational diagnostics from leaking into the customer-facing portal. */
+  corporateMode?: boolean
   onCompleted: () => void
   onContextChange?: (context: OfflineTravelContext) => void
 }
@@ -100,6 +105,12 @@ interface SelectedAirQuoteContext {
   snapshot: OfflineAirApprovedSnapshot
   approvalInstanceId: string | null
   approvalStatus: string | null
+}
+
+interface SelectedGroundQuoteContext {
+  quoteId: string
+  lifecycleStatus: string
+  option: OfflineGroundQuoteOptionReadModel
 }
 
 type DetailKey = keyof DetailState
@@ -270,10 +281,12 @@ export function OfflineTravelOperationForm({
   companies,
   reservations,
   initialDemandId,
+  initialOperation = 'reservation',
+  corporateMode = false,
   onCompleted,
   onContextChange,
 }: OfflineTravelOperationFormProps) {
-  const [operation, setOperation] = useState<OfflineOperation>('reservation')
+  const [operation, setOperation] = useState<OfflineOperation>(initialOperation)
   const [demandId, setDemandId] = useState('')
   const [reservationId, setReservationId] = useState('')
   const [serviceKey, setServiceKey] = useState<OfflineTravelService>('hotelaria')
@@ -303,6 +316,9 @@ export function OfflineTravelOperationForm({
   const [selectedAirQuote, setSelectedAirQuote] = useState<SelectedAirQuoteContext | null>(null)
   const [loadingSelectedAirQuote, setLoadingSelectedAirQuote] = useState(false)
   const [selectedAirQuoteError, setSelectedAirQuoteError] = useState('')
+  const [selectedGroundQuote, setSelectedGroundQuote] = useState<SelectedGroundQuoteContext | null>(null)
+  const [loadingSelectedGroundQuote, setLoadingSelectedGroundQuote] = useState(false)
+  const [selectedGroundQuoteError, setSelectedGroundQuoteError] = useState('')
   const [airOperation, setAirOperation] = useState<OfflineAirOperationDraft>({ ...EMPTY_AIR_OPERATION })
 
   const [issuedAt, setIssuedAt] = useState('')
@@ -317,10 +333,12 @@ export function OfflineTravelOperationForm({
   const appliedInitialDemandRef = useRef('')
   const selectedHotelQuoteRequestRef = useRef(0)
   const selectedAirQuoteRequestRef = useRef(0)
-  const operationRef = useRef<OfflineOperation>('reservation')
+  const selectedGroundQuoteRequestRef = useRef(0)
+  const operationRef = useRef<OfflineOperation>(initialOperation)
   const currentUser = typeof window !== 'undefined' ? getCurrentUser() : null
   const showTechnicalMetadata = Boolean(
-    currentUser
+    !corporateMode
+    && currentUser
     && (
       currentUser.platform_admin
       || (userAccessKind(currentUser) === 'internal' && hasPermission(currentUser, 'ver_auditoria'))
@@ -375,12 +393,15 @@ export function OfflineTravelOperationForm({
   const showsReservationData = createsReservation || correctsReservation
   const locksSelectedHotelQuote = createsReservation && Boolean(selectedHotelQuote)
   const locksSelectedAirQuote = createsReservation && Boolean(selectedAirQuote)
-  const locksSelectedCommercialQuote = locksSelectedHotelQuote || locksSelectedAirQuote
+  const locksSelectedGroundQuote = createsReservation && Boolean(selectedGroundQuote)
+  const locksSelectedCommercialQuote = locksSelectedHotelQuote || locksSelectedAirQuote || locksSelectedGroundQuote
   const locksSelectedHotelGuests = locksSelectedHotelQuote && serviceKey === 'hotelaria'
+  const locksSelectedPassengers = locksSelectedHotelGuests
+    || (locksSelectedGroundQuote && serviceKey === 'rodoviario')
   const requiresSelectedCommercialQuote = Boolean(
     createsReservation
     && selectedDemand
-    && ['hotelaria', 'aereo'].includes(serviceKey)
+    && ['hotelaria', 'aereo', 'locacao', 'rodoviario'].includes(serviceKey)
     && lifecycleRequiresSelectedHotelQuote(
       String(selectedDemand.relational_lifecycle_status || selectedDemand.status || '').trim().toLowerCase(),
     ),
@@ -663,6 +684,107 @@ export function OfflineTravelOperationForm({
     }
   }
 
+  function applySelectedGroundQuote(
+    context: SelectedGroundQuoteContext,
+    demand: Atendimento,
+  ) {
+    const option = context.option
+    const demandDetails = detailsFromDemand(demand)
+    setServiceKey(option.service)
+    setSupplierName(option.supplierName)
+    setSupplierCode(option.supplierCode || '')
+    setStartsAt(toLocalDateTimeInput(option.startsAt))
+    setEndsAt(toLocalDateTimeInput(option.endsAt))
+    setCurrency(option.currency || 'BRL')
+
+    if (option.service === 'locacao') {
+      const taxesMinor = option.details.taxAmountMinor
+      setGrossAmount(moneyInput((option.totalAmountMinor - taxesMinor) / 100))
+      setTaxAmount(moneyInput(taxesMinor / 100))
+      setDetails({
+        ...demandDetails,
+        itemName: option.details.categoryName,
+        category: option.details.vehicleExample || option.details.categoryName,
+        pickupLocation: option.details.pickupLocationName,
+        returnLocation: option.details.returnLocationName,
+      })
+    } else {
+      const firstSegment = option.details.segments[0]
+      const lastSegment = option.details.segments.at(-1)
+      setGrossAmount(moneyInput(option.details.fareAmountMinor / 100))
+      setTaxAmount(moneyInput((option.details.taxAmountMinor + option.details.feeAmountMinor) / 100))
+      setDetails({
+        ...demandDetails,
+        origin: firstSegment?.originCityName || '',
+        destination: lastSegment?.destinationCityName || '',
+        itemName: option.supplierName,
+        serviceNumber: option.details.serviceNumber || '',
+        className: option.details.className,
+        category: `${option.details.baggagePieces} bagagem(ns)`,
+      })
+      setPassengersText((demand.detalhes_rodoviario?.travelers || [])
+        .map((traveler) => traveler.name)
+        .filter(Boolean)
+        .join('\n'))
+    }
+    setReservationEvidence({
+      source: OFFLINE_TRAVEL_PROVIDER,
+      quoteId: context.quoteId,
+      quoteOptionId: option.id,
+      selectionId: option.selectionId,
+      selectionStatus: option.selectionStatus,
+      approvalInstanceId: option.approvalInstanceId,
+      approvalStatus: option.approvalStatus,
+      approvedGroundQuote: option,
+    })
+  }
+
+  async function loadSelectedGroundQuote(demand: Atendimento) {
+    const requestId = selectedGroundQuoteRequestRef.current + 1
+    selectedGroundQuoteRequestRef.current = requestId
+    setSelectedGroundQuote(null)
+    setSelectedGroundQuoteError('')
+    const groundService = serviceFromDemand(demand)
+    if (groundService !== 'locacao' && groundService !== 'rodoviario') {
+      setLoadingSelectedGroundQuote(false)
+      return
+    }
+
+    setLoadingSelectedGroundQuote(true)
+    try {
+      const result = await listOfflineGroundQuotesFromServer(demand.id, groundService)
+      if (selectedGroundQuoteRequestRef.current !== requestId) return
+      const quote = result.quotes.find((item) => (
+        Boolean(item.selectedOptionId) || item.options.some((option) => option.selected)
+      ))
+      const option = quote?.options.find((item) => item.id === quote.selectedOptionId || item.selected)
+      if (!quote || !option) {
+        if (lifecycleRequiresSelectedHotelQuote(result.lifecycleStatus)) {
+          setSelectedGroundQuoteError(
+            'A demanda avancou para reserva, mas nenhuma opcao terrestre formalmente escolhida foi localizada.',
+          )
+        }
+        return
+      }
+      const context: SelectedGroundQuoteContext = {
+        quoteId: quote.id,
+        lifecycleStatus: result.lifecycleStatus || quote.lifecycleStatus,
+        option,
+      }
+      setSelectedGroundQuote(context)
+      if (operationRef.current === 'reservation' || operationRef.current === 'reservation_and_issue') {
+        applySelectedGroundQuote(context, demand)
+      }
+    } catch (error) {
+      if (selectedGroundQuoteRequestRef.current !== requestId) return
+      setSelectedGroundQuoteError(error instanceof Error
+        ? error.message
+        : 'Nao foi possivel carregar a opcao terrestre escolhida para esta demanda.')
+    } finally {
+      if (selectedGroundQuoteRequestRef.current === requestId) setLoadingSelectedGroundQuote(false)
+    }
+  }
+
   function changeOperation(nextOperation: OfflineOperation) {
     operationRef.current = nextOperation
     setOperation(nextOperation)
@@ -674,6 +796,7 @@ export function OfflineTravelOperationForm({
       setRevisionCount(0)
       if (selectedHotelQuote && selectedDemand) applySelectedHotelQuote(selectedHotelQuote, selectedDemand)
       if (selectedAirQuote && selectedDemand) applySelectedAirQuote(selectedAirQuote, selectedDemand)
+      if (selectedGroundQuote && selectedDemand) applySelectedGroundQuote(selectedGroundQuote, selectedDemand)
       return
     }
     const matches = selectedDemand
@@ -691,6 +814,7 @@ export function OfflineTravelOperationForm({
     const demand = availableDemands.find((item) => item.id === nextDemandId) || null
     selectedHotelQuoteRequestRef.current += 1
     selectedAirQuoteRequestRef.current += 1
+    selectedGroundQuoteRequestRef.current += 1
     setDemandId(nextDemandId)
     setReservationId('')
     setReservationVersion(null)
@@ -702,6 +826,9 @@ export function OfflineTravelOperationForm({
     setSelectedAirQuote(null)
     setSelectedAirQuoteError('')
     setLoadingSelectedAirQuote(false)
+    setSelectedGroundQuote(null)
+    setSelectedGroundQuoteError('')
+    setLoadingSelectedGroundQuote(false)
     setAirOperation({ ...EMPTY_AIR_OPERATION })
     if (!demand) return
 
@@ -727,6 +854,7 @@ export function OfflineTravelOperationForm({
 
     void loadSelectedHotelQuote(demand)
     void loadSelectedAirQuote(demand)
+    void loadSelectedGroundQuote(demand)
 
     if (usesExistingReservation) {
       const matches = reservations.filter((reservation) => (
@@ -851,7 +979,7 @@ export function OfflineTravelOperationForm({
       toast.error('A empresa da demanda não está disponível no contexto atual.')
       return
     }
-    if (requiresSelectedCommercialQuote && !selectedHotelQuote && !selectedAirQuote) {
+    if (requiresSelectedCommercialQuote && !selectedHotelQuote && !selectedAirQuote && !selectedGroundQuote) {
       toast.error('Carregue a opção escolhida e aprovada antes de registrar a reserva.')
       return
     }
@@ -871,6 +999,14 @@ export function OfflineTravelOperationForm({
       toast.error('A escolha aérea ainda não possui uma aprovação concluída para seguir à reserva.')
       return
     }
+    if (
+      createsReservation
+      && selectedGroundQuote?.option.approvalInstanceId
+      && selectedGroundQuote.option.approvalStatus !== 'approved'
+    ) {
+      toast.error('A escolha terrestre ainda não possui uma aprovação concluída para seguir à reserva.')
+      return
+    }
     if (usesExistingReservation && !selectedReservation) {
       toast.error(correctsReservation
         ? 'Selecione uma reserva offline confirmada para corrigir.'
@@ -884,8 +1020,10 @@ export function OfflineTravelOperationForm({
 
     const submissionId = crypto.randomUUID()
     const lifecycleVersion = positiveInteger(selectedDemand.relational_lifecycle_version)
-    const effectivePassengersText = locksSelectedHotelGuests
-      ? hotelGuestNames(selectedDemand).join('\n')
+    const effectivePassengersText = locksSelectedPassengers
+      ? serviceKey === 'hotelaria'
+        ? hotelGuestNames(selectedDemand).join('\n')
+        : (selectedDemand.detalhes_rodoviario?.travelers || []).map((traveler) => traveler.name).join('\n')
       : passengersText
     const cleanDetails = reservationDetails(details, effectivePassengersText, reservationEvidence)
     if (serviceKey === 'aereo' && selectedAirQuote) {
@@ -992,7 +1130,7 @@ export function OfflineTravelOperationForm({
           },
           notes,
           policyJustification,
-          generateVoucher,
+          generateVoucher: corporateMode ? true : generateVoucher,
           confirmed: true,
           idempotencyKey: `offline:${submissionId}:issue`,
         })
@@ -1038,7 +1176,11 @@ export function OfflineTravelOperationForm({
         throw new Error('Os dados da emissão offline não foram preparados.')
       }
       const targetReservationId = createdReservationId || selectedReservation?.id || ''
-      const issue = await issueOfflineReservationFromServer(targetReservationId, issueCandidate.data)
+      const issue = await issueOfflineReservationFromServer(
+        targetReservationId,
+        issueCandidate.data,
+        { corporateMode },
+      )
       const voucherMessage = issue.voucherId ? ` Voucher ${issue.voucherId} gerado.` : ''
       toast.success(`Emissão offline registrada para a OS ${selectedDemand.serial_os}.${voucherMessage}`)
       setConfirmed(false)
@@ -1083,7 +1225,7 @@ export function OfflineTravelOperationForm({
       </div>
 
       <form onSubmit={submit} className="mt-5 space-y-5">
-        <fieldset disabled={busy || loadingReservation || loadingSelectedHotelQuote || loadingSelectedAirQuote} className="space-y-5 disabled:opacity-70">
+        <fieldset disabled={busy || loadingReservation || loadingSelectedHotelQuote || loadingSelectedAirQuote || loadingSelectedGroundQuote} className="space-y-5 disabled:opacity-70">
           <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
               Operação
@@ -1196,6 +1338,24 @@ export function OfflineTravelOperationForm({
             </div>
           )}
 
+          {selectedDemand && ['locacao', 'rodoviario'].includes(serviceKey) && loadingSelectedGroundQuote && (
+            <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50/50 p-4 text-sm text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/20 dark:text-indigo-200">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              Carregando a opção terrestre escolhida pelo solicitante...
+            </div>
+          )}
+
+          {selectedDemand && ['locacao', 'rodoviario'].includes(serviceKey) && selectedGroundQuote && (
+            <SelectedGroundQuoteSummary context={selectedGroundQuote} />
+          )}
+
+          {selectedDemand && ['locacao', 'rodoviario'].includes(serviceKey) && selectedGroundQuoteError && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-200">
+              <p className="font-semibold">A opção terrestre escolhida não pôde ser carregada.</p>
+              <p className="mt-1">{selectedGroundQuoteError}</p>
+            </div>
+          )}
+
           {usesExistingReservation && (
             <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/20">
               <Field label={correctsReservation ? 'Reserva a corrigir *' : 'Reserva offline confirmada *'}>
@@ -1249,14 +1409,14 @@ export function OfflineTravelOperationForm({
                 <textarea
                   value={passengersText}
                   onChange={(event) => setPassengersText(event.target.value)}
-                  className={`bbt-input min-h-20 py-2 ${locksSelectedHotelGuests ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}`}
+                  className={`bbt-input min-h-20 py-2 ${locksSelectedPassengers ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}`}
                   placeholder="Um nome por linha"
-                  readOnly={locksSelectedHotelGuests}
-                  aria-readonly={locksSelectedHotelGuests}
+                  readOnly={locksSelectedPassengers}
+                  aria-readonly={locksSelectedPassengers}
                 />
-                {locksSelectedHotelGuests && (
+                {locksSelectedPassengers && (
                   <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                    Hóspedes definidos na demanda aprovada. Para alterar, use a correção da reserva com motivo e auditoria.
+                    Viajantes definidos na demanda aprovada. Para alterar, use a correção da reserva com motivo e auditoria.
                   </p>
                 )}
               </div>
@@ -1292,10 +1452,10 @@ export function OfflineTravelOperationForm({
                     value={startsAt}
                     onChange={(event) => setStartsAt(event.target.value)}
                     onInput={(event) => setStartsAt(event.currentTarget.value)}
-                    className={locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}
+                    className={locksSelectedCommercialQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}
                     required={startRequired}
-                    readOnly={locksSelectedHotelQuote}
-                    aria-readonly={locksSelectedHotelQuote}
+                    readOnly={locksSelectedCommercialQuote}
+                    aria-readonly={locksSelectedCommercialQuote}
                   />
                 </TemporalField>
                 <TemporalField label={`Fim${endRequired ? ' *' : ''}`}>
@@ -1304,10 +1464,10 @@ export function OfflineTravelOperationForm({
                     value={endsAt}
                     onChange={(event) => setEndsAt(event.target.value)}
                     onInput={(event) => setEndsAt(event.currentTarget.value)}
-                    className={locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}
+                    className={locksSelectedCommercialQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}
                     required={endRequired}
-                    readOnly={locksSelectedHotelQuote}
-                    aria-readonly={locksSelectedHotelQuote}
+                    readOnly={locksSelectedCommercialQuote}
+                    aria-readonly={locksSelectedCommercialQuote}
                   />
                 </TemporalField>
               </div>
@@ -1328,16 +1488,16 @@ export function OfflineTravelOperationForm({
               )}
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 <Field label="Tarifa *">
-                  <DecimalInput value={grossAmount} onValueChange={setGrossAmount} prefix={currency || 'BRL'} className={locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''} placeholder="0,00" required readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
+                  <DecimalInput value={grossAmount} onValueChange={setGrossAmount} prefix={currency || 'BRL'} className={locksSelectedCommercialQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''} placeholder="0,00" required readOnly={locksSelectedCommercialQuote} aria-readonly={locksSelectedCommercialQuote} />
                 </Field>
                 <Field label="Taxas">
-                  <DecimalInput value={taxAmount} onValueChange={setTaxAmount} prefix={currency || 'BRL'} className={locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''} placeholder="0,00" readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
+                  <DecimalInput value={taxAmount} onValueChange={setTaxAmount} prefix={currency || 'BRL'} className={locksSelectedCommercialQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''} placeholder="0,00" readOnly={locksSelectedCommercialQuote} aria-readonly={locksSelectedCommercialQuote} />
                 </Field>
                 <Field label="Total *">
                   <input type="text" value={formatDecimalInput(totalAmount)} className="bbt-input bg-slate-50 font-semibold tabular-nums dark:bg-slate-900/40" placeholder="Calculado automaticamente" readOnly aria-readonly="true" />
                 </Field>
                 <Field label="Moeda *">
-                  <input value={currency} onChange={(event) => setCurrency(event.target.value.toUpperCase().slice(0, 3))} className={`bbt-input uppercase ${locksSelectedHotelQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}`} maxLength={3} required readOnly={locksSelectedHotelQuote} aria-readonly={locksSelectedHotelQuote} />
+                  <input value={currency} onChange={(event) => setCurrency(event.target.value.toUpperCase().slice(0, 3))} className={`bbt-input uppercase ${locksSelectedCommercialQuote ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40' : ''}`} maxLength={3} required readOnly={locksSelectedCommercialQuote} aria-readonly={locksSelectedCommercialQuote} />
                 </Field>
               </div>
             </section>
@@ -1377,7 +1537,8 @@ export function OfflineTravelOperationForm({
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               {DETAIL_FIELDS[serviceKey].map((field) => {
-                const quoteFieldLocked = locksSelectedHotelQuote && isSelectedHotelQuoteField(field.key)
+                const quoteFieldLocked = locksSelectedGroundQuote
+                  || (locksSelectedHotelQuote && isSelectedHotelQuoteField(field.key))
                 const lockedClasses = quoteFieldLocked
                   ? 'cursor-not-allowed bg-slate-50 dark:bg-slate-900/40'
                   : ''
@@ -1451,9 +1612,17 @@ export function OfflineTravelOperationForm({
                 </Field>
               </div>
               <div className="flex flex-wrap gap-5 text-sm text-slate-700 dark:text-slate-200">
-                <label className="inline-flex items-center gap-2">
-                  <input type="checkbox" checked={generateVoucher} onChange={(event) => setGenerateVoucher(event.target.checked)} className="h-4 w-4 accent-bbt-accent" />
-                  Gerar voucher automaticamente
+                <label className={`inline-flex items-center gap-2 ${corporateMode ? 'font-semibold text-emerald-700 dark:text-emerald-300' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={corporateMode || generateVoucher}
+                    disabled={corporateMode}
+                    onChange={(event) => setGenerateVoucher(event.target.checked)}
+                    className="h-4 w-4 accent-bbt-accent disabled:cursor-not-allowed"
+                  />
+                  {corporateMode
+                    ? 'Voucher obrigatório no Portal Empresa'
+                    : 'Gerar voucher automaticamente'}
                 </label>
               </div>
             </section>
@@ -1471,9 +1640,17 @@ export function OfflineTravelOperationForm({
                     <p className="mt-0.5 text-xs text-slate-500">O localizador e os bilhetes informados acima serão usados automaticamente.</p>
                   </div>
                 </div>
-                <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-                  <input type="checkbox" checked={generateVoucher} onChange={(event) => setGenerateVoucher(event.target.checked)} className="h-4 w-4 accent-bbt-accent" />
-                  Gerar voucher completo
+                <label className={`inline-flex items-center gap-2 text-sm ${corporateMode ? 'font-semibold text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-200'}`}>
+                  <input
+                    type="checkbox"
+                    checked={corporateMode || generateVoucher}
+                    disabled={corporateMode}
+                    onChange={(event) => setGenerateVoucher(event.target.checked)}
+                    className="h-4 w-4 accent-bbt-accent disabled:cursor-not-allowed"
+                  />
+                  {corporateMode
+                    ? 'Voucher obrigatório no Portal Empresa'
+                    : 'Gerar voucher completo'}
                 </label>
               </div>
             </section>
@@ -1525,7 +1702,7 @@ export function OfflineTravelOperationForm({
           <p className="text-xs text-slate-500">
             O servidor validará novamente permissões, lifecycle, política e idempotência.
           </p>
-          <button type="submit" disabled={busy || loadingReservation || loadingSelectedHotelQuote || loadingSelectedAirQuote || !confirmed} className="bbt-button-primary disabled:cursor-not-allowed disabled:opacity-60">
+          <button type="submit" disabled={busy || loadingReservation || loadingSelectedHotelQuote || loadingSelectedAirQuote || loadingSelectedGroundQuote || !confirmed} className="bbt-button-primary disabled:cursor-not-allowed disabled:opacity-60">
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
             {busy ? 'Processando...' : submitLabel(operation)}
           </button>
@@ -1536,6 +1713,40 @@ export function OfflineTravelOperationForm({
 }
 
 export default OfflineTravelOperationForm
+
+function SelectedGroundQuoteSummary({ context }: { context: SelectedGroundQuoteContext }) {
+  const option = context.option
+  const label = option.service === 'locacao' ? 'Locação escolhida' : 'Passagem rodoviária escolhida'
+  const detail = option.service === 'locacao'
+    ? `${option.details.pickupLocationName} → ${option.details.returnLocationName} · ${option.details.categoryName}`
+    : option.details.segments
+      .map((segment) => `${segment.originCityName} → ${segment.destinationCityName}`)
+      .join(' · ')
+  return (
+    <section
+      className="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50/60 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/20"
+      aria-labelledby="selected-ground-quote-title"
+      data-selected-ground-quote={option.id}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">Opção formal do pedido</p>
+          <h3 id="selected-ground-quote-title" className="mt-1 font-semibold text-bbt-primary dark:text-white">{label}</h3>
+          <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Datas, itinerário e valores ficam bloqueados conforme a escolha aprovada.</p>
+        </div>
+        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-emerald-800 shadow-sm dark:bg-slate-900 dark:text-emerald-200">
+          {quoteSelectionStatusLabel(option.selectionStatus, context.lifecycleStatus, option.approvalStatus)}
+        </span>
+      </div>
+      <dl className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+        <QuoteSummaryField label="Fornecedor" value={option.supplierName} />
+        <QuoteSummaryField label="Serviço" value={detail || 'Não informado'} />
+        <QuoteSummaryField label="Período" value={formatQuotePeriod(option.startsAt || '', option.endsAt || '')} />
+        <QuoteSummaryField label="Total aprovado" value={formatQuoteMoney(option.totalAmountMinor / 100, option.currency)} highlight />
+      </dl>
+    </section>
+  )
+}
 
 function SelectedHotelQuoteSummary({
   context,

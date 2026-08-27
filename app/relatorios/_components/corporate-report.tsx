@@ -140,6 +140,7 @@ const CATEGORY_COLORS: Record<TipoServico, string> = {
   Aéreo: '#B8662B',
   Hotel: '#828282',
   Carro: '#5F7F3D',
+  Rodoviário: '#C45A1A',
   Pacote: '#4D78B2',
   Outro: '#40599B',
 }
@@ -148,6 +149,7 @@ const CATEGORY_LABELS: Record<TipoServico, string> = {
   Aéreo: 'Aéreo',
   Hotel: 'Hospedagem',
   Carro: 'Transporte',
+  Rodoviário: 'Rodoviário',
   Pacote: 'Pacote',
   Outro: 'Outros',
 }

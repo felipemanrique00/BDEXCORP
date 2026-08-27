@@ -85,6 +85,15 @@ const TRANSITIONS: Record<TravelLifecycleCommand, TransitionDefinition> = {
       'Confirme o retorno da demanda para uma nova escolha.',
     ),
   },
+  return_for_adjustment: {
+    from: ['pending_merit_approval', 'pending_choice'],
+    to: 'submitted',
+    validate: (requirements) => requireTrue(
+      requirements.humanConfirmed,
+      'HUMAN_CONFIRMATION_REQUIRED',
+      'Confirme o retorno da solicitacao para ajuste.',
+    ),
+  },
   start_reservation: {
     from: ['approved'],
     to: 'reserving',

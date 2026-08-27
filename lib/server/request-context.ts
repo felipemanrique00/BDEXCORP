@@ -2,7 +2,37 @@ import 'server-only'
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import type { AuthorizationScopeGrant, CorporateAccessSummary, User } from '@/types'
+import type { AuthorizationScopeGrant, CorporateAccessSummary, CorporateProfile, User } from '@/types'
+
+export type SupportImpersonationMode = 'test' | 'operate'
+
+export interface RequestPrincipalActor {
+  sessionId?: string
+  membershipId: string
+  roleKey: string
+  platformAdmin: boolean
+  user: User
+}
+
+export interface RequestPrincipalRepresentation {
+  id: string
+  mode: SupportImpersonationMode
+  actor: { id: string; name: string; email: string; roleKey: string }
+  subject: {
+    id: string
+    name: string
+    email: string
+    roleKey: string
+    membershipId: string
+    corporateProfile?: CorporateProfile
+  }
+  reason: string
+  reference: string | null
+  allowedActions: string[]
+  companyIds: string[]
+  startedAt: string
+  expiresAt: string
+}
 
 export interface RequestPrincipal {
   sessionId: string
@@ -24,6 +54,8 @@ export interface RequestPrincipal {
   corporateAccess?: CorporateAccessSummary
   authorizationGrants?: AuthorizationScopeGrant[]
   user: User
+  actor?: RequestPrincipalActor
+  representation?: RequestPrincipalRepresentation
 }
 
 export interface ServerRequestContext {

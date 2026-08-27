@@ -120,12 +120,13 @@ type GeoPoint = {
 
 const MESES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
 
-const CATEGORIAS_CANONICAS: TipoServico[] = ['Aéreo', 'Hotel', 'Carro', 'Pacote', 'Outro']
+const CATEGORIAS_CANONICAS: TipoServico[] = ['Aéreo', 'Hotel', 'Carro', 'Rodoviário', 'Pacote', 'Outro']
 
 const CATEGORY_META: Record<string, { label: string; color: string }> = {
   AEREO: { label: 'Aéreo', color: '#11175f' },
   HOTEL: { label: 'Hospedagem', color: '#858585' },
   CARRO: { label: 'Locação / Transporte', color: '#10beb3' },
+  RODOVIARIO: { label: 'Rodoviário / Ônibus', color: '#df4053' },
   PACOTE: { label: 'Pacote', color: '#5d78b6' },
   OUTRO: { label: 'Outros', color: '#f47b2d' },
 }
@@ -558,6 +559,7 @@ function categoriaKey(tipo: string): string {
   const normalized = normalize(tipo).replace(/\s+/g, '')
   if (normalized.includes('AEREO')) return 'AEREO'
   if (normalized.includes('HOSPED') || normalized.includes('HOTEL')) return 'HOTEL'
+  if (normalized.includes('RODOVIARIO') || normalized.includes('ONIBUS')) return 'RODOVIARIO'
   if (normalized.includes('CARRO') || normalized.includes('LOCACAO') || normalized.includes('TRANSPORTE')) return 'CARRO'
   if (normalized.includes('PACOTE')) return 'PACOTE'
   return 'OUTRO'

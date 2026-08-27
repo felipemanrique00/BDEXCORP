@@ -41,6 +41,9 @@ export interface OfflineAirQuoteChoiceWorkspaceProps {
   demands: Atendimento[]
   companies: Empresa[]
   requesterId?: string | null
+  focusDemandId?: string | null
+  /** Internal screens may discover eligible demands; embedded corporate views must provide projected demands. */
+  discoverServerDemands?: boolean
   onCompleted: () => void
 }
 
@@ -54,6 +57,8 @@ export function OfflineAirQuoteChoiceWorkspace({
   demands,
   companies,
   requesterId,
+  focusDemandId,
+  discoverServerDemands = true,
   onCompleted,
 }: OfflineAirQuoteChoiceWorkspaceProps) {
   const [rounds, setRounds] = useState<AirDemandQuoteRound[]>([])
@@ -77,12 +82,13 @@ export function OfflineAirQuoteChoiceWorkspace({
     for (const demand of [...demands, ...serverDemands]) {
       if (!isAirDemand(demand) || isClosedDemand(demand)) continue
       if (completedDemandIds.has(demand.id)) continue
+      if (focusDemandId && demand.id !== focusDemandId) continue
       if (exactRequesterId && String(demand.solicitante_id || '') !== exactRequesterId) continue
       byId.set(demand.id, demand)
     }
 
     return [...byId.values()].sort((left, right) => demandUpdatedAt(right).localeCompare(demandUpdatedAt(left)))
-  }, [completedDemandIds, demands, requesterId, serverDemands])
+  }, [completedDemandIds, demands, focusDemandId, requesterId, serverDemands])
   const candidateKey = useMemo(
     () => requesterDemandCandidates.map((demand) => demand.id).sort().join('|'),
     [requesterDemandCandidates],
@@ -91,6 +97,12 @@ export function OfflineAirQuoteChoiceWorkspace({
   useEffect(() => {
     let active = true
     setDemandLoadError('')
+    if (!discoverServerDemands) {
+      setServerDemands([])
+      return () => {
+        active = false
+      }
+    }
     void listDemandsFromServer({ lifecycleStatus: 'pending_choice', serviceType: 'air', limit: 200 })
       .then((result) => {
         if (active) setServerDemands(result.items.map((item) => item.demand))
@@ -103,7 +115,7 @@ export function OfflineAirQuoteChoiceWorkspace({
     return () => {
       active = false
     }
-  }, [reloadToken])
+  }, [discoverServerDemands, reloadToken])
 
   useEffect(() => {
     let active = true

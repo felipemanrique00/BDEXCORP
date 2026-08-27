@@ -28,6 +28,8 @@ type PermissionName = keyof Permissoes
 interface ApiGuardOptions {
   requireAuth?: boolean
   permission?: PermissionName
+  permissionsAny?: readonly PermissionName[]
+  permissionsAll?: readonly PermissionName[]
   authorization?: AuthorizationRequest
   roles?: UserRole[]
   roleKeys?: string[]
@@ -36,6 +38,8 @@ interface ApiGuardOptions {
   entitlement?: string
   rateLimit?: RateLimitPolicy
   csrf?: boolean
+  allowDuringRepresentation?: boolean
+  representationAction?: string
 }
 
 export interface ApiGuardResult {
@@ -73,7 +77,7 @@ export async function guardApiRequest(request: Request, options: ApiGuardOptions
 
   if (options.rateLimit) {
     try {
-      const identity = principal?.user.id || getClientIp(request) || 'unknown'
+      const identity = principal?.actor?.user.id || principal?.user.id || getClientIp(request) || 'unknown'
       const limit = await consumeRateLimit(identity, options.rateLimit)
       if (!limit.allowed) {
         return {
@@ -107,6 +111,34 @@ export async function guardApiRequest(request: Request, options: ApiGuardOptions
     return guardedError(requestId, 403, 'INVALID_ORIGIN', 'Origem da requisicao nao autorizada.', user, principal)
   }
 
+  if (principal?.representation && isStateChanging(request.method)) {
+    const route = new URL(request.url).pathname.toLowerCase()
+    const administrativeExit = route.startsWith('/api/auth/logout')
+      || route.startsWith('/api/auth/impersonation/stop')
+    const actionAllowed = !options.allowDuringRepresentation
+      && principal.representation.mode === 'operate'
+      && Boolean(options.representationAction)
+      && principal.representation.allowedActions.includes(options.representationAction!)
+    if (!administrativeExit && !actionAllowed) {
+      const readOnly = principal.representation.mode === 'test'
+      await auditDenied(request, principal, requestId, readOnly ? 'representation_read_only' : 'representation_action_denied')
+      return guardedError(
+        requestId,
+        403,
+        readOnly ? 'IMPERSONATION_READ_ONLY' : 'IMPERSONATION_MUTATION_DENIED',
+        readOnly
+          ? 'O modo de teste nao permite alteracoes.'
+          : 'Esta operacao nao foi autorizada durante a personificacao.',
+        user,
+        principal,
+      )
+    }
+    if (principal.representation.mode === 'test' && !administrativeExit) {
+      await auditDenied(request, principal, requestId, 'representation_read_only')
+      return guardedError(requestId, 403, 'IMPERSONATION_READ_ONLY', 'O modo de teste nao permite alteracoes.', user, principal)
+    }
+  }
+
   if (options.platformAdmin && !principal?.platformAdmin) {
     await auditDenied(request, principal, requestId, 'platform_admin_required')
     return guardedError(requestId, 403, 'PLATFORM_ADMIN_REQUIRED', 'Acesso restrito a administracao da plataforma.', user, principal)
@@ -120,6 +152,19 @@ export async function guardApiRequest(request: Request, options: ApiGuardOptions
   if (options.permission && !hasServerPermission(user, options.permission)) {
     await auditDenied(request, principal, requestId, `permission:${options.permission}`)
     return guardedError(requestId, 403, 'PERMISSION_DENIED', 'Permissao insuficiente.', user, principal)
+  }
+
+  if (options.permissionsAny?.length && !hasAnyServerPermission(user, options.permissionsAny)) {
+    await auditDenied(request, principal, requestId, `permission_any:${options.permissionsAny.join(',')}`)
+    return guardedError(requestId, 403, 'PERMISSION_DENIED', 'Permissao insuficiente.', user, principal)
+  }
+
+  if (options.permissionsAll?.length) {
+    const missingPermission = options.permissionsAll.find((permission) => !hasServerPermission(user, permission))
+    if (missingPermission) {
+      await auditDenied(request, principal, requestId, `permission_all:${options.permissionsAll.join(',')}`)
+      return guardedError(requestId, 403, 'PERMISSION_DENIED', 'Permissao insuficiente.', user, principal)
+    }
   }
 
   if (options.roles && (!user || !options.roles.includes(user.role))) {
@@ -141,7 +186,11 @@ export async function guardApiRequest(request: Request, options: ApiGuardOptions
     try {
       authorizeOrThrow(
         principal,
-        options.authorization || await authorizationForApiRequest(request, options.permission),
+        options.authorization || await authorizationForApiRequest(
+          request,
+          options.permission,
+          options.permissionsAny,
+        ),
       )
     } catch (error) {
       if (error instanceof AuthorizationDeniedError) {
@@ -168,6 +217,13 @@ export function hasServerPermission(user: User | null, permission: PermissionNam
   if (user.permissoes && typeof user.permissoes[permission] === 'boolean') return user.permissoes[permission]
   if (user.perfil_bbt) return Boolean(PERMISSOES_PADRAO_POR_PERFIL[user.perfil_bbt]?.[permission])
   return false
+}
+
+export function hasAnyServerPermission(
+  user: User | null,
+  permissions: readonly PermissionName[],
+): boolean {
+  return permissions.some((permission) => hasServerPermission(user, permission))
 }
 
 function guardedError(
@@ -200,7 +256,7 @@ async function auditDenied(
       action: 'access.denied',
       result: 'denied',
       tenantId: principal?.tenantId || null,
-      actorUserId: principal?.user.id || null,
+      actorUserId: principal?.actor?.user.id || principal?.user.id || null,
       requestId,
       ipAddress: getClientIp(request),
       userAgent: request.headers.get('user-agent'),
@@ -210,7 +266,7 @@ async function auditDenied(
     logError('access_denied_audit_failed', error, {
       requestId,
       tenantId: principal?.tenantId,
-      userId: principal?.user.id,
+      userId: principal?.actor?.user.id || principal?.user.id,
       route: new URL(request.url).pathname,
       errorCode: 'AUDIT_WRITE_FAILED',
     })

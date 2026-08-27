@@ -60,6 +60,7 @@ interface SessionRow extends AuthRow {
   session_id: string
   session_status: string
   expires_at: Date
+  active_impersonation_id: string | null
 }
 
 export type AuthenticationFailure = 'invalid_credentials' | 'account_locked' | 'workspace_required' | 'account_inactive'
@@ -266,7 +267,8 @@ export async function resolveSession(token: string | null | undefined): Promise<
     )
     return null
   }
-  return principal
+  const { resolveActiveImpersonation } = await import('@/lib/server/impersonation-service')
+  return resolveActiveImpersonation(principal, row.active_impersonation_id)
 }
 
 export async function resolveAutomationExecutorPrincipal(
@@ -403,7 +405,7 @@ export function assertStrongPassword(password: string): void {
 
 function principalSelect(includeSession: boolean): string {
   const sessionColumns = includeSession
-    ? ',\n    s.id as session_id,\n    s.status as session_status,\n    s.expires_at,\n    s.authentication_level,\n    s.mfa_verified_at'
+    ? ',\n    s.id as session_id,\n    s.status as session_status,\n    s.expires_at,\n    s.authentication_level,\n    s.mfa_verified_at,\n    s.active_impersonation_id'
     : ''
   return `select
     u.id as user_id,

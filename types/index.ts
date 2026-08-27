@@ -12,6 +12,7 @@ export type CorporateProfile =
   | 'executive_assistant'
   | 'group_finance'
   | 'manager'
+  | 'approver'
   | 'viewer'
   | 'company_admin'
   | 'requester'
@@ -28,6 +29,7 @@ export interface CorporateDelegationAuthority {
 }
 
 export interface Permissoes {
+  gerenciar_personificacoes: boolean
   ver_financeiro: boolean
   editar_financeiro: boolean
   cadastrar_empresas: boolean
@@ -88,6 +90,7 @@ export interface Permissoes {
 }
 
 const CORPORATE_PERMISSIONS_DENIED = {
+  gerenciar_personificacoes: false,
   ver_empresas: false,
   ver_centros_custo: false,
   gerenciar_centros_custo: false,
@@ -160,7 +163,7 @@ export const PERMISSOES_PADRAO_POR_PERFIL: Record<PerfilBBT, Permissoes> = {
     ver_inteligencia: true, usar_busca_global: true,
     ver_orcamentos: true, gerenciar_orcamentos: true,
     executar_automacoes: true, gerenciar_automacoes: true,
-    acessar_portal_viajante: true,
+    acessar_portal_viajante: true, gerenciar_personificacoes: true,
   },
   gestor_financeiro: {
     ...CORPORATE_PERMISSIONS_DENIED,
@@ -288,6 +291,7 @@ function permissions(...enabled: Array<keyof Permissoes>): Permissoes {
 export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes> = {
   owner: {
     ...permissions(...Object.keys(NO_PERMISSIONS) as Array<keyof Permissoes>),
+    gerenciar_personificacoes: false,
     operar_cotacoes: false,
     operar_reservas: false,
     operar_emissoes: false,
@@ -342,6 +346,12 @@ export const CORPORATE_PROFILE_PERMISSIONS: Record<CorporateProfile, Permissoes>
     'ver_politicas', 'simular_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
     'ver_workflows', 'executar_workflows', 'usar_ia', 'ver_arquivos',
     'ver_inteligencia', 'usar_busca_global', 'ver_orcamentos',
+  ),
+  approver: permissions(
+    'ver_empresas', 'ver_centros_custo', 'ver_funcionarios', 'ver_solicitantes',
+    'ver_demandas', 'ver_reservas', 'ver_emissoes', 'ver_vouchers',
+    'ver_politicas', 'ver_aprovacoes', 'decidir_aprovacoes',
+    'ver_workflows', 'executar_workflows', 'ver_arquivos', 'usar_busca_global',
   ),
   viewer: permissions(
     'ver_empresas', 'ver_centros_custo', 'ver_funcionarios', 'ver_solicitantes', 'ver_demandas',
@@ -399,6 +409,7 @@ export interface AuthorizationScopeGrant {
 export interface CorporateCompanyAccessSummary {
   companyId: string
   companyName: string
+  companyPortalEnabled?: boolean
   groupId: string | null
   groupName: string | null
   sources: Array<'tenant_admin' | 'legacy_unscoped' | 'group_all' | 'group_selected' | 'direct'>
@@ -499,6 +510,8 @@ export interface Empresa {
   centro_custo_padrao: string
   centro_custo_padrao_id?: string | null
   ativa: boolean
+  /** Habilita esta empresa para usuarios do Portal Empresa. */
+  portal_empresa_habilitado?: boolean
   is_master_holding?: boolean
   tech_travel_client_names?: string[]
   config_cobranca?: ConfigCobrancaEmpresa
@@ -629,7 +642,7 @@ export const PRIORIDADE_LABEL: Record<Prioridade, string> = {
   baixa: 'Baixa', media: 'Média', alta: 'Alta', urgente: 'Urgente',
 }
 
-export type TipoServico = 'Aéreo' | 'Hotel' | 'Carro' | 'Pacote' | 'Outro'
+export type TipoServico = 'Aéreo' | 'Hotel' | 'Carro' | 'Rodoviário' | 'Pacote' | 'Outro'
 export type OrigemAtendimento = 'WhatsApp' | 'E-mail' | 'Telefone' | 'Indicação' | 'Portal' | 'Outro'
 export type DemandBookingMode = 'offline' | 'online'
 export type FonteReferenciaEconomiaAtendimento =
@@ -645,6 +658,7 @@ export function labelOcupante(tipo: TipoServico): string {
     case 'Hotel': return 'Hóspede'
     case 'Aéreo': return 'Passageiro'
     case 'Carro': return 'Passageiro'
+    case 'Rodoviário': return 'Passageiro'
     case 'Pacote': return 'Viajante'
     default: return 'Cliente'
   }
@@ -741,6 +755,59 @@ export interface DetalhesCarro {
   data_devolucao?: string
   categoria?: string
   localizador?: string
+  /** Snapshot completo do pedido terrestre offline. */
+  ground?: {
+    pickupLocationId?: string
+    returnLocationId?: string
+    pickupLocationText?: string
+    returnLocationText?: string
+    pickupAt: string
+    returnAt: string
+    desiredCategory?: string
+    automaticTransmission?: boolean
+    airConditioning?: boolean
+    unlimitedMileage?: boolean
+    preferences?: Record<string, unknown>
+    notes?: string
+  }
+  primary_driver?: GroundDemandTravelerSnapshot
+  pickup_location_name?: string
+  return_location_name?: string
+  supplier_name?: string
+}
+
+export interface GroundDemandTravelerSnapshot {
+  employee_id: string
+  name: string
+  email?: string
+}
+
+export interface DetalhesRodoviario {
+  ground?: {
+    tripType: 'one_way' | 'round_trip' | 'multi_city'
+    preferredClass?: string
+    seatPreference?: string
+    accessibilityRequired?: boolean
+    preferences?: Record<string, unknown>
+    notes?: string
+    legs: Array<{
+      id?: string
+      originCityId: string
+      destinationCityId: string
+      originTerminalId?: string
+      destinationTerminalId?: string
+      departureDate: string
+      earliestDeparture?: string
+      latestDeparture?: string
+    }>
+  }
+  travelers?: GroundDemandTravelerSnapshot[]
+  leg_snapshots?: Array<{
+    origin_city_name: string
+    destination_city_name: string
+    origin_terminal_name?: string
+    destination_terminal_name?: string
+  }>
 }
 
 export interface DetalhesPacote {
@@ -781,6 +848,7 @@ export interface Atendimento {
   detalhes_aereo?: DetalhesAereo
   detalhes_hotel?: DetalhesHotel
   detalhes_carro?: DetalhesCarro
+  detalhes_rodoviario?: DetalhesRodoviario
   detalhes_pacote?: DetalhesPacote
   voucher_ids?: string[]
   motivo?: string

@@ -50,7 +50,19 @@ const STATUS_LABEL: Record<string, string> = {
   superseded: 'Substituída',
 }
 
-export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: number }) {
+interface RelationalApprovalsPanelProps {
+  refreshToken: number
+  demandId?: string
+  compact?: boolean
+  onDecided?: () => void
+}
+
+export function RelationalApprovalsPanel({
+  refreshToken,
+  demandId,
+  compact = false,
+  onDecided,
+}: RelationalApprovalsPanelProps) {
   const [user, setUser] = useState<User | null>(null)
   const [items, setItems] = useState<ApprovalInstanceSummary[]>([])
   const [total, setTotal] = useState(0)
@@ -71,7 +83,7 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
     setLoading(true)
     setError(null)
     try {
-      const result = await fetchApprovalInstances({ limit: 200 })
+      const result = await fetchApprovalInstances({ demandId, limit: demandId ? 50 : 200 })
       setItems(result.items)
       setTotal(result.total)
     } catch (requestError) {
@@ -79,7 +91,7 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [demandId])
 
   useEffect(() => {
     void refreshToken
@@ -161,6 +173,7 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
       setDecision(null)
       setReason('')
       await load()
+      onDecided?.()
       toast.success(chosenDecision === 'approved' ? 'Aprovação registrada.' : 'Rejeição registrada.')
     } catch (requestError) {
       toast.error(errorMessage(requestError))
@@ -182,45 +195,51 @@ export function RelationalApprovalsPanel({ refreshToken }: { refreshToken: numbe
 
   return (
     <section className="space-y-4" aria-labelledby="approval-queue-title">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Metric icon={Clock3} label="Pendentes" value={metrics.pending} tone="amber" />
-        <Metric icon={ShieldCheck} label="Atribuídas a mim" value={metrics.mine} tone="blue" />
-        <Metric icon={TimerOff} label="SLA vencido" value={metrics.overdue} tone="red" />
-        <Metric icon={CheckCircle2} label="Aprovadas na consulta" value={metrics.approved} tone="green" />
-      </div>
+      {!compact && (
+        <>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <Metric icon={Clock3} label="Pendentes" value={metrics.pending} tone="amber" />
+            <Metric icon={ShieldCheck} label="Atribuídas a mim" value={metrics.mine} tone="blue" />
+            <Metric icon={TimerOff} label="SLA vencido" value={metrics.overdue} tone="red" />
+            <Metric icon={CheckCircle2} label="Aprovadas na consulta" value={metrics.approved} tone="green" />
+          </div>
 
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="bbt-tabs w-fit max-w-full overflow-x-auto">
-          {([
-            ['pending', 'Pendentes'],
-            ['mine', 'Para mim'],
-            ['overdue', 'Vencidas'],
-            ['all', 'Todas'],
-          ] as Array<[QueueFilter, string]>).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              className={`bbt-tab ${filter === value ? 'bbt-tab-active' : ''}`}
-              onClick={() => setFilter(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <label className="flex min-w-0 items-center rounded-md border border-bbt-gray-100 bg-white px-3 dark:border-slate-700 dark:bg-slate-900 lg:w-80">
-          <Search className="h-4 w-4 shrink-0 text-slate-400" />
-          <span className="sr-only">Buscar aprovações</span>
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            className="min-w-0 flex-1 bg-transparent px-2 py-2.5 text-sm outline-none"
-            placeholder="Empresa, workflow ou demanda"
-          />
-        </label>
-      </div>
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="bbt-tabs w-fit max-w-full overflow-x-auto">
+              {([
+                ['pending', 'Pendentes'],
+                ['mine', 'Para mim'],
+                ['overdue', 'Vencidas'],
+                ['all', 'Todas'],
+              ] as Array<[QueueFilter, string]>).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`bbt-tab ${filter === value ? 'bbt-tab-active' : ''}`}
+                  onClick={() => setFilter(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <label className="flex min-w-0 items-center rounded-md border border-bbt-gray-100 bg-white px-3 dark:border-slate-700 dark:bg-slate-900 lg:w-80">
+              <Search className="h-4 w-4 shrink-0 text-slate-400" />
+              <span className="sr-only">Buscar aprovações</span>
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="min-w-0 flex-1 bg-transparent px-2 py-2.5 text-sm outline-none"
+                placeholder="Empresa, workflow ou demanda"
+              />
+            </label>
+          </div>
+        </>
+      )}
 
       <div className="flex items-center justify-between text-sm">
-        <h2 id="approval-queue-title" className="font-semibold text-bbt-primary dark:text-white">Fila governada</h2>
+        <h2 id="approval-queue-title" className="font-semibold text-bbt-primary dark:text-white">
+          {compact ? 'Autorização deste pedido' : 'Fila governada'}
+        </h2>
         <span className="text-slate-500">{filtered.length} exibida(s) de {total}</span>
       </div>
 

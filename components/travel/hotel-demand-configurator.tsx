@@ -1,9 +1,13 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { BedDouble, Loader2, MapPin, Plus, Trash2, UserRound } from 'lucide-react'
+import { BedDouble, Loader2, MapPin, Plus, Trash2 } from 'lucide-react'
 
 import { GeographyCombobox } from '@/components/geography/geography-combobox'
+import {
+  HotelTravelerSlotPicker,
+  useHotelTravelerManagementCapabilities,
+} from '@/components/travel/hotel-traveler-slot-picker'
 import { DateInput } from '@/components/ui/date-input'
 import {
   listGeographyCities,
@@ -24,9 +28,7 @@ import {
   MAX_PREFERRED_HOTELS,
   preferredHotelPatch,
 } from '@/lib/hotel-demand/preferences'
-import { searchTravelers } from '@/lib/travelers/client'
-import type { TravelerDirectoryItem } from '@/lib/travelers/types'
-import type { DetalhesHotel, HotelDemandGuest, HotelDemandRoom } from '@/types'
+import type { DetalhesHotel, HotelDemandRoom } from '@/types'
 
 interface Props {
   companyId: string
@@ -34,6 +36,8 @@ interface Props {
   onChange: React.Dispatch<React.SetStateAction<DetalhesHotel>>
   disabled?: boolean
   showGuests?: boolean
+  showPreferredHotelSelector?: boolean
+  showAccessibility?: boolean
 }
 
 export function HotelDemandConfigurator({
@@ -42,6 +46,8 @@ export function HotelDemandConfigurator({
   onChange,
   disabled = false,
   showGuests = true,
+  showPreferredHotelSelector = true,
+  showAccessibility = true,
 }: Props) {
   const [countries, setCountries] = useState<GeographyCountry[]>([])
   const [subdivisions, setSubdivisions] = useState<GeographySubdivision[]>([])
@@ -66,6 +72,7 @@ export function HotelDemandConfigurator({
     () => new Set(rooms.flatMap((room) => room.guests).flatMap((guest) => guest.employee_id ? [guest.employee_id] : [])),
     [rooms],
   )
+  const travelerManagement = useHotelTravelerManagementCapabilities(companyId, showGuests)
   const nights = nightsBetween(value.data_checkin || '', value.data_checkout || '')
   const countryOptions = useMemo(() => countries.map((country) => ({
     value: country.id,
@@ -182,6 +189,12 @@ export function HotelDemandConfigurator({
   }, [cityQuery, value.country_id, value.subdivision_id])
 
   useEffect(() => {
+    if (!showPreferredHotelSelector) {
+      setHotels([])
+      setHotelError('')
+      setLoading((current) => ({ ...current, hotels: false }))
+      return
+    }
     if (!value.country_id || !value.subdivision_id || !value.city_id) {
       setHotels([])
       setHotelError('')
@@ -220,7 +233,7 @@ export function HotelDemandConfigurator({
         if (!controller.signal.aborted) setLoading((current) => ({ ...current, hotels: false }))
       })
     return () => controller.abort()
-  }, [value.city_id, value.country_id, value.subdivision_id])
+  }, [showPreferredHotelSelector, value.city_id, value.country_id, value.subdivision_id])
 
   useEffect(() => {
     if (!showGuests || !companyId || rooms.length) return
@@ -254,7 +267,7 @@ export function HotelDemandConfigurator({
 
   return (
     <div className="space-y-5">
-      <div className="rounded-lg border border-cyan-200 bg-cyan-50/60 p-3 text-sm text-cyan-950 dark:border-cyan-900 dark:bg-cyan-950/20 dark:text-cyan-100">
+      <div className="rounded-lg border border-bbt-accent/30 bg-bbt-accent/5 p-3 text-sm text-bbt-primary dark:border-bbt-accent/40 dark:bg-bbt-accent/10 dark:text-white">
         Nesta etapa, informe a necessidade da hospedagem. Os hotéis preferenciais são opcionais; fornecedor, diária, taxas e localizador serão definidos pelo consultor na cotação.
       </div>
 
@@ -361,7 +374,7 @@ export function HotelDemandConfigurator({
               required
             />
           </Field>
-          <div className="space-y-2 md:col-span-3">
+          {showPreferredHotelSelector && <div className="space-y-2 md:col-span-3">
             <GeographyCombobox
               id="hotel-demand-preferred-hotel"
               label={`Hotéis preferenciais (opcional, até ${MAX_PREFERRED_HOTELS})`}
@@ -387,7 +400,7 @@ export function HotelDemandConfigurator({
                   return (
                     <span
                       key={hotelId}
-                      className="inline-flex max-w-full items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-900 dark:border-cyan-900 dark:bg-cyan-950/30 dark:text-cyan-100"
+                      className="inline-flex max-w-full items-center gap-2 rounded-full border border-bbt-accent/30 bg-bbt-accent/10 px-3 py-1.5 text-xs font-semibold text-bbt-primary dark:border-bbt-accent/40 dark:text-white"
                     >
                       <span className="truncate">
                         {index + 1}. {hotel?.name || 'Hotel anteriormente selecionado'}
@@ -396,7 +409,7 @@ export function HotelDemandConfigurator({
                         type="button"
                         disabled={disabled}
                         onClick={() => patch(preferredHotelPatch(preferredHotelIds.filter((id) => id !== hotelId)))}
-                        className="rounded-full p-0.5 text-cyan-700 hover:bg-cyan-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 dark:text-cyan-200 dark:hover:bg-cyan-900"
+                        className="rounded-full p-0.5 text-bbt-accent hover:bg-bbt-accent/15 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
                         aria-label={`Remover ${hotel?.name || `hotel preferencial ${index + 1}`}`}
                       >
                         <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -414,7 +427,7 @@ export function HotelDemandConfigurator({
               </p>
             )}
             {hotelError && <p className="text-xs text-red-600 dark:text-red-400">{hotelError}</p>}
-          </div>
+          </div>}
         </div>
       </section>
 
@@ -476,16 +489,19 @@ export function HotelDemandConfigurator({
                 {HOTEL_OCCUPANCIES[room.occupancy_code].slots.map((slot) => {
                   const guest = room.guests.find((item) => item.slot_index === slot.index)
                   return (
-                    <TravelerSlotPicker
+                    <HotelTravelerSlotPicker
                       key={slot.index}
                       companyId={companyId}
                       label={`${slot.label}${slot.required ? ' *' : ' (opcional)'}`}
                       allowsExternal={slot.allowsExternal}
+                      required={slot.required}
                       role={slot.role}
                       slotIndex={slot.index}
                       value={guest}
                       disabled={disabled || !companyId}
                       excludedEmployeeIds={selectedEmployeeIds}
+                      capabilities={travelerManagement}
+                      surface="subtle"
                       onChange={(nextGuest) => patchRoom(room.client_id, (current) => ({
                         ...current,
                         guests: [
@@ -512,7 +528,7 @@ export function HotelDemandConfigurator({
         </div>
       </section>}
 
-      <Field label="Acessibilidade e preferências gerais">
+      {showAccessibility && <Field label="Acessibilidade e preferências gerais">
         <textarea
           value={value.accessibility_notes || ''}
           disabled={disabled}
@@ -520,149 +536,7 @@ export function HotelDemandConfigurator({
           className="bbt-input min-h-20 resize-y"
           placeholder="Mobilidade, alergias, necessidades especiais ou observações relevantes"
         />
-      </Field>
-    </div>
-  )
-}
-
-interface TravelerSlotProps {
-  companyId: string
-  label: string
-  role: HotelDemandGuest['role']
-  slotIndex: number
-  allowsExternal: boolean
-  value?: HotelDemandGuest
-  disabled: boolean
-  excludedEmployeeIds: Set<string>
-  onChange: (value: HotelDemandGuest | null) => void
-}
-
-function TravelerSlotPicker(props: TravelerSlotProps) {
-  const [query, setQuery] = useState(props.value?.name || '')
-  const [items, setItems] = useState<TravelerDirectoryItem[]>([])
-  const [open, setOpen] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [external, setExternal] = useState(props.value?.is_external === true)
-
-  useEffect(() => {
-    setQuery(props.value?.name || '')
-    setExternal(props.value?.is_external === true)
-  }, [props.value?.employee_id, props.value?.is_external, props.value?.name])
-
-  useEffect(() => {
-    if (!open || external || !props.companyId) return
-    const controller = new AbortController()
-    const timer = window.setTimeout(() => {
-      setLoading(true)
-      void searchTravelers({ companyId: props.companyId, q: query.trim() || undefined, limit: 20 }, controller.signal)
-        .then(setItems)
-        .catch(() => {
-          if (!controller.signal.aborted) setItems([])
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setLoading(false)
-        })
-    }, 250)
-    return () => {
-      controller.abort()
-      window.clearTimeout(timer)
-    }
-  }, [external, open, props.companyId, query])
-
-  function choose(item: TravelerDirectoryItem) {
-    setQuery(item.name)
-    setOpen(false)
-    props.onChange({
-      slot_index: props.slotIndex,
-      role: props.role,
-      employee_id: item.id,
-      name: item.name,
-      email: item.email || undefined,
-      phone: item.phone || undefined,
-      is_external: false,
-    })
-  }
-
-  return (
-    <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-900/40">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">{props.label}</label>
-        {props.allowsExternal && (
-          <label className="flex items-center gap-1.5 text-[11px] text-slate-500">
-            <input
-              type="checkbox"
-              checked={external}
-              disabled={props.disabled}
-              onChange={(event) => {
-                const checked = event.target.checked
-                setExternal(checked)
-                setQuery('')
-                props.onChange(null)
-              }}
-            />
-            Acompanhante externo
-          </label>
-        )}
-      </div>
-      {external ? (
-        <input
-          value={query}
-          disabled={props.disabled}
-          onChange={(event) => {
-            const name = event.target.value
-            setQuery(name)
-            props.onChange(name.trim().length >= 2 ? {
-              slot_index: props.slotIndex,
-              role: props.role,
-              name: name.trim(),
-              is_external: true,
-            } : null)
-          }}
-          className="bbt-input"
-          placeholder="Nome completo do acompanhante"
-        />
-      ) : (
-        <div className="relative">
-          <UserRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <input
-            value={query}
-            disabled={props.disabled}
-            onFocus={() => setOpen(true)}
-            onChange={(event) => {
-              setQuery(event.target.value)
-              setOpen(true)
-              if (props.value) props.onChange(null)
-            }}
-            className="bbt-input pl-9 pr-10"
-            placeholder="Buscar viajante da empresa"
-            autoComplete="off"
-          />
-          {loading && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-bbt-accent" />}
-          {open && (
-            <div className="absolute z-30 mt-1 max-h-56 w-full overflow-auto rounded-lg border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-              {items.map((item) => {
-                const unavailable = props.excludedEmployeeIds.has(item.id) && props.value?.employee_id !== item.id
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    disabled={unavailable}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => choose(item)}
-                    className="block w-full rounded-md px-3 py-2 text-left text-sm hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-cyan-950/30"
-                  >
-                    <span className="block font-medium text-bbt-primary dark:text-white">{item.name}</span>
-                    <span className="block text-xs text-slate-500">
-                      {item.identificationCode}{item.department ? ` · ${item.department}` : ''}{unavailable ? ' · ja selecionado' : ''}
-                    </span>
-                  </button>
-                )
-              })}
-              {!loading && items.length === 0 && <div className="px-3 py-4 text-center text-xs text-slate-500">Nenhum viajante ativo encontrado.</div>}
-            </div>
-          )}
-        </div>
-      )}
+      </Field>}
     </div>
   )
 }

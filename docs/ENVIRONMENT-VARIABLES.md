@@ -70,6 +70,24 @@ Relatorios: `TECH_REPORTS_ENABLED`, `TECH_REPORTS_BASE_URL`, `TECH_REPORTS_KEY`.
 
 Use `TECH_API_MODE=production` somente depois da homologacao do fornecedor.
 
+## Wintour - sincronizacao de vendas
+
+| Variavel | Obrigatoria | Uso |
+| --- | --- | --- |
+| `WINTOUR_SYNC_ENABLED` | nao | Habilita o conector no servidor; padrao `false`. |
+| `WINTOUR_TENANT_ID` | quando habilitado | UUID do unico tenant autorizado a usar o `WINTOUR_PIN` deste runtime; impede que a credencial global seja reutilizada por outro tenant. |
+| `WINTOUR_AUTO_SEND` | nao | Permite ao worker transmitir jobs validados; exige o conector habilitado e aceite operacional. |
+| `WINTOUR_PROTOCOL_POLL_ENABLED` | nao | Permite consultas automaticas de protocolo; a consulta detalhada de criacao pode ser tarifada. |
+| `WINTOUR_PIN` | quando habilitado | Segredo da agencia, de 1 a 128 caracteres ASCII imprimiveis, somente no servidor; nao aparece na interface, nos arquivos de vendas nem nos logs. O conector o inclui apenas no envelope SOAP mantido em memoria, conforme o contrato Wintour. |
+| `WINTOUR_TIMEOUT_MS` | nao | Timeout de cada chamada SOAP, entre 1 e 60 segundos. |
+| `WINTOUR_WORKER_INTERVAL_MS` | nao | Intervalo do worker; minimo de 5 segundos. |
+| `WINTOUR_WORKER_BATCH_SIZE` | nao | Quantidade maxima de jobs por ciclo, ate 100. |
+
+Os endpoints HTTPS e `SOAPAction` oficiais sao fixos no codigo. Nao existe
+variavel para substituir a URL por um host arbitrario. Mantenha envio e consulta
+automaticos desabilitados ate a liberacao do PIN, dos layouts e da consulta de
+protocolos pela Digirotas.
+
 ## WhatsApp
 
 `WHATSAPP_ENABLED`, `WHATSAPP_PROVIDER`, `WHATSAPP_API_BASE_URL`, `WHATSAPP_API_KEY` e `WHATSAPP_INSTANCE_ID`.

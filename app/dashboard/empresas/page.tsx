@@ -14,14 +14,25 @@ import { WhatsAppButton } from '@/components/ui/whatsapp-button'
 import { ConfigCobrancaModal } from '@/components/ui/config-cobranca-modal'
 import { SearchInput } from '@/components/ui/search-input'
 import { maskCNPJ, maskPhone, formatDate, onlyDigits } from '@/lib/utils'
-import { Building2, Plus, Search, Edit2, Trash2, Download, Eye, Users, DollarSign } from 'lucide-react'
+import { Building2, Plus, Search, Edit2, Trash2, Download, Eye, Users, DollarSign, MonitorCheck } from 'lucide-react'
 import { toast } from 'sonner'
 import Link from 'next/link'
-import type { Empresa } from '@/types'
+import type { Empresa, Funcionario } from '@/types'
 import { AIAssistantFab } from '@/components/ai/ai-assistant-fab'
 import { PageHero } from '@/components/ui/page-hero'
 import { buildCsv, downloadTextFile } from '@/lib/browser-download'
 import { flushPendingRemoteStorageWithResult } from '@/lib/storage-quota'
+
+function countEmployeesForVisibleCompanies(
+  employees: ReadonlyArray<Pick<Funcionario, 'company_id'>>,
+  companies: ReadonlyArray<Pick<Empresa, 'id'>>,
+): number {
+  const visibleCompanyIds = new Set(companies.map((company) => company.id))
+  return employees.reduce(
+    (total, employee) => total + (visibleCompanyIds.has(employee.company_id) ? 1 : 0),
+    0,
+  )
+}
 
 export default function EmpresasPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
@@ -67,9 +78,13 @@ export default function EmpresasPage() {
         e.responsavel.toLowerCase().includes(q)
     )
   }, [empresas, includesCompany, search])
+  const visibleEmployeeCount = useMemo(
+    () => countEmployeesForVisibleCompanies(funcionarios, visible),
+    [funcionarios, visible],
+  )
 
   function exportCSV() {
-    const headers = ['Nome', 'CNPJ', 'Grupo', 'Endereço', 'Responsável', 'E-mail', 'Telefone', 'Centro de Custo', 'Ativa']
+    const headers = ['Nome', 'CNPJ', 'Grupo', 'Endereço', 'Responsável', 'E-mail', 'Telefone', 'Centro de Custo', 'Ativa', 'Portal Empresa']
     const rows = visible.map((e) => [
       e.nome,
       e.cnpj,
@@ -80,6 +95,7 @@ export default function EmpresasPage() {
       maskPhone(e.telefone),
       e.centro_custo_padrao,
       e.ativa ? 'Sim' : 'Não',
+      (e.portal_empresa_habilitado ?? e.ativa) === true ? 'Habilitado' : 'Desabilitado',
     ])
     downloadTextFile(
       `empresas-${todayISODate()}.csv`,
@@ -99,7 +115,7 @@ export default function EmpresasPage() {
         bgImage="https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=2000&q=85"
         metrics={[
           { icon: Building2, label: 'Cadastradas', value: visible.length },
-          { icon: Users, label: 'Funcionários', value: funcionarios.length },
+          { icon: Users, label: 'Funcionários', value: visibleEmployeeCount },
         ]}
         actions={
           <>
@@ -141,13 +157,14 @@ export default function EmpresasPage() {
                 <Th>Telefone</Th>
                 <Th>Funcionários</Th>
                 <Th>Status</Th>
+                <Th>Portal Empresa</Th>
                 <Th className="text-right">Ações</Th>
               </tr>
             </thead>
             <tbody>
               {visible.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-16 text-slate-400">
+                  <td colSpan={9} className="text-center py-16 text-slate-400">
                     Nenhuma empresa encontrada.
                   </td>
                 </tr>
@@ -192,6 +209,17 @@ export default function EmpresasPage() {
                           <span className="bbt-badge bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">Ativa</span>
                         ) : (
                           <span className="bbt-badge bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400">Inativa</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {(e.portal_empresa_habilitado ?? e.ativa) === true ? (
+                          <span className="bbt-badge bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300">
+                            <MonitorCheck className="w-3 h-3" /> Habilitado
+                          </span>
+                        ) : (
+                          <span className="bbt-badge bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400">
+                            Desabilitado
+                          </span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -267,7 +295,7 @@ export default function EmpresasPage() {
               toast.error('Selecione um grupo com permissao para incluir novas empresas.')
               return
             }
-            addEmpresa({ ...data, ativa: true } as any)
+            addEmpresa({ ...data, ativa: data.ativa !== false } as any)
             void sincronizarDiretorio('Empresa cadastrada.')
           }
           setModalOpen(false)
@@ -297,7 +325,7 @@ export default function EmpresasPage() {
 
       <AIAssistantFab
         pageContext="Empresas"
-        dataContext={`Total empresas: ${empresas.length}\nTotal funcionários: ${funcionarios.length}\nFiltro de busca: ${search || 'nenhum'}`}
+        dataContext={`Total empresas visíveis: ${visible.length}\nTotal funcionários das empresas visíveis: ${visibleEmployeeCount}\nFiltro de busca: ${search || 'nenhum'}`}
         suggestedPrompts={[
           'Qual empresa tem mais funcionários cadastrados?',
           'Liste empresas sem política de viagem definida',
@@ -337,7 +365,7 @@ function EmpresaModal({
   const [costCentersUnavailable, setCostCentersUnavailable] = useState(false)
   const [costCentersLoaded, setCostCentersLoaded] = useState(false)
   const [form, setForm] = useState<Partial<Empresa>>(
-    editing || {
+    editing ? normalizeCompanyForm(editing) : {
       nome: '',
       cnpj: '',
       endereco: '',
@@ -347,6 +375,7 @@ function EmpresaModal({
       centro_custo_padrao: '',
       grupo_id: null,
       ativa: true,
+      portal_empresa_habilitado: false,
     }
   )
 
@@ -354,7 +383,7 @@ function EmpresaModal({
   useEffect(() => {
     if (open) {
       setForm(
-        editing || {
+        editing ? normalizeCompanyForm(editing) : {
           nome: '',
           cnpj: '',
           endereco: '',
@@ -364,6 +393,7 @@ function EmpresaModal({
           centro_custo_padrao: '',
           grupo_id: null,
           ativa: true,
+          portal_empresa_habilitado: false,
         }
       )
     }
@@ -565,6 +595,25 @@ function EmpresaModal({
             Empresa ativa
           </label>
         </div>
+        <div className="rounded-xl border border-cyan-200 bg-cyan-50/70 p-4 dark:border-cyan-900/60 dark:bg-cyan-950/20">
+          <label htmlFor="portal-empresa-habilitado" className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              id="portal-empresa-habilitado"
+              checked={form.portal_empresa_habilitado === true}
+              onChange={(e) => setForm({ ...form, portal_empresa_habilitado: e.target.checked })}
+              className="mt-1 rounded"
+            />
+            <span>
+              <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">
+                Habilitar no Portal Empresa
+              </span>
+              <span className="mt-1 block text-xs leading-5 text-slate-600 dark:text-slate-300">
+                Torna a empresa elegível para usuários corporativos. O acesso continua dependendo do cadastro da pessoa, das permissões e do escopo da empresa ou do grupo.
+              </span>
+            </span>
+          </label>
+        </div>
         <div className="flex justify-end gap-2 pt-4 border-t border-bbt-gray-100 dark:border-slate-700">
           <button type="button" onClick={onClose} className="bbt-button-ghost">Cancelar</button>
           <button type="submit" className="bbt-button-primary">{editing ? 'Salvar alterações' : 'Cadastrar empresa'}</button>
@@ -572,6 +621,15 @@ function EmpresaModal({
       </form>
     </Modal>
   )
+}
+
+function normalizeCompanyForm(company: Empresa): Empresa {
+  return {
+    ...company,
+    // Empresas legadas ativas já eram elegíveis ao portal. Preserve esse
+    // comportamento sem habilitar silenciosamente uma empresa legada inativa.
+    portal_empresa_habilitado: company.portal_empresa_habilitado ?? company.ativa,
+  }
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

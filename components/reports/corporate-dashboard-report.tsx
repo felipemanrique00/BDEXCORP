@@ -60,6 +60,7 @@ type Props = {
   userOverride?: User | null
   className?: string
   embedded?: boolean
+  hideEmbeddedHeader?: boolean
 }
 
 const PAGES: Array<{ id: DashboardPage; label: string }> = [
@@ -69,7 +70,7 @@ const PAGES: Array<{ id: DashboardPage; label: string }> = [
   { id: 'detalhes', label: 'Detalhes' },
 ]
 
-const CATEGORIAS: DashboardCategoriaFiltro[] = ['todos', 'Aéreo', 'Hotel', 'Carro', 'Pacote', 'Outro']
+const CATEGORIAS: DashboardCategoriaFiltro[] = ['todos', 'Aéreo', 'Hotel', 'Carro', 'Rodoviário', 'Pacote', 'Outro']
 const STATUS: Array<StatusAtendimento | 'todos'> = ['todos', 'em_andamento', 'aguardando_cliente', 'finalizado', 'cancelado', 'pendente']
 const COLORS = ['#11175f', '#10beb3', '#df4053', '#f47b2d', '#5d78b6', '#59843b', '#858585']
 
@@ -80,6 +81,7 @@ export function CorporateDashboardReport({
   userOverride,
   className,
   embedded = false,
+  hideEmbeddedHeader = false,
 }: Props = {}) {
   const { branding } = useEffectiveBranding()
   const searchParams = useSearchParams()
@@ -268,7 +270,7 @@ export function CorporateDashboardReport({
 
   return (
     <div className={cn('space-y-4 animate-fade-in', className)}>
-      {embedded ? (
+      {embedded && hideEmbeddedHeader ? null : embedded ? (
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm print:hidden dark:border-slate-700 dark:bg-slate-900">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -834,6 +836,7 @@ function railCategoriaLabel(value: DashboardCategoriaFiltro): string {
   if (value === 'Aéreo') return 'Aéreo'
   if (value === 'Hotel') return 'Hotel'
   if (value === 'Carro') return 'Carro'
+  if (value === 'Rodoviário') return 'Ônibus'
   if (value === 'Pacote') return 'Pacote'
   return 'Outros'
 }

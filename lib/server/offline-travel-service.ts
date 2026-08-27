@@ -38,10 +38,11 @@ import {
   type OfflineTravelChannel,
   type OfflineTravelService,
 } from '@/lib/offline-travel/schema'
-import { createApprovalInstance } from '@/lib/server/approval-service'
+import { createTrustedApprovalInstance } from '@/lib/server/approval-service'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
 import { getDatabasePool, withTenantTransaction } from '@/lib/server/database'
 import { evaluateAndPersistPoliciesInTransaction } from '@/lib/server/policy-service'
+import { resolvePolicyApprovalWorkflowCode } from '@/lib/server/policy-approval-workflow'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import { persistTravelTransitionInTransaction } from '@/lib/server/travel-lifecycle-persistence'
 import { enrichVouchersFromDatabase } from '@/lib/server/voucher-enrichment-service'
@@ -62,7 +63,20 @@ const LIFECYCLE_STATUSES = new Set<TravelLifecycleStatus>([
   'rejected', 'canceled', 'expired', 'failed', 'pending_refund', 'refunded', 'closed',
 ])
 
-interface DemandRow extends QueryResultRow {
+export interface OfflinePolicyDemand {
+  id: string
+  company_id: string
+  employee_id: string | null
+  service_type: string
+  passenger_name_snapshot: string
+  cost_center: string | null
+  employee_name: string | null
+  employee_department: string | null
+  employee_cost_center: string | null
+  metadata: Record<string, unknown>
+}
+
+interface DemandRow extends QueryResultRow, OfflinePolicyDemand {
   id: string
   tenant_id: string
   company_id: string
@@ -171,10 +185,14 @@ interface PolicyEvaluation {
   budgetCommitment: OfflineBudgetCommitment | null
 }
 
-interface OfflinePolicyTraveler {
+export interface OfflinePolicyTraveler {
   demandTravelerId: string | null
   employeeId: string | null
   name: string
+  document: string | null
+  email: string | null
+  phone: string | null
+  jobTitle: string | null
   department: string | null
   costCenter: string | null
   sequence: number
@@ -198,6 +216,10 @@ interface OfflinePolicyTravelerRow extends QueryResultRow {
 interface OfflinePolicyEmployeeRow extends QueryResultRow {
   id: string
   full_name: string
+  document_number: string | null
+  email: string | null
+  phone: string | null
+  job_title: string | null
   department: string | null
   cost_center: string | null
 }
@@ -358,12 +380,10 @@ export async function createOfflineReservation(
     }
 
     const formalQuote = await loadApprovedOfflineQuoteSelection(client, principal, demand)
-    if (['hotelaria', 'aereo'].includes(input.serviceKey) && !formalQuote) {
+    if (['hotelaria', 'aereo', 'locacao', 'rodoviario'].includes(input.serviceKey) && !formalQuote) {
       throw new OfflineTravelError(
         'OFFLINE_APPROVED_SELECTION_REQUIRED',
-        input.serviceKey === 'hotelaria'
-          ? 'A hospedagem precisa de uma cotação vigente, escolhida pelo solicitante e aprovada antes da reserva.'
-          : 'O aéreo precisa de uma cotação vigente, escolhida pelo solicitante e aprovada antes da reserva.',
+        `${offlineServiceLabel(input.serviceKey)} precisa de uma cotacao vigente, escolhida pelo solicitante e aprovada antes da reserva.`,
         409,
         { lifecycleStatus: demand.lifecycle_status },
       )
@@ -1123,6 +1143,15 @@ export async function issueOfflineReservation(
     if (reservation.service_type === 'aereo') {
       await persistAirEmissionTickets(client, principal, demand, reservation, emissionId, input)
     }
+    if (reservation.service_type === 'hotelaria') {
+      await persistHotelEmissionRateObservations(
+        client,
+        principal,
+        demand,
+        reservation,
+        emissionId,
+      )
+    }
     const reservationUpdate = await client.query(
       `update reservations set
          status = $4,
@@ -1569,7 +1598,7 @@ async function prepareOfflineApproval(
       },
     )
   }
-  const workflowCode = await resolveOfflineApprovalWorkflowCode(client, principal.tenantId, policy.result)
+  const workflowCode = await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policy.result)
   if (!workflowCode) {
     throw new OfflineTravelError(
       'OFFLINE_APPROVAL_WORKFLOW_NOT_CONFIGURED',
@@ -1614,7 +1643,7 @@ async function requestOfflineApproval(
     let instance: OfflineApprovalInstanceRef | null = existing
     let handoffCompleted = false
     try {
-      const detail = await createApprovalInstance(principal, {
+      const detail = await createTrustedApprovalInstance(principal, {
         workflowCode: preparation.workflowCode,
         companyId: preparation.companyId,
         demandId: preparation.demandId,
@@ -2173,31 +2202,6 @@ async function attachOfflineIssuanceApproval(
   })
 }
 
-async function resolveOfflineApprovalWorkflowCode(
-  client: PoolClient,
-  tenantId: string,
-  result: PolicyEvaluationResult,
-): Promise<string | null> {
-  const configured = result.approvalsRequired.flatMap((item) => {
-    const workflow = item.configuration.workflow
-    return typeof workflow === 'string' && workflow.trim() ? [workflow.trim()] : []
-  })
-  const versionIds = Array.from(new Set(result.approvalsRequired.map((item) => item.policyVersionId)))
-  const dependencies = versionIds.length
-    ? await client.query<{ dependency_key: string }>(
-        `select distinct dependency_key from policy_dependencies
-         where tenant_id = $1 and policy_version_id = any($2::uuid[])
-           and dependency_type = 'workflow' and required = true`,
-        [tenantId, versionIds],
-      )
-    : { rows: [] as Array<{ dependency_key: string }> }
-  const candidates = Array.from(new Set([
-    ...configured,
-    ...dependencies.rows.map((row) => row.dependency_key.trim()).filter(Boolean),
-  ]))
-  return candidates.length === 1 ? candidates[0] : null
-}
-
 function offlineApprovalSubject(
   demand: DemandRow,
   policy: PolicyEvaluation,
@@ -2289,7 +2293,7 @@ async function loadApprovedOfflineQuoteSelection(
     row.demand_id !== demand.id
     || row.company_id !== demand.company_id
     || !selectedService
-    || !['hotelaria', 'aereo'].includes(selectedService)
+    || !['hotelaria', 'aereo', 'locacao', 'rodoviario'].includes(selectedService)
     || !offlineServiceMatchesDemand(demand.service_type, selectedService)
     || row.quote_provider !== OFFLINE_TRAVEL_PROVIDER
     || row.quote_status !== 'selected'
@@ -2389,7 +2393,16 @@ async function loadApprovedOfflineQuoteSelection(
   }
   const approved = selectedService === 'aereo'
     ? approvedAirSelection(row, demand, snapshot, snapshotDemand, snapshotOption, quotedSupplierName)
-    : approvedHotelSelection(row, snapshot, snapshotDemand, snapshotOption, quotedSupplierName)
+    : selectedService === 'hotelaria'
+      ? approvedHotelSelection(row, snapshot, snapshotDemand, snapshotOption, quotedSupplierName)
+      : approvedGroundSelection(
+          row,
+          snapshot,
+          snapshotDemand,
+          snapshotOption,
+          quotedSupplierName,
+          selectedService,
+        )
   return {
     quoteId: row.quote_id,
     optionId: row.option_id,
@@ -2483,6 +2496,7 @@ function approvedHotelSelection(
     )
   }
   const destination = textValue(snapshotDemand.cityName || snapshotDemand.destination) || null
+  const passengers = approvedSnapshotPassengerNames(snapshotDemand)
   const currency = String(snapshotOption.currency || breakdown.currency || 'BRL').trim().toUpperCase()
   return {
     selectionId: row.selection_id,
@@ -2506,6 +2520,7 @@ function approvedHotelSelection(
       category: textValue(hotel.category) || undefined,
       accommodation: roomCategory,
       mealPlan: textValue(hotel.mealPlan) || undefined,
+      passengers: passengers.length ? passengers : undefined,
     },
     serviceSnapshot: {
       kind: 'hotelaria',
@@ -2521,6 +2536,243 @@ function approvedHotelSelection(
     paymentTerms: textValue(hotel.paymentTerms) || null,
     refundable: typeof snapshotOption.refundable === 'boolean' ? snapshotOption.refundable : null,
   }
+}
+
+function approvedGroundSelection(
+  row: FormalQuoteSelectionRow,
+  snapshot: Record<string, unknown>,
+  snapshotDemand: Record<string, unknown>,
+  snapshotOption: Record<string, unknown>,
+  quotedSupplierName: string,
+  selectedService: OfflineTravelService,
+): ApprovedOfflineQuoteSelection {
+  if (selectedService !== 'locacao' && selectedService !== 'rodoviario') {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_SELECTION_SNAPSHOT_INVALID',
+      'O snapshot aprovado nao corresponde a um servico terrestre formal.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  if (textValue(snapshot.serviceKey) !== selectedService) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_SELECTION_SERVICE_MISMATCH',
+      'O servico do snapshot aprovado diverge da demanda.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  const ground = objectValue(snapshotOption.ground)
+  const supplierId = textValue(ground.supplier_id)
+  const snapshotSupplierName = textValue(ground.supplierName)
+  if (!supplierId || !snapshotSupplierName || suppliersDiffer(quotedSupplierName, snapshotSupplierName)) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_SELECTION_SNAPSHOT_INVALID',
+      'O fornecedor terrestre aprovado nao corresponde ao fornecedor da opcao escolhida.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+
+  const totalMinor = groundSnapshotMinor(ground.total_amount_minor, row.selection_id)
+  if (totalMinor !== moneyToMinorUnits(snapshotOption.amount)) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_GROUND_TOTAL_INVALID',
+      'O total terrestre aprovado diverge do valor da opcao escolhida.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  const groundCurrency = String(ground.currency || '').trim().toUpperCase()
+  const optionCurrency = String(snapshotOption.currency || '').trim().toUpperCase()
+  if (!/^[A-Z]{3}$/.test(groundCurrency) || groundCurrency !== optionCurrency) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_GROUND_CURRENCY_INVALID',
+      'A moeda do detalhamento terrestre diverge da opcao escolhida.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  const currency = groundCurrency
+
+  if (selectedService === 'locacao') {
+    const pickupLocationId = textValue(ground.pickup_location_id)
+    const returnLocationId = textValue(ground.return_location_id)
+    const pickupLocation = textValue(ground.pickupLocationName)
+    const returnLocation = textValue(ground.returnLocationName)
+    const categoryName = textValue(ground.category_name)
+    const rentalDays = Number(ground.rental_days)
+    const dailyMinor = groundSnapshotMinor(ground.daily_amount_minor, row.selection_id)
+    const protectionMinor = groundSnapshotMinor(ground.protection_amount_minor, row.selection_id)
+    const feeMinor = groundSnapshotMinor(ground.fee_amount_minor, row.selection_id)
+    const taxMinor = groundSnapshotMinor(ground.tax_amount_minor, row.selection_id)
+    const startsAt = dateTimeOrNull(snapshotOption.startsAt)
+    const endsAt = dateTimeOrNull(snapshotOption.endsAt)
+    if (
+      !pickupLocationId || !returnLocationId || !pickupLocation || !returnLocation
+      || !categoryName || !Number.isSafeInteger(rentalDays) || rentalDays < 1
+      || dailyMinor * rentalDays + protectionMinor + feeMinor + taxMinor !== totalMinor
+      || !startsAt || !endsAt || Date.parse(endsAt) <= Date.parse(startsAt)
+    ) {
+      throw new OfflineTravelError(
+        'OFFLINE_APPROVED_GROUND_SNAPSHOT_INVALID',
+        'A opcao de locacao aprovada possui dados comerciais ou datas invalidos.',
+        409,
+        { selectionId: row.selection_id },
+      )
+    }
+    const destination = textValue(snapshotDemand.destination) || returnLocation
+    return {
+      selectionId: row.selection_id,
+      approvalInstanceId: row.approval_instance_id,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      serviceKey: 'locacao',
+      quotedSupplierName,
+      destination,
+      startsAt,
+      endsAt,
+      amounts: {
+        gross: minorUnitsToMoney(totalMinor - taxMinor),
+        taxes: minorUnitsToMoney(taxMinor),
+        total: minorUnitsToMoney(totalMinor),
+        currency,
+      },
+      details: {
+        destination: destination || undefined,
+        itemName: categoryName,
+        category: textValue(ground.vehicle_example) || categoryName,
+        pickupLocation,
+        returnLocation,
+        evidence: { approvedGroundQuote: snapshot },
+      },
+      serviceSnapshot: { kind: 'locacao', ...ground },
+      commercialBreakdown: ground,
+      cancellationPolicy: textValue(ground.cancellation_policy) || null,
+      paymentTerms: null,
+      refundable: typeof snapshotOption.refundable === 'boolean' ? snapshotOption.refundable : null,
+    }
+  }
+
+  const segments = Array.isArray(ground.segments) ? ground.segments.map(objectValue) : []
+  const fareMinor = groundSnapshotMinor(ground.fare_amount_minor, row.selection_id)
+  const taxMinor = groundSnapshotMinor(ground.tax_amount_minor, row.selection_id)
+  const feeMinor = groundSnapshotMinor(ground.fee_amount_minor, row.selection_id)
+  const passengers = approvedSnapshotPassengerNames(snapshotDemand)
+  if (!segments.length || !passengers.length || fareMinor + taxMinor + feeMinor !== totalMinor) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_GROUND_SNAPSHOT_INVALID',
+      'A opcao rodoviaria aprovada possui valores ou trechos invalidos.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  for (const [index, segment] of segments.entries()) {
+    const departsAt = dateTimeOrNull(segment.departs_at)
+    const arrivesAt = dateTimeOrNull(segment.arrives_at)
+    if (
+      !textValue(segment.demand_leg_id)
+      || !textValue(segment.route_id)
+      || !textValue(segment.origin_city_id)
+      || !textValue(segment.destination_city_id)
+      || !Number.isSafeInteger(Number(segment.sequence))
+      || Number(segment.sequence) !== index + 1
+      || !departsAt || !arrivesAt || Date.parse(arrivesAt) <= Date.parse(departsAt)
+    ) {
+      throw new OfflineTravelError(
+        'OFFLINE_APPROVED_GROUND_SEGMENT_INVALID',
+        `O trecho rodoviario ${index + 1} da opcao aprovada e invalido.`,
+        409,
+        { selectionId: row.selection_id, segmentIndex: index },
+      )
+    }
+    if (index > 0) {
+      const previous = segments[index - 1]!
+      if (
+        textValue(previous.destination_city_id) !== textValue(segment.origin_city_id)
+        || Date.parse(String(previous.arrives_at || '')) > Date.parse(String(segment.departs_at || ''))
+      ) {
+        throw new OfflineTravelError(
+          'OFFLINE_APPROVED_GROUND_SEGMENT_INVALID',
+          `O trecho rodoviario ${index + 1} nao e continuo com o anterior.`,
+          409,
+          { selectionId: row.selection_id, segmentIndex: index },
+        )
+      }
+    }
+  }
+  const firstSegment = segments[0]!
+  const lastSegment = segments[segments.length - 1]!
+  const startsAt = dateTimeOrNull(firstSegment.departs_at)
+  const endsAt = dateTimeOrNull(lastSegment.arrives_at)
+  const origin = textValue(firstSegment.originCityName)
+  const destination = textValue(lastSegment.destinationCityName) || textValue(snapshotDemand.destination)
+  if (!startsAt || !endsAt || !origin || !destination) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_GROUND_SEGMENT_INVALID',
+      'A origem, o destino ou as datas da opcao rodoviaria aprovada sao invalidos.',
+      409,
+      { selectionId: row.selection_id },
+    )
+  }
+  return {
+    selectionId: row.selection_id,
+    approvalInstanceId: row.approval_instance_id,
+    snapshotHash: row.snapshot_hash,
+    snapshot,
+    serviceKey: 'rodoviario',
+    quotedSupplierName,
+    destination,
+    startsAt,
+    endsAt,
+    amounts: {
+      gross: minorUnitsToMoney(fareMinor),
+      taxes: minorUnitsToMoney(taxMinor + feeMinor),
+      total: minorUnitsToMoney(totalMinor),
+      currency,
+    },
+    details: {
+      origin,
+      destination,
+      itemName: quotedSupplierName,
+      serviceNumber: textValue(ground.service_number) || undefined,
+      className: textValue(ground.class_name) || undefined,
+      category: Number.isFinite(Number(ground.baggage_pieces))
+        ? `${Number(ground.baggage_pieces)} bagagem(ns)`
+        : undefined,
+      passengers: passengers.length ? passengers : undefined,
+      evidence: { approvedGroundQuote: snapshot },
+    },
+    serviceSnapshot: { kind: 'rodoviario', ...ground, segments },
+    commercialBreakdown: ground,
+    cancellationPolicy: textValue(ground.cancellation_policy) || null,
+    paymentTerms: null,
+    refundable: typeof ground.refundable === 'boolean'
+      ? ground.refundable
+      : typeof snapshotOption.refundable === 'boolean' ? snapshotOption.refundable : null,
+  }
+}
+
+function approvedSnapshotPassengerNames(snapshotDemand: Record<string, unknown>): string[] {
+  if (!Array.isArray(snapshotDemand.passengers)) return []
+  return snapshotDemand.passengers.flatMap((value) => {
+    const passenger = objectValue(value)
+    const name = textValue(passenger.name)
+    return name ? [name] : []
+  })
+}
+
+function groundSnapshotMinor(value: unknown, selectionId: string): number {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new OfflineTravelError(
+      'OFFLINE_APPROVED_GROUND_TOTAL_INVALID',
+      'O snapshot terrestre aprovado possui um valor monetario invalido.',
+      409,
+      { selectionId },
+    )
+  }
+  return parsed
 }
 
 function approvedAirSelection(
@@ -2983,6 +3235,213 @@ async function persistAirEmissionTickets(
      where tenant_id = $1 and reservation_id = $2 and status = 'reserved'`,
     [principal.tenantId, reservation.id],
   )
+}
+
+interface HotelEmissionRateSourceRow extends QueryResultRow {
+  hotel_id: string
+  hotel_supplier_id: string
+  supplier_id: string
+  quoted_supplier_name: string
+  quote_id: string
+  quote_option_id: string
+  demand_room_id: string
+  occupancy_code: string
+  room_type_id: string | null
+  room_category: string
+  nightly_amount_minor: string | number
+  currency: string
+  refundable: boolean | null
+  meal_plan: string | null
+  cancellation_policy: string | null
+  payment_terms: string | null
+  snapshot_hash: string
+  option_metadata: Record<string, unknown>
+}
+
+async function persistHotelEmissionRateObservations(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demand: DemandRow,
+  reservation: ReservationRow,
+  emissionId: string,
+): Promise<void> {
+  const rows = (await client.query<HotelEmissionRateSourceRow>(
+    `select detail.hotel_id,
+            link.id::text as hotel_supplier_id,
+            detail.supplier_id::text,
+            coalesce(supplier.trade_name, supplier.legal_name) as quoted_supplier_name,
+            reservation.selected_quote_id::text as quote_id,
+            reservation.selected_quote_option_id::text as quote_option_id,
+            room_rate.demand_room_id::text,
+            demand_room.occupancy_code::text,
+            coalesce(catalog_rate.room_type_id, matching_room_type.id)::text as room_type_id,
+            room_rate.room_category,
+            room_rate.nightly_amount_minor,
+            room_rate.currency,
+            option_row.refundable,
+            detail.meal_plan,
+            detail.cancellation_policy,
+            detail.payment_terms,
+            selection.snapshot_hash,
+            option_row.metadata as option_metadata
+       from reservations reservation
+       join travel_quote_selections selection
+         on selection.tenant_id = reservation.tenant_id
+        and selection.id = reservation.quote_selection_id
+        and selection.demand_id = reservation.demand_id
+        and selection.quote_id = reservation.selected_quote_id
+        and selection.option_id = reservation.selected_quote_option_id
+        and selection.status = 'approved'
+       join travel_quote_options option_row
+         on option_row.tenant_id = reservation.tenant_id
+        and option_row.id = reservation.selected_quote_option_id
+        and option_row.quote_id = reservation.selected_quote_id
+       join hotel_quote_option_details detail
+         on detail.tenant_id = option_row.tenant_id
+        and detail.quote_option_id = option_row.id
+       join hotel_suppliers link
+         on link.tenant_id = detail.tenant_id
+        and link.hotel_id = detail.hotel_id
+        and link.supplier_id = detail.supplier_id
+        and link.id::text = option_row.metadata #>> '{offlineHotel,hotelSupplierId}'
+       join commercial_suppliers supplier
+         on supplier.tenant_id = link.tenant_id
+        and supplier.id = link.supplier_id
+       join hotel_quote_room_rates room_rate
+         on room_rate.tenant_id = option_row.tenant_id
+        and room_rate.quote_option_id = option_row.id
+       join hotel_demand_rooms demand_room
+         on demand_room.tenant_id = room_rate.tenant_id
+        and demand_room.id = room_rate.demand_room_id
+        and demand_room.demand_id = reservation.demand_id
+        and demand_room.deleted_at is null
+       left join hotel_supplier_rates catalog_rate
+         on catalog_rate.tenant_id = option_row.tenant_id
+        and catalog_rate.id::text = option_row.metadata #>> '{offlineHotel,rateReference,id}'
+        and catalog_rate.hotel_id = detail.hotel_id
+        and catalog_rate.hotel_supplier_id = link.id
+       left join lateral (
+         select room_type.id
+           from hotel_room_types room_type
+          where room_type.tenant_id = detail.tenant_id
+            and room_type.hotel_id = detail.hotel_id
+            and room_type.is_active and room_type.deleted_at is null
+            and lower(btrim(room_type.name)) = lower(btrim(room_rate.room_category))
+            and case
+              when lower(demand_room.occupancy_code::text) = 'couple' then 'double'
+              else lower(demand_room.occupancy_code::text)
+            end = room_type.occupancy_type
+          order by room_type.id
+          limit 1
+       ) matching_room_type on true
+      where reservation.tenant_id = $1
+        and reservation.id = $2
+        and reservation.demand_id = $3
+        and reservation.company_id = $4
+        and reservation.service_type = 'hotelaria'
+      order by demand_room.room_sequence, demand_room.id`,
+    [principal.tenantId, reservation.id, demand.id, demand.company_id],
+  )).rows
+  if (!rows.length) {
+    throw new OfflineTravelError(
+      'OFFLINE_HOTEL_EMISSION_RATE_PROVENANCE_MISSING',
+      'A emissao hoteleira nao possui a opcao e os quartos aprovados para registrar o historico da tarifa.',
+      409,
+      { reservationId: reservation.id, emissionId },
+    )
+  }
+
+  const reservationMetadata = objectValue(reservation.metadata)
+  const operationalSupplierName = textValue(reservationMetadata.supplierName)
+  const stayStart = dateOnly(reservation.start_at)
+  const stayEnd = dateOnly(reservation.end_at)
+  if (!operationalSupplierName) {
+    throw new OfflineTravelError(
+      'OFFLINE_HOTEL_EMISSION_OPERATIONAL_SUPPLIER_MISSING',
+      'A reserva hoteleira nao possui o fornecedor operacional que confirmou a emissao.',
+      409,
+      { reservationId: reservation.id },
+    )
+  }
+  if (!stayStart || !stayEnd) {
+    throw new OfflineTravelError(
+      'OFFLINE_HOTEL_EMISSION_STAY_DATES_MISSING',
+      'A reserva hoteleira nao possui o periodo confirmado para registrar o historico da tarifa.',
+      409,
+      { reservationId: reservation.id },
+    )
+  }
+
+  for (const row of rows) {
+    const breakdown = objectValue(objectValue(row.option_metadata).offlineHotel)
+    const rateReference = objectValue(breakdown.rateReference)
+    const catalogRateId = uuidOrNull(rateReference.id)
+    const catalogRateVersion = catalogRateId ? positiveIntegerOrNull(rateReference.version) : null
+    if (catalogRateId && !catalogRateVersion) {
+      throw new OfflineTravelError(
+        'OFFLINE_HOTEL_EMISSION_CATALOG_PROVENANCE_INVALID',
+        'A opcao emitida possui uma referencia de tarifario incompleta.',
+        409,
+        { reservationId: reservation.id, quoteOptionId: row.quote_option_id },
+      )
+    }
+    await client.query(
+      `insert into hotel_emission_rate_observations (
+         id, tenant_id, emission_id, demand_id, company_id, reservation_id,
+         quote_id, quote_option_id, demand_room_id, hotel_id,
+         hotel_supplier_id, supplier_id, room_type_id, room_category,
+         occupancy_code, stay_start, stay_end, nightly_amount,
+         nightly_tax_amount, option_service_fee_amount, currency, meal_plan,
+         refundable, cancellation_policy, payment_terms, catalog_rate_id,
+         catalog_rate_version, quote_snapshot_hash, operational_supplier_name,
+         supplier_matches_quote, issued_by, issued_at
+       ) values (
+         $1, $2, $3, $4, $5, $6,
+         $7::uuid, $8::uuid, $9::uuid, $10,
+         $11::uuid, $12::uuid, $13::uuid, $14,
+         $15, $16::date, $17::date, $18,
+         $19, $20, $21, $22,
+         $23, $24, $25, $26::uuid,
+         $27, $28, $29,
+         $30, $31, $32::timestamptz
+       )
+       on conflict (tenant_id, emission_id, demand_room_id) do nothing`,
+      [
+        randomUUID(),
+        principal.tenantId,
+        emissionId,
+        demand.id,
+        demand.company_id,
+        reservation.id,
+        row.quote_id,
+        row.quote_option_id,
+        row.demand_room_id,
+        row.hotel_id,
+        row.hotel_supplier_id,
+        row.supplier_id,
+        row.room_type_id,
+        row.room_category,
+        row.occupancy_code,
+        stayStart,
+        stayEnd,
+        minorUnitsToMoney(Number(row.nightly_amount_minor)),
+        numberValue(breakdown.nightlyTaxes),
+        numberValue(breakdown.serviceFee),
+        row.currency,
+        row.meal_plan,
+        row.refundable,
+        row.cancellation_policy,
+        row.payment_terms,
+        catalogRateId,
+        catalogRateVersion,
+        row.snapshot_hash,
+        operationalSupplierName,
+        !suppliersDiffer(row.quoted_supplier_name, operationalSupplierName),
+        principal.user.id,
+        new Date().toISOString(),
+      ],
+    )
+  }
 }
 
 function matchAirTicketsToTravelers(
@@ -3489,9 +3948,19 @@ async function loadDemandForUpdate(
      from demands demand
      join companies company
        on company.tenant_id = demand.tenant_id and company.id = demand.company_id
-     left join employees employee
-       on employee.tenant_id = demand.tenant_id and employee.id = demand.employee_id
+      left join employees employee
+        on employee.tenant_id = demand.tenant_id
+       and employee.company_id = demand.company_id
+       and employee.id = demand.employee_id
+       and employee.status = 'active'
+       and employee.deleted_at is null
      where demand.tenant_id = $1 and demand.company_id = $4 and demand.deleted_at is null
+       and (demand.travel_order_id is null or exists (
+         select 1 from company_portal_travel_orders visible_order
+         where visible_order.tenant_id = demand.tenant_id
+           and visible_order.id = demand.travel_order_id
+           and visible_order.status = 'submitted'
+       ))
        and (($2::text is not null and demand.id = $2)
          or ($2::text is null and $3::text is not null and demand.demand_number = $3))
      for update of demand`,
@@ -3876,10 +4345,10 @@ function assertServiceMatchesDemand(demand: DemandRow, serviceKey: OfflineTravel
   )
 }
 
-async function loadOfflinePolicyTravelers(
+export async function loadOfflinePolicyTravelers(
   client: PoolClient,
   tenantId: string,
-  demand: DemandRow,
+  demand: OfflinePolicyDemand,
   checkpoint: 'quotation' | 'reservation' | 'issuance',
   payload: Record<string, unknown>,
 ): Promise<OfflinePolicyTraveler[]> {
@@ -3887,12 +4356,19 @@ async function loadOfflinePolicyTravelers(
     demandTravelerId: null,
     employeeId: demand.employee_id,
     name: demand.employee_name || demand.passenger_name_snapshot,
+    document: null,
+    email: null,
+    phone: null,
+    jobTitle: null,
     department: demand.employee_department,
     costCenter: demand.employee_cost_center || demand.cost_center,
     sequence: 1,
   }
   const service = offlineServiceFromDemand(String(payload.serviceKey || demand.service_type))
-  if (service !== 'aereo' || checkpoint === 'quotation') return [primary]
+  const requiresRelationalTravelers = service === 'locacao'
+    || service === 'rodoviario'
+    || (service === 'aereo' && checkpoint !== 'quotation')
+  if (!requiresRelationalTravelers) return [primary]
 
   const travelers = (await client.query<OfflinePolicyTravelerRow>(
     `select traveler.id, traveler.employee_id, traveler.name_snapshot,
@@ -3908,6 +4384,15 @@ async function loadOfflinePolicyTravelers(
   )).rows
 
   if (!travelers.length) {
+    if (service === 'locacao' || service === 'rodoviario') {
+      throw new OfflineTravelError(
+        'OFFLINE_GROUND_TRAVELER_POLICY_INCONSISTENT',
+        service === 'locacao'
+          ? 'A demanda de locacao nao possui motorista ativo para avaliacao das politicas.'
+          : 'A demanda rodoviaria nao possui viajantes ativos para avaliacao das politicas.',
+        409,
+      )
+    }
     if (demandDeclaresAirPassengerContract(demand)) {
       throw new OfflineTravelError(
         'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
@@ -3923,7 +4408,9 @@ async function loadOfflinePolicyTravelers(
       )
     }
     const legacyEmployee = (await client.query<OfflinePolicyEmployeeRow>(
-      `select employee.id, employee.full_name, employee.department, employee.cost_center
+      `select employee.id, employee.full_name, employee.document_number,
+              employee.email::text, employee.phone, employee.job_title,
+              employee.department, employee.cost_center
        from employees employee
        where employee.tenant_id = $1 and employee.company_id = $2
          and employee.id = $3 and employee.status = 'active'
@@ -3942,6 +4429,10 @@ async function loadOfflinePolicyTravelers(
       ...primary,
       employeeId: legacyEmployee.id,
       name: demand.passenger_name_snapshot || legacyEmployee.full_name,
+      document: legacyEmployee.document_number,
+      email: legacyEmployee.email,
+      phone: legacyEmployee.phone,
+      jobTitle: legacyEmployee.job_title,
       department: legacyEmployee.department,
       costCenter: legacyEmployee.cost_center || demand.cost_center,
     }]
@@ -3956,16 +4447,25 @@ async function loadOfflinePolicyTravelers(
     || new Set(sequences).size !== sequences.length
     || primaryTravelers.length !== 1
     || primaryTravelers[0].employee_id !== demand.employee_id
+    || (service === 'locacao' && travelers.length !== 1)
   ) {
     throw new OfflineTravelError(
-      'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
-      'Os passageiros da demanda aerea estao incompletos ou fora de ordem para avaliacao das politicas.',
+      service === 'aereo'
+        ? 'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT'
+        : 'OFFLINE_GROUND_TRAVELER_POLICY_INCONSISTENT',
+      service === 'locacao'
+        ? 'A demanda de locacao precisa possuir exatamente um motorista principal e ativo.'
+        : service === 'rodoviario'
+          ? 'Os viajantes rodoviarios estao incompletos ou fora de ordem para avaliacao das politicas.'
+          : 'Os passageiros da demanda aerea estao incompletos ou fora de ordem para avaliacao das politicas.',
       409,
     )
   }
 
   const employeeRows = (await client.query<OfflinePolicyEmployeeRow>(
-    `select employee.id, employee.full_name, employee.department, employee.cost_center
+    `select employee.id, employee.full_name, employee.document_number,
+            employee.email::text, employee.phone, employee.job_title,
+            employee.department, employee.cost_center
      from employees employee
      where employee.tenant_id = $1 and employee.company_id = $2
        and employee.id = any($3::text[])
@@ -3977,8 +4477,14 @@ async function loadOfflinePolicyTravelers(
   const missingEmployeeIds = employeeIds.filter((employeeId) => !employees.has(employeeId))
   if (missingEmployeeIds.length) {
     throw new OfflineTravelError(
-      'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT',
-      'Um ou mais passageiros nao estao ativos na empresa para avaliacao das politicas.',
+      service === 'aereo'
+        ? 'OFFLINE_AIR_PASSENGER_POLICY_INCONSISTENT'
+        : 'OFFLINE_GROUND_TRAVELER_POLICY_INCONSISTENT',
+      service === 'locacao'
+        ? 'O motorista nao esta ativo nesta empresa para avaliacao das politicas.'
+        : service === 'rodoviario'
+          ? 'Um ou mais viajantes rodoviarios nao estao ativos nesta empresa para avaliacao das politicas.'
+          : 'Um ou mais passageiros nao estao ativos na empresa para avaliacao das politicas.',
       409,
       { employeeIds: missingEmployeeIds },
     )
@@ -3990,6 +4496,10 @@ async function loadOfflinePolicyTravelers(
       demandTravelerId: traveler.id,
       employeeId: employee.id,
       name: traveler.name_snapshot || employee.full_name,
+      document: employee.document_number,
+      email: employee.email,
+      phone: employee.phone,
+      jobTitle: employee.job_title,
       department: employee.department,
       costCenter: employee.cost_center || demand.cost_center,
       sequence: Number(traveler.traveler_sequence),
@@ -3997,7 +4507,7 @@ async function loadOfflinePolicyTravelers(
   })
 }
 
-function demandDeclaresAirPassengerContract(demand: DemandRow): boolean {
+function demandDeclaresAirPassengerContract(demand: OfflinePolicyDemand): boolean {
   const metadata = objectValue(demand.metadata)
   const serviceAir = objectValue(objectValue(metadata.serviceDetails).air)
   const legacy = objectValue(metadata.legacySnapshot)
@@ -4828,6 +5338,18 @@ function dateOnly(value: unknown): string | undefined {
 function numberValue(value: unknown): number {
   const number = Number(value || 0)
   return Number.isFinite(number) ? number : 0
+}
+
+function positiveIntegerOrNull(value: unknown): number | null {
+  const number = Number(value)
+  return Number.isSafeInteger(number) && number > 0 ? number : null
+}
+
+function uuidOrNull(value: unknown): string | null {
+  const text = String(value || '').trim().toLowerCase()
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(text)
+    ? text
+    : null
 }
 
 function normalizedMoneyValue(value: unknown): number {

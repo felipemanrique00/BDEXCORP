@@ -1,6 +1,7 @@
 'use client'
 import { X } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 
 export function Modal({
@@ -16,21 +17,29 @@ export function Modal({
   children: React.ReactNode
   size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl'
 }) {
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
   useEffect(() => {
     function onEsc(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose()
     }
-    if (open) {
+    if (open && mounted) {
+      const previousOverflow = document.body.style.overflow
       document.addEventListener('keydown', onEsc)
       document.body.style.overflow = 'hidden'
+      return () => {
+        document.removeEventListener('keydown', onEsc)
+        document.body.style.overflow = previousOverflow
+      }
     }
-    return () => {
-      document.removeEventListener('keydown', onEsc)
-      document.body.style.overflow = ''
-    }
-  }, [open, onClose])
+    return undefined
+  }, [mounted, open, onClose])
 
-  if (!open) return null
+  if (!open || !mounted) return null
 
   const sizes = {
     sm: 'max-w-md',
@@ -40,7 +49,7 @@ export function Modal({
     '2xl': 'max-w-7xl',
   }
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in">
       <div
         className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
@@ -55,14 +64,17 @@ export function Modal({
         <div className="flex items-center justify-between p-5 border-b border-bbt-gray-100 dark:border-slate-700">
           <h2 className="text-lg font-bold text-bbt-primary dark:text-white">{title}</h2>
           <button
+            type="button"
             onClick={onClose}
             className="p-1 rounded-lg hover:bg-bbt-gray-50 dark:hover:bg-slate-700 text-slate-500 transition"
+            aria-label={`Fechar ${title}`}
           >
             <X className="w-5 h-5" />
           </button>
         </div>
         <div className="p-5 overflow-y-auto flex-1">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

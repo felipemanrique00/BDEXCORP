@@ -13,6 +13,7 @@ type VoucherCreateInput = Omit<
 
 export interface VoucherListClientFilters {
   companyId?: string
+  demandId?: string
   search?: string
   limit?: number
   offset?: number

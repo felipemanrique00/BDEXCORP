@@ -103,6 +103,7 @@ export interface ApprovalWorkflowDetail extends ApprovalWorkflowListItem {
 export async function fetchApprovalInstances(filters: {
   status?: string
   companyId?: string
+  demandId?: string
   assignedToMe?: boolean
   overdueOnly?: boolean
   search?: string
@@ -125,7 +126,7 @@ export async function fetchApprovalInstance(instanceId: string): Promise<Approva
 export async function decideApproval(
   assignmentId: string,
   input: {
-    decision: 'approved' | 'rejected' | 'abstained'
+    decision: 'approved' | 'rejected'
     reason: string
     expectedStepVersion: number
     idempotencyKey: string

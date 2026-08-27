@@ -16,6 +16,11 @@ const optionalTrimmedString = z.preprocess(
   emptyStringAsUndefined,
   z.string().trim().min(1).optional(),
 )
+const optionalWintourPin = z.preprocess(
+  emptyStringAsUndefined,
+  z.string().trim().regex(/^[\x21-\x7E]{1,128}$/).optional(),
+)
+const optionalUuid = z.preprocess(emptyStringAsUndefined, z.string().uuid().optional())
 const optionalUrl = z.preprocess(emptyStringAsUndefined, z.string().url().optional())
 const optionalEmail = z.preprocess(emptyStringAsUndefined, z.string().email().optional())
 const positiveInteger = z.coerce.number().int().positive()
@@ -33,6 +38,14 @@ const environmentSchema = z.object({
   AUTOMATION_WORKER_ENABLED: optionalBooleanValue.default(true),
   AUTOMATION_WORKER_INTERVAL_MS: positiveInteger.min(1_000).max(300_000).default(5_000),
   AUTOMATION_WORKER_BATCH_SIZE: positiveInteger.max(100).default(25),
+  WINTOUR_SYNC_ENABLED: optionalBooleanValue.default(false),
+  WINTOUR_TENANT_ID: optionalUuid,
+  WINTOUR_AUTO_SEND: optionalBooleanValue.default(false),
+  WINTOUR_PROTOCOL_POLL_ENABLED: optionalBooleanValue.default(false),
+  WINTOUR_PIN: optionalWintourPin,
+  WINTOUR_TIMEOUT_MS: positiveInteger.min(1_000).max(60_000).default(30_000),
+  WINTOUR_WORKER_INTERVAL_MS: positiveInteger.min(5_000).max(300_000).default(30_000),
+  WINTOUR_WORKER_BATCH_SIZE: positiveInteger.max(100).default(25),
   OFFLINE_TRAVEL_ENABLED: optionalBooleanValue.default(false),
   AUTH_SECRET: optionalString,
   AUTH_SESSION_HOURS: positiveInteger.max(24 * 30).default(12),
@@ -85,9 +98,24 @@ export function getServerEnvironment(): ServerEnvironment {
   }
 
   validateLocalMfaBypassEnvironment(parsed.data)
+  validateWintourEnvironment(parsed.data)
   validateProductionEnvironment(parsed.data)
   cachedEnvironment = parsed.data
   return cachedEnvironment
+}
+
+function validateWintourEnvironment(environment: ServerEnvironment): void {
+  const errors: string[] = []
+  if ((environment.WINTOUR_AUTO_SEND || environment.WINTOUR_PROTOCOL_POLL_ENABLED) && !environment.WINTOUR_SYNC_ENABLED) {
+    errors.push('WINTOUR_SYNC_ENABLED deve estar habilitado antes do envio ou consulta automatica')
+  }
+  if (environment.WINTOUR_SYNC_ENABLED && !environment.WINTOUR_PIN) {
+    errors.push('WINTOUR_PIN e obrigatorio quando WINTOUR_SYNC_ENABLED=true')
+  }
+  if (environment.WINTOUR_SYNC_ENABLED && !environment.WINTOUR_TENANT_ID) {
+    errors.push('WINTOUR_TENANT_ID e obrigatorio quando WINTOUR_SYNC_ENABLED=true')
+  }
+  if (errors.length) throw new Error(`Configuracao Wintour bloqueada: ${errors.join('; ')}`)
 }
 
 export function validateServerEnvironment(): void {

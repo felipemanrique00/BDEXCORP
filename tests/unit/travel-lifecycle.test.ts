@@ -234,6 +234,26 @@ describe('travel lifecycle machine', () => {
 
     expect(plan).toMatchObject({ fromStatus: 'pending_choice', toStatus: 'quoting', nextVersion: 9 })
   })
+
+  it('devolve escolha ou aprovacao de merito para ajuste somente com confirmacao humana', () => {
+    for (const status of ['pending_merit_approval', 'pending_choice'] as const) {
+      const current: TravelLifecycleRecord = { ...base, status, version: 9 }
+      const input: Partial<TravelTransitionInput> = {
+        current,
+        command: 'return_for_adjustment',
+        expectedVersion: 9,
+        idempotencyKey: `return-adjustment-${status}`,
+        requirements: { humanConfirmed: false },
+      }
+      expect(() => transition(input)).toThrowError(
+        expect.objectContaining({ code: 'HUMAN_CONFIRMATION_REQUIRED' }),
+      )
+      expect(transition({
+        ...input,
+        requirements: { humanConfirmed: true },
+      })).toMatchObject({ fromStatus: status, toStatus: 'submitted', nextVersion: 10 })
+    }
+  })
 })
 
 describe('travel reapproval', () => {

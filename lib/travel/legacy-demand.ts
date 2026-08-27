@@ -34,6 +34,7 @@ const legacyDemandSchema = z.object({
   detalhes_aereo: z.record(z.unknown()).optional(),
   detalhes_hotel: z.record(z.unknown()).optional(),
   detalhes_carro: z.record(z.unknown()).optional(),
+  detalhes_rodoviario: z.record(z.unknown()).optional(),
   detalhes_pacote: z.record(z.unknown()).optional(),
   origem_emissao: z.string().trim().max(120).optional(),
 }).passthrough()
@@ -111,12 +112,14 @@ function toRelationalDemand(input: z.infer<typeof legacyDemandSchema>): Relation
     input.detalhes_aereo?.data_ida,
     input.detalhes_hotel?.data_checkin,
     input.detalhes_carro?.data_retirada,
+    busFirstLegValue(input.detalhes_rodoviario, 'departureDate'),
     input.detalhes_pacote?.data_ida,
   )
   const endDate = firstDate(
     input.detalhes_aereo?.data_volta,
     input.detalhes_hotel?.data_checkout,
     input.detalhes_carro?.data_devolucao,
+    busLastLegValue(input.detalhes_rodoviario, 'departureDate'),
     input.detalhes_pacote?.data_volta,
   )
   const createdAt = timestamp(input.created_at || input.data_atendimento)
@@ -142,6 +145,7 @@ function toRelationalDemand(input: z.infer<typeof legacyDemandSchema>): Relation
       input.detalhes_aereo?.destino,
       input.detalhes_hotel?.cidade,
       input.detalhes_carro?.cidade_retirada,
+      busFirstLegSnapshotValue(input.detalhes_rodoviario, 'destination_city_name'),
       input.detalhes_pacote?.destino,
     ),
     costCenterId: input.cost_center_id || null,
@@ -175,6 +179,7 @@ function toRelationalDemand(input: z.infer<typeof legacyDemandSchema>): Relation
         air: input.detalhes_aereo || null,
         hotel: input.detalhes_hotel || null,
         car: input.detalhes_carro || null,
+        bus: input.detalhes_rodoviario || null,
         package: input.detalhes_pacote || null,
       },
     },
@@ -228,6 +233,33 @@ function normalize(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function busFirstLegValue(details: unknown, field: string): unknown {
+  const ground = recordProperty(details, 'ground')
+  const legs = Array.isArray(ground.legs) ? ground.legs : []
+  return propertyValue(legs[0], field)
+}
+
+function busLastLegValue(details: unknown, field: string): unknown {
+  const ground = recordProperty(details, 'ground')
+  const legs = Array.isArray(ground.legs) ? ground.legs : []
+  return propertyValue(legs[legs.length - 1], field)
+}
+
+function busFirstLegSnapshotValue(details: unknown, field: string): unknown {
+  const record = isRecord(details) ? details : {}
+  const snapshots = Array.isArray(record.leg_snapshots) ? record.leg_snapshots : []
+  return propertyValue(snapshots[0], field)
+}
+
+function recordProperty(value: unknown, field: string): Record<string, unknown> {
+  const nested = isRecord(value) ? value[field] : null
+  return isRecord(nested) ? nested : {}
+}
+
+function propertyValue(value: unknown, field: string): unknown {
+  return isRecord(value) ? value[field] : undefined
 }
 
 function firstDate(...values: unknown[]): string | null {

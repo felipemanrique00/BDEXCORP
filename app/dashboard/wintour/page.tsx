@@ -68,6 +68,7 @@ import {
 } from '@/lib/storage-quota'
 import { criarSequenciadorCodigoIdentificacao } from '@/lib/funcionario-identidade'
 import { createEntityId } from '@/lib/ids'
+import { WintourOutboundPanel } from '@/components/wintour/wintour-outbound-panel'
 
 type ImportOutcome = { criadas: number; atualizadas: number; ignoradas: number; erros: number; empresas: number; funcionarios: number; hoteis: number; vouchers: number; financeiro: number }
 const PREVIEW_LIMIT = 300
@@ -158,6 +159,7 @@ function mapTipoApto(value?: string): 'SGL' | 'DBL' | 'TPL' | undefined {
 export default function WintourPage() {
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const { empresas, funcionarios, adicionarCadastrosEmLote } = useStore()
+  const [integrationDirection, setIntegrationDirection] = useState<'inbound' | 'outbound'>('inbound')
   const [arquivo, setArquivo] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
   const [resultado, setResultado] = useState<WintourImportResult | null>(null)
@@ -173,6 +175,14 @@ export default function WintourPage() {
   const [emissorSavingCode, setEmissorSavingCode] = useState<string | null>(null)
 
   const podeImportar = !user || hasPermission(user, 'importar_planilhas')
+  const podeGerenciarSaida = Boolean(
+    user
+    && hasPermission(user, 'gerenciar_integracoes'),
+  )
+  const podeConfigurarSaida = Boolean(
+    podeGerenciarSaida
+    && (user?.platform_admin || user?.role_key === 'tenant_admin'),
+  )
   const agentesBBT = useMemo(() => getAgentesBBT(), [])
   const emissoresDetectados = useMemo(() => {
     const byCodigo = new Map<string, { codigo: string; nome: string; qtd: number }>()
@@ -897,11 +907,38 @@ export default function WintourPage() {
             <Database className="w-6 h-6 text-bbt-accent" /> Wintour
           </h1>
           <p className="bbt-page-subtitle">
-            Importe vendas/emissoes do dia para alimentar demandas, financeiro, vouchers e consultas da IA.
+            Importe vendas do Wintour ou prepare emissões do BBT para envio, com filas e protocolos separados.
           </p>
         </div>
       </div>
 
+      <div className="flex flex-wrap gap-2 rounded-xl border border-bbt-gray-100 bg-white p-2 dark:border-slate-700 dark:bg-slate-900" role="tablist" aria-label="Direção da integração Wintour">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={integrationDirection === 'inbound'}
+          onClick={() => setIntegrationDirection('inbound')}
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${integrationDirection === 'inbound' ? 'bg-bbt-accent text-white' : 'text-slate-600 hover:bg-bbt-gray-50 dark:text-slate-300 dark:hover:bg-slate-800'}`}
+        >
+          <FileSpreadsheet className="h-4 w-4" /> Importar do Wintour
+        </button>
+        {podeGerenciarSaida && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={integrationDirection === 'outbound'}
+            onClick={() => setIntegrationDirection('outbound')}
+            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${integrationDirection === 'outbound' ? 'bg-bbt-accent text-white' : 'text-slate-600 hover:bg-bbt-gray-50 dark:text-slate-300 dark:hover:bg-slate-800'}`}
+          >
+            <Upload className="h-4 w-4" /> Enviar ao Wintour
+          </button>
+        )}
+      </div>
+
+      {integrationDirection === 'outbound' ? (
+        <WintourOutboundPanel canManage={podeGerenciarSaida} canConfigure={podeConfigurarSaida} />
+      ) : (
+        <>
       <div className="grid grid-cols-1 lg:grid-cols-[1.4fr_.9fr] gap-4">
         <div className="bbt-card p-5 space-y-4">
           <div className="flex items-start gap-3">
@@ -1166,6 +1203,8 @@ export default function WintourPage() {
             </div>
           )}
         </div>
+      )}
+        </>
       )}
     </div>
   )

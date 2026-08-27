@@ -27,9 +27,13 @@ export async function createOfflineReservationFromServer(
 export async function issueOfflineReservationFromServer(
   reservationId: string,
   input: OfflineIssueCreateInput,
+  options: { corporateMode?: boolean } = {},
 ): Promise<OfflineIssueResult> {
+  const basePath = options.corporateMode
+    ? '/api/company-portal/offline-travel'
+    : '/api/offline-travel'
   return request<OfflineIssueResult>(
-    `/api/offline-travel/reservations/${encodeURIComponent(reservationId)}/issue`,
+    `${basePath}/reservations/${encodeURIComponent(reservationId)}/issue`,
     'POST',
     input,
   )

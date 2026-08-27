@@ -265,9 +265,16 @@ export async function listOfflineAirQuotes(
     const demandResult = await client.query<Pick<AirDemandRow,
       'company_id' | 'requester_id' | 'lifecycle_status' | 'lifecycle_version'
     >>(
-      `select company_id, requester_id, lifecycle_status, lifecycle_version
-       from demands
-       where tenant_id = $1 and id = $2 and deleted_at is null`,
+      `select demand.company_id, demand.requester_id,
+              demand.lifecycle_status, demand.lifecycle_version
+       from demands demand
+       where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
+         and (demand.travel_order_id is null or exists (
+           select 1 from company_portal_travel_orders visible_order
+           where visible_order.tenant_id = demand.tenant_id
+             and visible_order.id = demand.travel_order_id
+             and visible_order.status = 'submitted'
+         ))`,
       [principal.tenantId, normalizedDemandId],
     )
     const demand = demandResult.rows[0]
@@ -339,7 +346,13 @@ async function prepareAirQuote(
        from demands demand
        join air_demand_details detail
          on detail.tenant_id = demand.tenant_id and detail.demand_id = demand.id
-       where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null`,
+       where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
+         and (demand.travel_order_id is null or exists (
+           select 1 from company_portal_travel_orders visible_order
+           where visible_order.tenant_id = demand.tenant_id
+             and visible_order.id = demand.travel_order_id
+             and visible_order.status = 'submitted'
+         ))`,
       [principal.tenantId, input.demandId],
     )
     const demand = demandResult.rows[0]
@@ -661,6 +674,12 @@ async function loadAirQuoteRows(
      left join approval_instances approval
        on approval.tenant_id = selection.tenant_id and approval.id = selection.approval_instance_id
      where quote.tenant_id = $1 and quote.demand_id = $2
+       and (demand.travel_order_id is null or exists (
+         select 1 from company_portal_travel_orders visible_order
+         where visible_order.tenant_id = demand.tenant_id
+           and visible_order.id = demand.travel_order_id
+           and visible_order.status = 'submitted'
+       ))
        and quote.provider = $3 and quote.service_type = 'aereo'
        and ($4::uuid is null or quote.id = $4::uuid)
      order by quote.created_at desc, quote.id, option_row.created_at,

@@ -18,17 +18,28 @@ import {
   type OfflineQuoteSelectionReadModel,
 } from '@/lib/offline-travel/quote-schema'
 import { sha256, type PolicyEvaluationResult, type PolicyScopeContext } from '@/lib/policy'
+import {
+  demandRequestAdjustmentAllows,
+  readDemandRequestAdjustment,
+  resolveDemandRequestAdjustment,
+} from '@/lib/demands/request-adjustment'
 import { offlinePolicyCoverageFingerprint } from '@/lib/offline-travel/policy-coverage'
-import { createApprovalInstance } from '@/lib/server/approval-service'
+import { createTrustedApprovalInstance } from '@/lib/server/approval-service'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import { evaluateAndPersistPoliciesInTransaction } from '@/lib/server/policy-service'
+import { resolvePolicyApprovalWorkflowCode } from '@/lib/server/policy-approval-workflow'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import {
   executeGovernedTravelQuote,
   TravelGovernanceError,
 } from '@/lib/server/travel-governance-service'
 import { persistTravelTransitionInTransaction } from '@/lib/server/travel-lifecycle-persistence'
+import {
+  realActorUserId,
+  requireActiveOperateRepresentation,
+  SupportRepresentationError,
+} from '@/lib/server/support-representation-service'
 import type {
   TravelLifecycleRecord,
   TravelLifecycleStatus,
@@ -51,6 +62,8 @@ interface QuoteDemandRow extends QueryResultRow {
   company_id: string
   group_id: string | null
   requester_id: string | null
+  requester_user_id: string | null
+  created_by: string
   employee_id: string | null
   demand_number: string
   service_type: string
@@ -125,6 +138,26 @@ interface CatalogRateRow extends QueryResultRow {
   inside_validity: boolean
 }
 
+interface EmissionRateObservationRow extends QueryResultRow {
+  id: string
+  emission_id: string
+  company_id: string
+  hotel_id: string
+  hotel_supplier_id: string
+  supplier_id: string
+  room_category: string
+  occupancy_code: string
+  nightly_amount: string | number
+  nightly_tax_amount: string | number
+  service_fee_amount: string | number
+  currency: string
+  refundable: boolean | null
+  meal_plan: string | null
+  cancellation_policy: string | null
+  payment_terms: string | null
+  supplier_matches_quote: boolean
+}
+
 interface PreparedHotelOption {
   clientId: string
   providerOptionId: string
@@ -138,8 +171,9 @@ interface PreparedHotelOption {
   supplierId: string
   supplierName: string
   supplierCode: string
-  pricingMode: 'catalog' | 'manual_override' | 'manual'
+  pricingMode: 'catalog' | 'manual_override' | 'last_emission' | 'manual'
   rateReference: { id: string; version: number } | null
+  emissionObservationReference: { id: string } | null
   rateOutsideValidity: boolean
   outOfPeriodPolicy: 'block' | 'warn' | 'allow'
   roomCategory: string
@@ -236,6 +270,9 @@ interface SelectionContextRow extends QueryResultRow {
   cancellation_policy: string | null
   payment_terms: string | null
   hotel_metadata: Record<string, unknown> | null
+  car_details: Record<string, unknown> | null
+  bus_details: Record<string, unknown> | null
+  bus_segments: unknown
   is_current_round: boolean
 }
 
@@ -249,6 +286,20 @@ interface ExistingSelectionRow extends QueryResultRow {
   approval_instance_id: string | null
   version: string | number
   chosen_at: string | Date
+  chosen_by: string
+  acting_for_requester_id: string | null
+  acting_for_user_id: string | null
+  impersonation_id: string | null
+  selection_source: 'requester_direct' | 'support_assisted'
+}
+
+interface SelectionActorContext {
+  actorUserId: string
+  requesterUserId: string
+  actingForRequesterId: string | null
+  actingForUserId: string | null
+  impersonationId: string | null
+  source: 'requester_direct' | 'support_assisted'
 }
 
 interface SelectionPreparation {
@@ -263,6 +314,7 @@ interface SelectionPreparation {
   workflowCode: string | null
   requirements: TravelTransitionRequirements
   subject: Record<string, unknown>
+  actor: SelectionActorContext
 }
 
 export interface OfflineHotelQuoteCreationResult {
@@ -329,6 +381,7 @@ export async function createOfflineHotelQuote(
       supplierCode: option.supplierCode,
       pricingMode: option.pricingMode,
       rateReference: option.rateReference,
+      emissionObservationReference: option.emissionObservationReference,
     },
   }))
 
@@ -387,9 +440,16 @@ export async function listOfflineHotelQuotes(
     const demandResult = await client.query<Pick<QuoteDemandRow,
       'company_id' | 'requester_id' | 'lifecycle_status' | 'lifecycle_version'
     >>(
-      `select company_id, requester_id, lifecycle_status, lifecycle_version
-       from demands
-       where tenant_id = $1 and id = $2 and deleted_at is null`,
+      `select demand.company_id, demand.requester_id,
+              demand.lifecycle_status, demand.lifecycle_version
+       from demands demand
+       where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
+         and (demand.travel_order_id is null or exists (
+           select 1 from company_portal_travel_orders visible_order
+           where visible_order.tenant_id = demand.tenant_id
+             and visible_order.id = demand.travel_order_id
+             and visible_order.status = 'submitted'
+         ))`,
       [principal.tenantId, normalizedDemandId],
     )
     const demand = demandResult.rows[0]
@@ -465,6 +525,12 @@ async function loadOfflineHotelQuoteRows(
        on approval.tenant_id = selection.tenant_id
       and approval.id = selection.approval_instance_id
      where quote.tenant_id = $1 and quote.demand_id = $2
+       and (demand.travel_order_id is null or exists (
+         select 1 from company_portal_travel_orders visible_order
+         where visible_order.tenant_id = demand.tenant_id
+           and visible_order.id = demand.travel_order_id
+           and visible_order.status = 'submitted'
+       ))
        and quote.provider = $3 and quote.service_type = 'hotelaria'
        and quote.request_payload #>> '{raw,manualOffline}' = 'true'
        and ($5::uuid is null or quote.id = $5::uuid)
@@ -489,7 +555,7 @@ export async function selectOfflineQuoteOption(
     })
   }
 
-  const approval = await createApprovalInstance(principal, {
+  const approval = await createTrustedApprovalInstance(principal, {
     workflowCode: preparation.workflowCode,
     companyId: preparation.demand.company_id,
     demandId: preparation.demand.id,
@@ -625,6 +691,89 @@ async function prepareHotelQuote(
         )).rows
       : []
     const catalogRateById = new Map(catalogRates.map((rate) => [rate.id, rate]))
+    const emissionObservationReferences = input.options.flatMap((option) => (
+      option.emissionObservationReference ? [option.emissionObservationReference.id] : []
+    ))
+    const emissionObservations = emissionObservationReferences.length
+      ? (await client.query<EmissionRateObservationRow>(
+          `select observation.id, observation.emission_id, observation.company_id,
+                  observation.hotel_id, observation.hotel_supplier_id,
+                  observation.supplier_id, observation.room_category,
+                  observation.occupancy_code::text,
+                  observation.nightly_amount, observation.nightly_tax_amount,
+                  0::numeric as service_fee_amount, observation.currency,
+                  observation.refundable, observation.meal_plan,
+                  observation.cancellation_policy, observation.payment_terms,
+                  observation.supplier_matches_quote
+           from hotel_emission_rate_observations observation
+           join travel_emissions emission
+             on emission.tenant_id = observation.tenant_id
+            and emission.id = observation.emission_id
+            and emission.status in ('issued', 'partially_issued')
+           where observation.tenant_id = $1
+             and observation.id = any($2::uuid[])
+             and observation.company_id = $3
+             and observation.supplier_matches_quote
+             and observation.currency = 'BRL'
+             and observation.issued_at >= now() - interval '180 days'
+             and observation.issued_at <= now() + interval '1 day'
+             and extract(month from observation.stay_start) = extract(month from $4::date)
+             and not exists (
+               select 1
+                 from hotel_supplier_rates current_rate
+                 join hotel_suppliers current_link
+                   on current_link.tenant_id = current_rate.tenant_id
+                  and current_link.hotel_id = current_rate.hotel_id
+                  and current_link.id = current_rate.hotel_supplier_id
+                  and current_link.is_active and current_link.ended_at is null
+                 join hotel_room_types current_room
+                   on current_room.tenant_id = current_rate.tenant_id
+                  and current_room.hotel_id = current_rate.hotel_id
+                  and current_room.id = current_rate.room_type_id
+                  and current_room.is_active and current_room.deleted_at is null
+                where current_rate.tenant_id = observation.tenant_id
+                  and current_rate.hotel_id = observation.hotel_id
+                  and current_rate.hotel_supplier_id = observation.hotel_supplier_id
+                  and current_rate.is_active and not current_rate.is_suspended
+                  and current_rate.currency = 'BRL'
+                  and (
+                    (current_rate.valid_from <= $4::date
+                     and current_rate.valid_until >= ($5::date - 1))
+                    or current_link.out_of_period_policy in ('warn', 'allow')
+                  )
+                  and current_room.occupancy_type = case
+                    when lower(observation.occupancy_code::text) = 'couple' then 'double'
+                    else lower(observation.occupancy_code::text)
+                  end
+                  and (
+                    current_rate.scope_type = 'global'
+                    or exists (
+                      select 1
+                        from hotel_supplier_rate_scopes current_scope
+                       where current_scope.tenant_id = current_rate.tenant_id
+                         and current_scope.rate_id = current_rate.id
+                         and current_scope.deleted_at is null
+                         and (
+                           (current_scope.scope_type = 'company'
+                            and current_scope.company_id = $3)
+                           or (current_scope.scope_type = 'group'
+                               and $6::text is not null
+                               and current_scope.business_group_id = $6)
+                         )
+                    )
+                  )
+             )`,
+          [
+            principal.tenantId,
+            emissionObservationReferences,
+            demand.company_id,
+            checkIn,
+            checkOut,
+            demand.group_id,
+          ],
+        )).rows
+      : []
+    const emissionObservationById = new Map(emissionObservations.map((item) => [item.id, item]))
 
     const options = input.options.map((option): PreparedHotelOption => {
       const candidates = hotelRowsById.get(option.hotelId) || []
@@ -633,6 +782,7 @@ async function prepareHotelQuote(
       const nightlyTaxesMinor = moneyToMinorUnits(option.nightlyTaxes || 0)
       const serviceFeeMinor = moneyToMinorUnits(option.serviceFee || 0)
       const rateReference = option.rateReference || null
+      const emissionObservationReference = option.emissionObservationReference || null
       if (rateReference) {
         const rate = catalogRateById.get(rateReference.id)
         if (!rate
@@ -691,6 +841,54 @@ async function prepareHotelQuote(
           }
         }
       }
+      if (emissionObservationReference) {
+        const observation = emissionObservationById.get(emissionObservationReference.id)
+        if (!observation
+          || observation.company_id !== demand.company_id
+          || observation.hotel_id !== option.hotelId
+          || observation.hotel_supplier_id !== hotel.hotel_supplier_id
+          || observation.supplier_id !== hotel.supplier_id
+          || !observation.supplier_matches_quote) {
+          throw new TravelGovernanceError(
+            'OFFLINE_QUOTE_EMISSION_RATE_STALE',
+            'A ultima emissao nao esta mais elegivel para esta oferta. Consulte as sugestoes novamente.',
+            409,
+            { observationId: emissionObservationReference.id },
+          )
+        }
+        const incompatibleRoom = rooms.find((room) => (
+          normalizeOccupancyType(room.occupancy_code) !== normalizeOccupancyType(observation.occupancy_code)
+        ))
+        if (incompatibleRoom) {
+          throw new TravelGovernanceError(
+            'OFFLINE_QUOTE_EMISSION_RATE_OCCUPANCY_MISMATCH',
+            'A ultima emissao nao atende a ocupacao de todos os quartos da demanda.',
+            422,
+            { observationId: observation.id, demandRoomId: incompatibleRoom.id },
+          )
+        }
+        const observedValues = [
+          moneyToMinorUnits(observation.nightly_amount),
+          moneyToMinorUnits(observation.nightly_tax_amount),
+          moneyToMinorUnits(observation.service_fee_amount),
+        ]
+        const observedFieldsMatch = observedValues[0] === nightlyRateMinor
+          && observedValues[1] === nightlyTaxesMinor
+          && observedValues[2] === serviceFeeMinor
+          && option.roomCategory.trim() === observation.room_category.trim()
+          && nullableText(option.mealPlan) === nullableText(observation.meal_plan)
+          && option.refundable === (observation.refundable === true)
+          && nullableText(option.cancellationPolicy) === nullableText(observation.cancellation_policy)
+          && nullableText(option.paymentTerms) === nullableText(observation.payment_terms)
+        if (!observedFieldsMatch) {
+          throw new TravelGovernanceError(
+            'OFFLINE_QUOTE_EMISSION_RATE_CHANGED',
+            'Os valores ou condicoes foram alterados. Reaplique a ultima emissao ou use preenchimento manual.',
+            409,
+            { observationId: observation.id },
+          )
+        }
+      }
       const roomCount = rooms.length
       const taxesSubtotalMinor = nightlyTaxesMinor * nights * roomCount
       const calculated = calculateHotelQuote({
@@ -725,6 +923,7 @@ async function prepareHotelQuote(
         supplierCode: hotel.supplier_code,
         pricingMode: option.pricingMode,
         rateReference,
+        emissionObservationReference,
         rateOutsideValidity: rateReference
           ? !catalogRateById.get(rateReference.id)!.inside_validity
           : false,
@@ -793,6 +992,7 @@ async function persistHotelOptionDetails(
           hotelSupplierId: option.hotelSupplierId,
           pricingMode: option.pricingMode,
           rateReference: option.rateReference,
+          emissionObservationReference: option.emissionObservationReference,
           rateOutsideValidity: option.rateOutsideValidity,
           outOfPeriodPolicy: option.outOfPeriodPolicy,
           refundable: option.refundable,
@@ -903,9 +1103,14 @@ async function prepareSelection(
   input: OfflineQuoteSelectionInput,
 ): Promise<SelectionPreparation | { replay: OfflineQuoteSelectionResult }> {
   return withTenantTransaction(principal.tenantId, async (client) => {
+    const demand = await loadQuoteDemand(client, principal.tenantId, input.demandId, true)
+    await requireCompanyAccess(principal, demand.company_id, 'criar_demandas')
+    const actor = await authorizeSelectionActor(client, principal, demand)
     const existingByKey = await client.query<ExistingSelectionRow>(
       `select id, demand_id, quote_id, option_id, status, snapshot_hash,
-              approval_instance_id, version, chosen_at
+              approval_instance_id, version, chosen_at, chosen_by,
+              acting_for_requester_id, acting_for_user_id, impersonation_id,
+              selection_source
        from travel_quote_selections
        where tenant_id = $1 and idempotency_key = $2
        for update`,
@@ -913,16 +1118,19 @@ async function prepareSelection(
     )
     if (existingByKey.rows[0]) {
       const existing = existingByKey.rows[0]
-      if (existing.demand_id !== input.demandId || existing.quote_id !== input.quoteId || existing.option_id !== input.optionId) {
+      if (existing.demand_id !== input.demandId
+          || existing.quote_id !== input.quoteId
+          || existing.option_id !== input.optionId
+          || existing.chosen_by !== actor.actorUserId
+          || existing.acting_for_requester_id !== actor.actingForRequesterId
+          || existing.acting_for_user_id !== actor.actingForUserId
+          || existing.impersonation_id !== actor.impersonationId
+          || existing.selection_source !== actor.source) {
         throw new TravelGovernanceError('OFFLINE_SELECTION_IDEMPOTENCY_CONFLICT', 'A chave de idempotencia pertence a outra escolha.', 409)
       }
-      const demand = await loadQuoteDemand(client, principal.tenantId, input.demandId, true)
       return { replay: selectionResult(existing, demand, true) }
     }
 
-    const demand = await loadQuoteDemand(client, principal.tenantId, input.demandId, true)
-    await requireCompanyAccess(principal, demand.company_id, 'criar_demandas')
-    await assertRequesterOwnsDemand(client, principal, demand)
     const option = await loadSelectionContext(client, principal.tenantId, input)
     if (option.demand_id !== demand.id || option.company_id !== demand.company_id) {
       throw new TravelGovernanceError('OFFLINE_SELECTION_SCOPE_MISMATCH', 'A cotacao nao pertence a demanda informada.', 409)
@@ -1036,7 +1244,7 @@ async function prepareSelection(
         )
       : null
     const workflowCode = approvalsRequired.length
-      ? await resolveApprovalWorkflowCode(client, principal.tenantId, policyResults)
+      ? await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policyResults)
       : null
     if (approvalsRequired.length && !workflowCode) {
       throw new TravelGovernanceError(
@@ -1068,7 +1276,15 @@ async function prepareSelection(
       policyResult: policy.result,
       workflowCode,
       requirements,
+      actor,
       subject: {
+        requesterUserId: actor.requesterUserId,
+        assistedActorUserId: actor.source === 'support_assisted' ? actor.actorUserId : null,
+        conflictedUserIds: Array.from(new Set([
+          demand.created_by,
+          ...(actor.source === 'support_assisted' ? [actor.actorUserId] : []),
+        ].filter(Boolean))),
+        lastEditorUserId: actor.source === 'support_assisted' ? actor.actorUserId : demand.created_by,
         amount: numberValue(option.amount),
         currency: option.currency,
         urgent: demand.priority === 'urgent',
@@ -1111,8 +1327,9 @@ async function persistSelection(
     `insert into travel_quote_selections (
        id, tenant_id, demand_id, quote_id, option_id, status,
        snapshot, snapshot_hash, approval_instance_id, chosen_by,
-       idempotency_key
-     ) values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
+       idempotency_key, acting_for_requester_id, acting_for_user_id,
+       impersonation_id, selection_source
+     ) values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15)
      returning chosen_at`,
     [
       preparation.selectionId,
@@ -1124,8 +1341,12 @@ async function persistSelection(
       JSON.stringify(preparation.snapshot),
       preparation.snapshotHash,
       approvalInstanceId,
-      principal.user.id,
+      preparation.actor.actorUserId,
       preparation.input.idempotencyKey,
+      preparation.actor.actingForRequesterId,
+      preparation.actor.actingForUserId,
+      preparation.actor.impersonationId,
+      preparation.actor.source,
     ],
   )
   const requirements: TravelTransitionRequirements = {
@@ -1149,6 +1370,10 @@ async function persistSelection(
         quoteOptionId: preparation.option.option_id,
         snapshotHash: preparation.snapshotHash,
         approvalInstanceId,
+        actorUserId: preparation.actor.actorUserId,
+        actingForUserId: preparation.actor.actingForUserId,
+        impersonationId: preparation.actor.impersonationId,
+        selectionSource: preparation.actor.source,
       },
     },
   )
@@ -1171,7 +1396,7 @@ async function persistSelection(
     `update travel_quote_options set selected_at = coalesce(selected_at, now()),
        selected_by = coalesce(selected_by, $4)
      where tenant_id = $1 and quote_id = $2 and id = $3`,
-    [principal.tenantId, preparation.option.quote_id, preparation.option.option_id, principal.user.id],
+    [principal.tenantId, preparation.option.quote_id, preparation.option.option_id, preparation.actor.actorUserId],
   )
   await client.query(
     `update travel_quotes set status = 'selected', updated_at = now()
@@ -1181,15 +1406,57 @@ async function persistSelection(
   await client.query(
     `update demands set final_amount = $3, updated_by = $4, updated_at = now()
      where tenant_id = $1 and id = $2`,
-    [principal.tenantId, demand.id, numberValue(preparation.option.amount), principal.user.id],
+    [principal.tenantId, demand.id, numberValue(preparation.option.amount), preparation.actor.actorUserId],
   )
+  if (demandRequestAdjustmentAllows(demand.metadata, 'choose_another_option')) {
+    const adjustment = readDemandRequestAdjustment(demand.metadata)
+    if (adjustment) {
+      const resolvedAdjustment = resolveDemandRequestAdjustment(adjustment, {
+        resolvedAt: new Date().toISOString(),
+        resolvedBy: preparation.actor.actorUserId,
+        resolution: 'new_option_selected',
+        resolutionReason: 'Uma nova opcao foi escolhida depois da rejeicao da aprovacao.',
+      })
+      await client.query(
+        `update demands
+         set metadata = coalesce(metadata, '{}'::jsonb)
+               || jsonb_build_object('requestAdjustment', $3::jsonb),
+             updated_by = $4,
+             updated_at = now()
+         where tenant_id = $1 and id = $2`,
+        [
+          principal.tenantId,
+          demand.id,
+          JSON.stringify(resolvedAdjustment),
+          preparation.actor.actorUserId,
+        ],
+      )
+      await client.query(
+        `insert into audit_logs (
+           tenant_id, actor_user_id, action, entity_type, entity_id, result, metadata
+         ) values ($1, $2, 'travel.demand.adjustment.resolved', 'demand', $3, 'success', $4::jsonb)`,
+        [
+          principal.tenantId,
+          preparation.actor.actorUserId,
+          demand.id,
+          JSON.stringify({
+            resolution: 'new_option_selected',
+            approvalInstanceId: adjustment.approvalInstanceId,
+            selectionId: preparation.selectionId,
+            quoteId: preparation.option.quote_id,
+            quoteOptionId: preparation.option.option_id,
+          }),
+        ],
+      )
+    }
+  }
   await client.query(
     `insert into audit_logs (
        tenant_id, actor_user_id, action, entity_type, entity_id, result, metadata
      ) values ($1, $2, 'travel.quote.selected', 'travel_quote_selection', $3, 'success', $4::jsonb)`,
     [
       principal.tenantId,
-      principal.user.id,
+      preparation.actor.actorUserId,
       preparation.selectionId,
       JSON.stringify({
         demandId: demand.id,
@@ -1197,6 +1464,10 @@ async function persistSelection(
         optionId: preparation.option.option_id,
         snapshotHash: preparation.snapshotHash,
         approvalInstanceId,
+        actingForRequesterId: preparation.actor.actingForRequesterId,
+        actingForUserId: preparation.actor.actingForUserId,
+        impersonationId: preparation.actor.impersonationId,
+        selectionSource: preparation.actor.source,
       }),
     ],
   )
@@ -1221,7 +1492,7 @@ async function loadQuoteDemand(
   forUpdate: boolean,
 ): Promise<QuoteDemandRow> {
   const result = await client.query<QuoteDemandRow>(
-    `select demand.*, company.group_id,
+    `select demand.*, company.group_id, requester.user_id as requester_user_id,
             coalesce(company.trade_name, company.legal_name) as company_name,
             employee.full_name as employee_name,
             employee.department as employee_department,
@@ -1244,6 +1515,7 @@ async function loadQuoteDemand(
                 'firstName', traveler.first_name_snapshot,
                 'lastName', traveler.last_name_snapshot,
                 'sequence', traveler.traveler_sequence,
+                'isExternal', traveler.is_external,
                 'employeeActive', traveler_employee.id is not null,
                 'department', traveler_employee.department,
                 'costCenter', traveler_employee.cost_center
@@ -1264,6 +1536,12 @@ async function loadQuoteDemand(
      from demands demand
      join companies company
        on company.tenant_id = demand.tenant_id and company.id = demand.company_id
+     left join requesters requester
+       on requester.tenant_id = demand.tenant_id
+      and requester.id = demand.requester_id
+      and requester.company_id = demand.company_id
+      and requester.status = 'active'
+      and requester.deleted_at is null
      left join employees employee
        on employee.tenant_id = demand.tenant_id
       and employee.company_id = demand.company_id
@@ -1274,6 +1552,12 @@ async function loadQuoteDemand(
        on detail.tenant_id = demand.tenant_id and detail.demand_id = demand.id
      left join geo_cities city on city.id = detail.city_id
      where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
+       and (demand.travel_order_id is null or exists (
+         select 1 from company_portal_travel_orders visible_order
+         where visible_order.tenant_id = demand.tenant_id
+           and visible_order.id = demand.travel_order_id
+           and visible_order.status = 'submitted'
+       ))
      ${forUpdate ? 'for update of demand' : ''}`,
     [tenantId, demandId],
   )
@@ -1302,6 +1586,40 @@ async function loadSelectionContext(
             hotel.address as hotel_address, hotel.phone as hotel_phone,
             detail.room_category, detail.meal_plan, detail.cancellation_policy,
             detail.payment_terms, detail.metadata as hotel_metadata,
+            case when car.quote_option_id is null then null else
+              to_jsonb(car) || jsonb_build_object(
+                'pickupLocationName', pickup.name,
+                'returnLocationName', returned.name,
+                'supplierName', coalesce(car_supplier.trade_name, car_supplier.legal_name)
+              )
+            end as car_details,
+            case when bus.quote_option_id is null then null else
+              to_jsonb(bus) || jsonb_build_object(
+                'routeCode', route.route_code::text,
+                'supplierName', coalesce(bus_supplier.trade_name, bus_supplier.legal_name)
+              )
+            end as bus_details,
+            coalesce((
+              select jsonb_agg(
+                to_jsonb(segment) || jsonb_build_object(
+                  'originCityName', origin_city.name,
+                  'destinationCityName', destination_city.name,
+                  'originTerminalName', origin_terminal.name,
+                  'destinationTerminalName', destination_terminal.name
+                ) order by segment.sequence
+              )
+              from bus_quote_segments segment
+              join geo_cities origin_city on origin_city.id = segment.origin_city_id
+              join geo_cities destination_city on destination_city.id = segment.destination_city_id
+              left join bus_terminals origin_terminal
+                on origin_terminal.tenant_id = segment.tenant_id
+               and origin_terminal.id = segment.origin_terminal_id
+              left join bus_terminals destination_terminal
+                on destination_terminal.tenant_id = segment.tenant_id
+               and destination_terminal.id = segment.destination_terminal_id
+              where segment.tenant_id = option_row.tenant_id
+                and segment.quote_option_id = option_row.id
+            ), '[]'::jsonb) as bus_segments,
             not exists (
               select 1
               from audit_logs supersession
@@ -1330,6 +1648,20 @@ async function loadSelectionContext(
        on detail.tenant_id = option_row.tenant_id and detail.quote_option_id = option_row.id
      left join hotels hotel
        on hotel.tenant_id = detail.tenant_id and hotel.id = detail.hotel_id
+     left join car_quote_option_details car
+       on car.tenant_id = option_row.tenant_id and car.quote_option_id = option_row.id
+     left join rental_locations pickup
+       on pickup.tenant_id = car.tenant_id and pickup.id = car.pickup_location_id
+     left join rental_locations returned
+       on returned.tenant_id = car.tenant_id and returned.id = car.return_location_id
+     left join commercial_suppliers car_supplier
+       on car_supplier.tenant_id = car.tenant_id and car_supplier.id = car.supplier_id
+     left join bus_quote_option_details bus
+       on bus.tenant_id = option_row.tenant_id and bus.quote_option_id = option_row.id
+     left join bus_routes route
+       on route.tenant_id = bus.tenant_id and route.id = bus.route_id
+     left join commercial_suppliers bus_supplier
+       on bus_supplier.tenant_id = bus.tenant_id and bus_supplier.id = bus.supplier_id
      where quote.tenant_id = $1 and quote.id = $2 and option_row.id = $3
        and quote.demand_id = $4 and quote.provider = $5
      for update of quote, option_row`,
@@ -1339,6 +1671,70 @@ async function loadSelectionContext(
     throw new TravelGovernanceError('OFFLINE_QUOTE_OPTION_NOT_FOUND', 'Cotacao ou opcao nao encontrada para esta demanda.', 404)
   }
   return result.rows[0]
+}
+
+async function authorizeSelectionActor(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demand: Pick<QuoteDemandRow, 'requester_id' | 'requester_user_id' | 'company_id'>,
+): Promise<SelectionActorContext> {
+  if (!demand.requester_id || !demand.requester_user_id) {
+    throw new TravelGovernanceError(
+      'OFFLINE_SELECTION_REQUESTER_REQUIRED',
+      'A demanda nao possui um solicitante com acesso ativo para registrar a escolha.',
+      422,
+    )
+  }
+  if (principal.representation) {
+    try {
+      const representation = await requireActiveOperateRepresentation(client, principal, {
+        action: 'quote.select',
+        companyId: demand.company_id,
+        targetUserId: demand.requester_user_id,
+      })
+      return {
+        actorUserId: representation.actorUserId,
+        requesterUserId: representation.targetUserId,
+        actingForRequesterId: demand.requester_id,
+        actingForUserId: representation.targetUserId,
+        impersonationId: representation.id,
+        source: 'support_assisted',
+      }
+    } catch (error) {
+      if (error instanceof SupportRepresentationError) {
+        throw new TravelGovernanceError(error.code, error.message, error.status)
+      }
+      throw error
+    }
+  }
+  if (principal.platformAdmin || ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'].includes(principal.roleKey)) {
+    throw new TravelGovernanceError(
+      'OFFLINE_SELECTION_REPRESENTATION_REQUIRED',
+      'Um usuario interno deve iniciar uma personificacao operacional para escolher em nome do solicitante.',
+      403,
+    )
+  }
+  const result = await client.query(
+    `select 1 from requesters
+     where tenant_id = $1 and id = $2 and company_id = $3
+       and user_id = $4 and status = 'active' and deleted_at is null`,
+    [principal.tenantId, demand.requester_id, demand.company_id, principal.user.id],
+  )
+  if (!result.rows[0]) {
+    throw new TravelGovernanceError(
+      'OFFLINE_SELECTION_REQUESTER_MISMATCH',
+      'Somente o solicitante responsavel pode escolher uma opcao para esta demanda.',
+      403,
+    )
+  }
+  return {
+    actorUserId: realActorUserId(principal),
+    requesterUserId: demand.requester_user_id,
+    actingForRequesterId: null,
+    actingForUserId: null,
+    impersonationId: null,
+    source: 'requester_direct',
+  }
 }
 
 async function assertRequesterOwnsDemand(
@@ -1356,7 +1752,7 @@ async function assertRequesterOwnsDemand(
   if (!result.rows[0]) {
     throw new TravelGovernanceError(
       'OFFLINE_SELECTION_REQUESTER_MISMATCH',
-      'Somente o solicitante responsavel pode escolher uma opcao para esta demanda.',
+      'Somente o solicitante responsavel pode consultar esta cotacao.',
       403,
     )
   }
@@ -1373,6 +1769,7 @@ function canonicalSelectionSnapshot(
     number: demand.demand_number,
     companyId: demand.company_id,
     requesterId: demand.requester_id,
+    requesterUserId: demand.requester_user_id,
     employeeId: demand.employee_id,
     passengerName: demand.passenger_name_snapshot,
     startDate: dateOnly(demand.travel_start_date || demand.check_in),
@@ -1415,11 +1812,51 @@ function canonicalSelectionSnapshot(
     }
   }
 
+  if (serviceKey === 'locacao' || serviceKey === 'rodoviario') {
+    const details = serviceKey === 'locacao'
+      ? objectValue(option.car_details)
+      : objectValue(option.bus_details)
+    if (!Object.keys(details).length) {
+      throw new TravelGovernanceError(
+        'OFFLINE_SELECTION_GROUND_DETAILS_REQUIRED',
+        'A opcao terrestre nao possui detalhes relacionais validos.',
+        409,
+      )
+    }
+    return {
+      version: 1,
+      serviceKey,
+      demand: serviceKey === 'rodoviario'
+        ? { ...commonDemand, passengers: demandPassengerSnapshots(demand.air_passengers) }
+        : commonDemand,
+      quote: {
+        id: option.quote_id,
+        providerQuoteId: option.provider_quote_id,
+        optionCount: Number(option.quote_option_count),
+        expiresAt: dateTimeOrNull(option.quote_expires_at),
+      },
+      option: {
+        ...commonOption,
+        ground: {
+          ...details,
+          ...(serviceKey === 'rodoviario'
+            ? { segments: Array.isArray(option.bus_segments) ? option.bus_segments : [] }
+            : {}),
+        },
+        breakdown: {
+          totalAmountMinor: details.total_amount_minor ?? null,
+          currency: details.currency ?? option.currency,
+        },
+      },
+    }
+  }
+
   return {
     version: 1,
     serviceKey: 'hotelaria',
     demand: {
       ...commonDemand,
+      passengers: demandPassengerSnapshots(demand.air_passengers),
       checkIn: dateOnly(demand.check_in),
       checkOut: dateOnly(demand.check_out),
       cityId: demand.city_id,
@@ -1463,15 +1900,17 @@ function demandPassengerSnapshots(value: unknown): Array<Record<string, unknown>
       firstName: passenger.firstName || null,
       lastName: passenger.lastName || null,
       sequence: Number(passenger.sequence) || undefined,
+      isExternal: passenger.isExternal === true,
     }]
   })
 }
 
-function selectionPolicyTravelers(
+export function selectionPolicyTravelers(
   demand: QuoteDemandRow,
   option: SelectionContextRow,
 ): SelectionPolicyTraveler[] {
-  if (selectionServiceKey(demand, option) !== 'aereo') {
+  const serviceKey = selectionServiceKey(demand, option)
+  if (!['aereo', 'hotelaria', 'locacao', 'rodoviario'].includes(serviceKey)) {
     return [{
       demandTravelerId: null,
       employeeId: demand.employee_id,
@@ -1482,30 +1921,55 @@ function selectionPolicyTravelers(
     }]
   }
   if (!Array.isArray(demand.air_passengers) || demand.air_passengers.length === 0) {
-    if (demandDeclaresAirPassengerContract(demand)) {
+    if (serviceKey === 'aereo' && demandDeclaresAirPassengerContract(demand)) {
       throw new TravelGovernanceError(
         'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
         'A demanda aerea multipassageiro nao possui passageiros ativos para avaliacao das politicas.',
         409,
       )
     }
-    if (!demand.employee_id || !demand.employee_name) {
+    if (
+      serviceKey === 'locacao'
+      || serviceKey === 'rodoviario'
+      || (serviceKey === 'aereo' && (!demand.employee_id || !demand.employee_name))
+    ) {
       throw new TravelGovernanceError(
         'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
-        'O passageiro principal da demanda aerea legada nao esta ativo nesta empresa.',
+        serviceKey === 'locacao'
+          ? 'A demanda de locacao nao possui motorista ativo para avaliacao das politicas.'
+          : serviceKey === 'rodoviario'
+            ? 'A demanda rodoviaria nao possui viajantes ativos para avaliacao das politicas.'
+          : 'O passageiro principal da demanda aerea legada nao esta ativo nesta empresa.',
         409,
       )
     }
     return [{
       demandTravelerId: null,
       employeeId: demand.employee_id,
-      name: demand.passenger_name_snapshot || demand.employee_name,
+      name: demand.employee_name || demand.passenger_name_snapshot,
       department: demand.employee_department,
       costCenter: demand.cost_center,
       sequence: 1,
     }]
   }
-  const passengers = demand.air_passengers.flatMap((item, index) => {
+  const policyPassengerRows = serviceKey === 'hotelaria'
+    ? demand.air_passengers.filter((item) => (
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? (item as Record<string, unknown>).isExternal !== true
+          : true
+      ))
+    : demand.air_passengers
+  if (serviceKey === 'hotelaria' && policyPassengerRows.length === 0) {
+    return [{
+      demandTravelerId: null,
+      employeeId: demand.employee_id,
+      name: demand.employee_name || demand.passenger_name_snapshot,
+      department: demand.employee_department,
+      costCenter: demand.cost_center,
+      sequence: 1,
+    }]
+  }
+  const passengers = policyPassengerRows.flatMap((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
     const passenger = item as Record<string, unknown>
     const name = String(passenger.name || '').trim()
@@ -1521,10 +1985,23 @@ function selectionPolicyTravelers(
       sequence: Number(passenger.sequence) || index + 1,
     }]
   })
-  if (passengers.length !== demand.air_passengers.length) {
+  if (passengers.length !== policyPassengerRows.length) {
     throw new TravelGovernanceError(
       'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
-      'Todos os passageiros aereos precisam estar vinculados a um funcionario para avaliacao das politicas.',
+      serviceKey === 'locacao'
+        ? 'O motorista da locacao precisa estar vinculado a um funcionario ativo para avaliacao das politicas.'
+        : serviceKey === 'rodoviario'
+          ? 'Todos os passageiros rodoviarios precisam estar vinculados a um funcionario ativo para avaliacao das politicas.'
+        : serviceKey === 'hotelaria'
+          ? 'Todos os hospedes corporativos precisam estar vinculados a um funcionario ativo para avaliacao das politicas.'
+          : 'Todos os passageiros aereos precisam estar vinculados a um funcionario para avaliacao das politicas.',
+      422,
+    )
+  }
+  if (serviceKey === 'locacao' && passengers.length !== 1) {
+    throw new TravelGovernanceError(
+      'OFFLINE_SELECTION_SECONDARY_POLICY_UNCOVERED',
+      'A demanda de locacao precisa possuir exatamente um motorista ativo para avaliacao das politicas.',
       422,
     )
   }
@@ -1571,7 +2048,7 @@ function selectionPolicyFacts(
       name: employeeName,
       sequence: traveler?.sequence || 1,
     },
-    requester: { id: demand.requester_id },
+    requester: { id: demand.requester_id, userId: demand.requester_user_id },
     request: {
       id: demand.id,
       number: demand.demand_number,
@@ -1608,6 +2085,21 @@ function selectionPolicyFacts(
       },
     }
   }
+  if (serviceKey === 'locacao' || serviceKey === 'rodoviario') {
+    const ground = objectValue(objectValue(snapshot).option)
+    return {
+      ...baseFacts,
+      ground: {
+        service: serviceKey,
+        totalAmount: numberValue(option.amount),
+        refundable: option.refundable,
+        details: objectValue(ground.ground),
+      },
+      ...(serviceKey === 'locacao'
+        ? { car: objectValue(ground.ground) }
+        : { bus: objectValue(ground.ground) }),
+    }
+  }
   return {
     ...baseFacts,
     hotel: {
@@ -1622,11 +2114,15 @@ function selectionPolicyFacts(
   }
 }
 
-function selectionServiceKey(demand: QuoteDemandRow, option: SelectionContextRow): 'hotelaria' | 'aereo' {
+function selectionServiceKey(
+  demand: QuoteDemandRow,
+  option: SelectionContextRow,
+): 'hotelaria' | 'aereo' | 'locacao' | 'rodoviario' {
   const quoteService = offlineServiceFromDemand(option.service_type)
   const demandService = offlineServiceFromDemand(demand.service_type)
   const service = quoteService || demandService
-  if (service !== 'hotelaria' && service !== 'aereo') {
+  if (service !== 'hotelaria' && service !== 'aereo'
+      && service !== 'locacao' && service !== 'rodoviario') {
     throw new TravelGovernanceError(
       'OFFLINE_SELECTION_SERVICE_NOT_SUPPORTED',
       'Este tipo de cotacao ainda nao possui escolha formal offline.',
@@ -1658,32 +2154,6 @@ function selectionDestination(demand: QuoteDemandRow, option: SelectionContextRo
 function airDemandDetails(demand: QuoteDemandRow): Record<string, unknown> {
   const metadata = objectValue(demand.metadata)
   return objectValue(objectValue(metadata.serviceDetails).air)
-}
-
-async function resolveApprovalWorkflowCode(
-  client: PoolClient,
-  tenantId: string,
-  results: PolicyEvaluationResult[],
-): Promise<string | null> {
-  const approvalItems = results.flatMap((result) => result.approvalsRequired)
-  const configured = approvalItems.flatMap((item) => {
-    const workflow = item.configuration.workflow
-    return typeof workflow === 'string' && workflow.trim() ? [workflow.trim()] : []
-  })
-  const versionIds = Array.from(new Set(approvalItems.map((item) => item.policyVersionId)))
-  const dependencies = versionIds.length
-    ? await client.query<{ dependency_key: string }>(
-        `select distinct dependency_key from policy_dependencies
-         where tenant_id = $1 and policy_version_id = any($2::uuid[])
-           and dependency_type = 'workflow' and required = true`,
-        [tenantId, versionIds],
-      )
-    : { rows: [] as Array<{ dependency_key: string }> }
-  const candidates = Array.from(new Set([
-    ...configured,
-    ...dependencies.rows.map((row) => row.dependency_key.trim()).filter(Boolean),
-  ]))
-  return candidates.length === 1 ? candidates[0] : null
 }
 
 function mapQuoteRows(rows: QuoteListRow[]): OfflineHotelQuoteReadModel[] {
@@ -1794,6 +2264,7 @@ function optionMetadata(option: PreparedHotelOption): Record<string, unknown> {
     supplierCode: option.supplierCode,
     pricingMode: option.pricingMode,
     rateReference: option.rateReference,
+    emissionObservationReference: option.emissionObservationReference,
     rateOutsideValidity: option.rateOutsideValidity,
     outOfPeriodPolicy: option.outOfPeriodPolicy,
     roomCategory: option.roomCategory,
@@ -1953,6 +2424,9 @@ function selectionOperationKey(
 ): string {
   const digest = sha256({
     tenantId: principal.tenantId,
+    actorUserId: realActorUserId(principal),
+    representationId: principal.representation?.id || null,
+    representedUserId: principal.representation?.subject.id || null,
     demandId: input.demandId,
     quoteId: input.quoteId,
     optionId: input.optionId,

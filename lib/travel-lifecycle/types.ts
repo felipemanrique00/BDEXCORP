@@ -32,6 +32,7 @@ export type TravelLifecycleCommand =
   | 'request_cost_approval'
   | 'approve_cost'
   | 'return_to_choice'
+  | 'return_for_adjustment'
   | 'start_reservation'
   | 'confirm_reservation'
   | 'queue_issuance'

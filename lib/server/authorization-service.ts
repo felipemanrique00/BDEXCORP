@@ -78,6 +78,7 @@ export interface AuthorizationRequest {
   allowedStates?: readonly string[]
   requestedFields?: readonly string[]
   requiredPermission?: keyof Permissoes
+  requiredAnyPermissions?: readonly (keyof Permissoes)[]
   allowSelf?: boolean
   allowPlatformAdmin?: boolean
   allowEmptyCompanyScope?: boolean
@@ -96,7 +97,7 @@ type ResourcePolicy = Partial<Record<AuthorizationAction, keyof Permissoes | 'se
 
 const RESOURCE_POLICIES: Record<AuthorizationResource, ResourcePolicy> = {
   account: { read: 'self', update: 'self' },
-  session: { read: 'self', delete: 'self' },
+  session: { read: 'self', create: 'self', update: 'self', delete: 'self' },
   navigation: { read: 'authenticated', list: 'authenticated' },
   corporate_context: { read: 'ver_empresas', list: 'ver_empresas', update: 'ver_empresas' },
   companies: {
@@ -426,6 +427,26 @@ export function evaluateAuthorization(
     return denied('AUTHORIZATION_POLICY_MISSING', 'A rota nao possui uma politica de autorizacao explicita.')
   }
 
+  const requiredAnyPermissions = request.requiredPermission
+    ? []
+    : [...new Set(request.requiredAnyPermissions || [])]
+  if (requiredAnyPermissions.length) {
+    const decisions = requiredAnyPermissions.map((permission) => evaluateAuthorization(principal, {
+      ...request,
+      requiredPermission: permission,
+      requiredAnyPermissions: undefined,
+    }))
+    const allowed = decisions.find((decision) => decision.allowed)
+    if (allowed) return allowed
+    return denied(
+      'AUTHORIZATION_ANY_PERMISSION_DENIED',
+      'Nenhuma das permissoes alternativas autoriza esta operacao.',
+      null,
+      [...new Set(decisions.flatMap((decision) => decision.companyIds))],
+      [...new Set(decisions.flatMap((decision) => decision.matchedGrantIds))],
+    )
+  }
+
   const policy = RESOURCE_POLICIES[request.resource]
   const policyPermission = request.requiredPermission || policy?.[request.action] || null
   if (!policyPermission) {
@@ -544,6 +565,7 @@ export function evaluateAuthorization(
 export async function authorizationForApiRequest(
   request: Request,
   explicitPermission?: keyof Permissoes,
+  explicitAnyPermissions?: readonly (keyof Permissoes)[],
 ): Promise<AuthorizationRequest> {
   const url = new URL(request.url)
   const payload = await readAuthorizationPayload(request)
@@ -558,6 +580,7 @@ export async function authorizationForApiRequest(
     action,
     resource,
     requiredPermission: explicitPermission,
+    requiredAnyPermissions: explicitAnyPermissions,
     scope: {
       tenantId: firstObjectValue(sources, ['tenantId', 'tenant_id']),
       companyId,
@@ -588,10 +611,19 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/platform/')) return 'platform'
   if (path.startsWith('/api/auth/change-password')) return 'account'
   if (path.startsWith('/api/auth/mfa')) return 'account'
+  if (path.startsWith('/api/auth/impersonation')) return 'session'
   if (path.startsWith('/api/auth/logout')) return 'session'
   if (path.startsWith('/api/me/corporate-contexts')) return 'corporate_context'
+  if (path.startsWith('/api/me/requester-profile')) return 'requesters'
   if (path.startsWith('/api/me/effective-branding') || path.startsWith('/api/me/branding-logo')) return 'navigation'
   if (path.startsWith('/api/navigation-summary')) return 'navigation'
+  if (path.startsWith('/api/company-portal/offline-travel/reservations') && path.includes('/issue')) return 'emissions'
+  if (path.startsWith('/api/company-portal/hotel-media')) return 'catalogs'
+  if (path.startsWith('/api/company-portal/hotel-tariff-search')) return 'catalogs'
+  if (path.startsWith('/api/company-portal/travel-orders')) return 'demands'
+  if (path.startsWith('/api/company-portal/demands')) return 'demands'
+  if (path.startsWith('/api/company-portal/approvals')) return 'approvals'
+  if (path.startsWith('/api/company-portal/vouchers')) return 'vouchers'
   if (path.startsWith('/api/users/directory')) return 'approvals'
   if (path.startsWith('/api/users/') && path.includes('/access')) return 'access_grants'
   if (path.startsWith('/api/users')) return 'users'
@@ -606,6 +638,7 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/solicitantes')) return 'requesters'
   if (path.startsWith('/api/approvals/workflows')) return 'workflows'
   if (path.startsWith('/api/approvals')) return 'approvals'
+  if (path.startsWith('/api/offline-travel/ground')) return 'quotes'
   if (path.startsWith('/api/offline-travel/air/quotes')) return 'quotes'
   if (path.startsWith('/api/offline-travel/hotel-rate-suggestions')) return 'quotes'
   if (path.startsWith('/api/offline-travel/quotes')) return 'quotes'

@@ -24,6 +24,7 @@ import { toast } from 'sonner'
 import { AI_NAME, SYSTEM_NAME } from '@/lib/branding'
 import { BBTLogo } from '@/components/branding/bbt-logo'
 import { setCurrentUser } from '@/lib/auth'
+import { defaultAuthenticatedRoute } from '@/lib/company-portal-lab/access-boundary'
 import {
   authenticateWithServer,
   fetchServerSession,
@@ -435,6 +436,6 @@ export default function LoginPage() {
   )
 }
 
-function defaultRoute(user: { role?: string } | null): string {
-  return user?.role === 'master' ? '/dashboard' : '/dashboard/portal-empresa'
+function defaultRoute(user: User | null): string {
+  return defaultAuthenticatedRoute(user)
 }

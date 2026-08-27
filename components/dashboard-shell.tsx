@@ -7,6 +7,8 @@ import { QuickAIPopup } from '@/components/ai/quick-ai-popup'
 import { EffectiveBrandingProvider } from '@/components/branding/effective-branding-provider'
 import { CorporateContextProvider } from '@/components/corporate-context-provider'
 import { Header } from '@/components/header'
+import { ImpersonationBanner } from '@/components/impersonation/impersonation-banner'
+import { ImpersonationProvider, useImpersonation } from '@/components/impersonation/impersonation-provider'
 import { Sidebar } from '@/components/sidebar'
 import { clearCurrentUser, setCurrentUser } from '@/lib/auth'
 import { fetchServerSession } from '@/lib/client-session'
@@ -17,12 +19,26 @@ import {
   decideSessionUserRefresh,
 } from '@/lib/session-user-refresh'
 import { storageKeysForDashboardPath } from '@/lib/storage-hydration-plan'
-import { flushPendingRemoteStorage } from '@/lib/storage-quota'
+import {
+  clearLocalSharedStorageForSessionChange,
+  flushPendingRemoteStorage,
+} from '@/lib/storage-quota'
 import { clearCachedUserDirectory, hydrateUserDirectory } from '@/lib/user-directory-client'
 import type { User } from '@/types'
 
 export function DashboardShell({ children, user }: { children: React.ReactNode; user: User }) {
+  return (
+    <ImpersonationProvider>
+      <DashboardShellContent user={user}>{children}</DashboardShellContent>
+    </ImpersonationProvider>
+  )
+}
+
+function DashboardShellContent({ children, user }: { children: React.ReactNode; user: User }) {
   const pathname = usePathname()
+  const companyPortalLab = pathname === '/dashboard/portal-empresa-lab'
+    || pathname.startsWith('/dashboard/portal-empresa-lab/')
+  const { representation, loading: loadingRepresentation } = useImpersonation()
   const [sessionUser, setSessionUser] = useState(user)
   const sessionUserRef = useRef(user)
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false)
@@ -42,7 +58,7 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
     const refreshSessionUser = createSingleFlightRunner(async () => {
       const session = await fetchServerSession()
       if (!active) return
-      const decision = decideSessionUserRefresh(sessionUserRef.current, session)
+      const decision = decideSessionUserRefresh(sessionUserRef.current, session, representation)
       if (decision === 'keep') return
       if (decision === 'redirect') {
         clearCurrentUser()
@@ -52,7 +68,12 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
       }
       const nextUser = session.user!
       if (decision === 'reload') {
-        if (!await flushPendingRemoteStorage()) return
+        const representationChanged = representation?.id !== session.representation?.id
+        if (representation || session.representation || representationChanged) {
+          clearLocalSharedStorageForSessionChange()
+        } else if (!await flushPendingRemoteStorage()) {
+          return
+        }
         clearCachedUserDirectory()
         setCurrentUser(nextUser)
         window.location.reload()
@@ -73,7 +94,7 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
       window.removeEventListener('focus', refreshWhenVisible)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [])
+  }, [representation])
 
   useEffect(() => {
     let active = true
@@ -81,10 +102,8 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
     setHydrationFailedPath(null)
 
     async function hydrate() {
-      const [applicationHydrated] = await Promise.all([
-        hydrateApplicationData(false, keys),
-        hydrateUserDirectory().catch(() => []),
-      ])
+      const applicationHydrated = await hydrateApplicationData(false, keys)
+      if (!companyPortalLab) await hydrateUserDirectory().catch(() => [])
       if (!active) return
       if (applicationHydrated) {
         setHydratedPath(pathname)
@@ -95,35 +114,48 @@ export function DashboardShell({ children, user }: { children: React.ReactNode; 
     }
 
     void hydrate()
-    void hydrateAlertSoundSettingsFromAssistant()
+    if (!companyPortalLab) void hydrateAlertSoundSettingsFromAssistant()
     return () => {
       active = false
     }
-  }, [hydrationAttempt, pathname])
+  }, [companyPortalLab, hydrationAttempt, pathname])
 
   return (
-    <CorporateContextProvider user={sessionUser}>
+    <CorporateContextProvider
+      user={sessionUser}
+      persistContextSelection={!loadingRepresentation && !representation}
+    >
       <EffectiveBrandingProvider>
-        <div className="flex min-h-screen bg-[#f4f6fa] print:block print:min-h-0 print:bg-white dark:bg-[#10142b]">
-          <div className="contents print:hidden">
-            <Sidebar
-              user={sessionUser}
-              mobileOpen={mobileNavigationOpen}
-              onMobileClose={() => setMobileNavigationOpen(false)}
-            />
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col print:block">
-            <div className="print:hidden">
-              <Header user={sessionUser} onOpenNavigation={() => setMobileNavigationOpen(true)} />
+        <div
+          className="flex min-h-screen bg-[#f4f6fa] print:block print:min-h-0 print:bg-white dark:bg-[#10142b]"
+          data-company-portal-immersive={companyPortalLab || undefined}
+        >
+          {!companyPortalLab && (
+            <div className="contents print:hidden">
+              <Sidebar
+                user={sessionUser}
+                mobileOpen={mobileNavigationOpen}
+                onMobileClose={() => setMobileNavigationOpen(false)}
+              />
             </div>
-            <main className="min-w-0 flex-1 overflow-x-hidden p-4 pb-24 print:overflow-visible print:p-0 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24">
+          )}
+          <div className="flex min-w-0 flex-1 flex-col print:block">
+            {!companyPortalLab && (
+              <div className="print:hidden">
+                <Header user={sessionUser} onOpenNavigation={() => setMobileNavigationOpen(true)} />
+              </div>
+            )}
+            <ImpersonationBanner />
+            <main className={companyPortalLab
+              ? 'min-w-0 flex-1 overflow-x-hidden print:overflow-visible'
+              : 'min-w-0 flex-1 overflow-x-hidden p-4 pb-24 print:overflow-visible print:p-0 sm:p-6 sm:pb-24 lg:p-7 lg:pb-24'}>
               {hydratedPath === pathname
                 ? children
                 : hydrationFailedPath === pathname
                   ? <RouteHydrationError onRetry={() => setHydrationAttempt((value) => value + 1)} />
                   : <RouteLoadingState />}
             </main>
-            {hydratedPath === pathname && (
+            {hydratedPath === pathname && !companyPortalLab && (
               <div className="print:hidden">
                 <QuickAIPopup />
               </div>

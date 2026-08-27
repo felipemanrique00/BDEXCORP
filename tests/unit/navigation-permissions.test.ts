@@ -92,6 +92,7 @@ describe('menu por permissao efetiva', () => {
     expect(routes).toContain('/dashboard/relatorios')
     expect(routes).not.toContain('/dashboard/usuarios')
     expect(routes).not.toContain('/dashboard/financeiro')
+    expect(routes).not.toContain('/dashboard/portal-empresa-lab')
   })
 
   it('exibe aprovacoes para o aprovador corporativo sem elevar o papel para master', () => {
@@ -125,6 +126,7 @@ describe('menu por permissao efetiva', () => {
 
     expect(routes).toEqual(expect.arrayContaining([
       '/dashboard/portal-empresa',
+      '/dashboard/portal-empresa-lab',
       '/dashboard/minha-viagem',
     ]))
     for (const hiddenRoute of [

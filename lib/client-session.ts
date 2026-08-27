@@ -1,11 +1,15 @@
 'use client'
 
 import type { User } from '@/types'
+import type { ImpersonationActorSession, ImpersonationRepresentation } from '@/lib/impersonation-client'
 
 export interface ServerSessionState {
   user: User | null
   requireSession: boolean
   reachable: boolean
+  actor: ImpersonationActorSession | null
+  representation: ImpersonationRepresentation | null
+  canStartRepresentation: boolean
 }
 
 export interface ServerLoginResult {
@@ -34,6 +38,9 @@ const UNAVAILABLE_SESSION: ServerSessionState = {
   user: null,
   requireSession: true,
   reachable: false,
+  actor: null,
+  representation: null,
+  canStartRepresentation: false,
 }
 
 export async function fetchServerSession(): Promise<ServerSessionState> {
@@ -48,6 +55,9 @@ export async function fetchServerSession(): Promise<ServerSessionState> {
       user: payload.user || null,
       requireSession: payload.requireSession,
       reachable: true,
+      actor: payload.actor || null,
+      representation: payload.representation || null,
+      canStartRepresentation: payload.canStartRepresentation === true,
     }
   } catch {
     return UNAVAILABLE_SESSION

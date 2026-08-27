@@ -3,13 +3,17 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Building2,
+  ChevronDown,
+  ChevronUp,
   Hotel,
+  Image as ImageIcon,
   Loader2,
   MapPin,
   Pencil,
   Plus,
   Search,
   Trash2,
+  Upload,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -27,14 +31,18 @@ import {
 import type { GeographyCity, GeographyCountry, GeographySubdivision } from '@/lib/geography/types'
 import {
   createHotelCatalogItem,
+  deleteHotelCatalogMedia,
+  getHotelCatalogItem,
   listHotelCatalog,
+  reorderHotelCatalogMedia,
   updateHotelCatalogItem,
+  uploadHotelCatalogMedia,
 } from '@/lib/hotel-catalog/client'
 import {
   HOTEL_ROOM_CATEGORIES,
   isCanonicalHotelRoomCategory,
 } from '@/lib/hotel-catalog/room-categories'
-import type { HotelCatalogItem, HotelCatalogRoomType } from '@/lib/hotel-catalog/types'
+import type { HotelCatalogItem, HotelCatalogMedia, HotelCatalogRoomType } from '@/lib/hotel-catalog/types'
 
 type OccupancyType = HotelCatalogRoomType['occupancyType']
 
@@ -613,6 +621,27 @@ export default function HotelCatalogPage() {
             <Field label="Website" value={draft.website} onChange={(value) => setDraft((current) => ({ ...current, website: value }))} placeholder="https://..." />
           </div>
 
+          {editing ? (
+            <HotelCatalogMediaEditor
+              hotel={editing}
+              disabled={saving}
+              onChanged={async () => {
+                const refreshed = await getHotelCatalogItem(editing.id)
+                setEditing(refreshed)
+              }}
+            />
+          ) : (
+            <section className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-900/40">
+              <div className="flex items-start gap-3">
+                <ImageIcon className="mt-0.5 h-5 w-5 text-slate-400" aria-hidden="true" />
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Fotos do hotel e dos quartos</h3>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">Salve o hotel primeiro. Depois, abra-o para enviar, remover e ordenar fotos privadas do catalogo.</p>
+                </div>
+              </div>
+            </section>
+          )}
+
           <section aria-labelledby="hotel-room-types-title" className="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -739,6 +768,186 @@ export default function HotelCatalogPage() {
           </div>
         </div>
       </Modal>
+    </div>
+  )
+}
+
+function HotelCatalogMediaEditor({
+  hotel,
+  disabled,
+  onChanged,
+}: {
+  hotel: HotelCatalogItem
+  disabled: boolean
+  onChanged: () => Promise<void>
+}) {
+  return (
+    <section aria-labelledby="hotel-media-title" className="space-y-4 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+      <div>
+        <h3 id="hotel-media-title" className="text-sm font-semibold text-slate-900 dark:text-white">Fotos do hotel e dos quartos</h3>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          Arquivos PNG, JPEG ou WebP de ate 5 MB. As imagens sao validadas, normalizadas e armazenadas de forma privada no tenant da agencia.
+        </p>
+      </div>
+      <MediaScopeEditor
+        hotelId={hotel.id}
+        title="Galeria do hotel"
+        description="Fachada, recepcao e areas comuns. A primeira foto aparece como capa."
+        media={hotel.media || []}
+        roomTypeId={null}
+        disabled={disabled}
+        onChanged={onChanged}
+      />
+      {(hotel.roomTypes || []).map((room) => (
+        <MediaScopeEditor
+          key={room.id}
+          hotelId={hotel.id}
+          title={`Quarto: ${room.name}`}
+          description={[room.code, room.bedConfiguration].filter(Boolean).join(' · ') || 'Tipo de quarto cadastrado'}
+          media={room.media || []}
+          roomTypeId={room.id}
+          disabled={disabled}
+          onChanged={onChanged}
+        />
+      ))}
+      <p className="text-[11px] leading-4 text-slate-500">
+        Fotos de quarto seguem o tipo salvo no catalogo. Salve alteracoes de categorias ou quartos antes de enviar novas imagens.
+      </p>
+    </section>
+  )
+}
+
+function MediaScopeEditor({
+  hotelId,
+  title,
+  description,
+  media,
+  roomTypeId,
+  disabled,
+  onChanged,
+}: {
+  hotelId: string
+  title: string
+  description: string
+  media: HotelCatalogMedia[]
+  roomTypeId: string | null
+  disabled: boolean
+  onChanged: () => Promise<void>
+}) {
+  const [file, setFile] = useState<File | null>(null)
+  const [altText, setAltText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const inputId = `hotel-media-${roomTypeId || 'hotel'}`
+  const ordered = [...media].sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id))
+
+  async function upload() {
+    if (!file) return
+    setBusy(true)
+    try {
+      await uploadHotelCatalogMedia(hotelId, file, { roomTypeId, altText })
+      setFile(null)
+      setAltText('')
+      const input = document.getElementById(inputId) as HTMLInputElement | null
+      if (input) input.value = ''
+      toast.success('Foto adicionada ao catalogo.')
+      await refreshAfterMutation()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel enviar a foto.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(mediaId: string) {
+    if (!window.confirm('Remover esta foto do catalogo? O arquivo deixara de ser exibido imediatamente.')) return
+    setBusy(true)
+    try {
+      await deleteHotelCatalogMedia(hotelId, mediaId)
+      toast.success('Foto removida do catalogo.')
+      await refreshAfterMutation()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel remover a foto.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function move(index: number, direction: -1 | 1) {
+    const target = index + direction
+    if (target < 0 || target >= ordered.length) return
+    const ids = ordered.map((item) => item.id)
+    ;[ids[index], ids[target]] = [ids[target], ids[index]]
+    setBusy(true)
+    try {
+      await reorderHotelCatalogMedia(hotelId, roomTypeId, ids)
+      toast.success('Ordem das fotos atualizada.')
+      await refreshAfterMutation()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nao foi possivel reordenar as fotos.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function refreshAfterMutation() {
+    try {
+      await onChanged()
+    } catch {
+      toast.warning('A alteracao foi salva, mas a galeria nao pode ser atualizada agora. Reabra o cadastro.')
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-700 dark:bg-slate-950/30">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h4 className="text-xs font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200">{title}</h4>
+          <p className="mt-0.5 text-[11px] text-slate-500">{description}</p>
+        </div>
+        <span className="rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-slate-500 shadow-sm dark:bg-slate-900">
+          {ordered.length} foto{ordered.length === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      {ordered.length > 0 && (
+        <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {ordered.map((item, index) => (
+            <li key={item.id} className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+              <div className="aspect-[4/3] bg-slate-100 dark:bg-slate-800">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={item.imageUrl} alt={item.altText || `${title}, foto ${index + 1}`} className="h-full w-full object-cover" />
+              </div>
+              <div className="flex items-center gap-1 p-2">
+                <span className="min-w-0 flex-1 truncate text-[11px] text-slate-500" title={item.altText || undefined}>
+                  {item.altText || (index === 0 ? 'Capa sem descricao' : 'Sem descricao')}
+                </span>
+                <button type="button" onClick={() => void move(index, -1)} disabled={disabled || busy || index === 0} aria-label={`Mover foto ${index + 1} para cima`} className="rounded p-1 text-slate-500 hover:bg-slate-100 disabled:opacity-30 dark:hover:bg-slate-800"><ChevronUp className="h-3.5 w-3.5" /></button>
+                <button type="button" onClick={() => void move(index, 1)} disabled={disabled || busy || index === ordered.length - 1} aria-label={`Mover foto ${index + 1} para baixo`} className="rounded p-1 text-slate-500 hover:bg-slate-100 disabled:opacity-30 dark:hover:bg-slate-800"><ChevronDown className="h-3.5 w-3.5" /></button>
+                <button type="button" onClick={() => void remove(item.id)} disabled={disabled || busy} aria-label={`Remover foto ${index + 1}`} className="rounded p-1 text-red-600 hover:bg-red-50 disabled:opacity-30 dark:hover:bg-red-950/30"><Trash2 className="h-3.5 w-3.5" /></button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+        <label className="block">
+          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-500">Arquivo</span>
+          <input
+            id={inputId}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            disabled={disabled || busy}
+            onChange={(event) => setFile(event.target.files?.[0] || null)}
+            className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-2 file:py-1 file:text-xs file:font-semibold dark:border-slate-700 dark:bg-slate-950 dark:file:bg-slate-800"
+          />
+        </label>
+        <Field label="Descricao acessivel" value={altText} onChange={setAltText} placeholder="Ex.: Quarto duplo com cama queen" />
+        <button type="button" onClick={() => void upload()} disabled={disabled || busy || !file} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-[#20265a] px-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+          Enviar foto
+        </button>
+      </div>
     </div>
   )
 }

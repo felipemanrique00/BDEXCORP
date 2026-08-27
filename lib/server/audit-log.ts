@@ -1,5 +1,7 @@
 import 'server-only'
 
+import type { PoolClient } from 'pg'
+
 import { queryDatabase, withTenantTransaction } from '@/lib/server/database'
 import { logError } from '@/lib/server/logger'
 import { getRequestContext } from '@/lib/server/request-context'
@@ -22,8 +24,15 @@ export interface AuditEvent {
 export async function writeAuditEvent(event: AuditEvent): Promise<void> {
   const context = getRequestContext()
   const tenantId = event.tenantId === undefined ? context?.principal.tenantId || null : event.tenantId
-  const actorUserId = event.actorUserId === undefined ? context?.principal.user.id || null : event.actorUserId
+  const actorUserId = event.actorUserId === undefined
+    ? context?.principal.actor?.user.id || context?.principal.user.id || null
+    : event.actorUserId
   const requestId = event.requestId === undefined ? context?.requestId || null : event.requestId
+  const representationMetadata = context?.principal.representation ? {
+    representationId: context.principal.representation.id,
+    representationMode: context.principal.representation.mode,
+    representedUserId: context.principal.representation.subject.id,
+  } : {}
 
   try {
     const values = [
@@ -36,7 +45,7 @@ export async function writeAuditEvent(event: AuditEvent): Promise<void> {
       event.result,
       normalizeIp(event.ipAddress),
       truncate(event.userAgent, 512),
-      JSON.stringify(sanitizeMetadata(event.metadata || {})),
+      JSON.stringify(sanitizeMetadata({ ...representationMetadata, ...(event.metadata || {}) })),
     ]
     if (tenantId) {
       await withTenantTransaction(tenantId, (client) => client.query(AUDIT_INSERT_SQL, values))
@@ -52,6 +61,35 @@ export async function writeAuditEvent(event: AuditEvent): Promise<void> {
     })
     if (isCriticalAuditAction(event.action)) throw error
   }
+}
+
+export async function writeAuditEventInTransaction(
+  client: PoolClient,
+  event: AuditEvent,
+): Promise<void> {
+  const context = getRequestContext()
+  const tenantId = event.tenantId === undefined ? context?.principal.tenantId || null : event.tenantId
+  const actorUserId = event.actorUserId === undefined
+    ? context?.principal.actor?.user.id || context?.principal.user.id || null
+    : event.actorUserId
+  const requestId = event.requestId === undefined ? context?.requestId || null : event.requestId
+  const representationMetadata = context?.principal.representation ? {
+    representationId: context.principal.representation.id,
+    representationMode: context.principal.representation.mode,
+    representedUserId: context.principal.representation.subject.id,
+  } : {}
+  await client.query(AUDIT_INSERT_SQL, [
+    tenantId,
+    actorUserId,
+    isUuid(requestId) ? requestId : null,
+    event.action,
+    event.entityType || null,
+    event.entityId || null,
+    event.result,
+    normalizeIp(event.ipAddress),
+    truncate(event.userAgent, 512),
+    JSON.stringify(sanitizeMetadata({ ...representationMetadata, ...(event.metadata || {}) })),
+  ])
 }
 
 const AUDIT_INSERT_SQL = `insert into audit_logs (

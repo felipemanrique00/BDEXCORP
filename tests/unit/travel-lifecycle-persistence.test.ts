@@ -48,6 +48,33 @@ describe('travel lifecycle persistence', () => {
     expect(query.mock.calls[2]?.[0]).toContain("'finalizado_em', $6::timestamptz")
     expect(query.mock.calls[2]?.[1]).toEqual(expect.arrayContaining(['submitted', 'pendente']))
   })
+
+  it.each(['return_to_choice', 'return_for_adjustment'] as const)(
+    'limpa a aprovacao ativa ao executar %s',
+    async (command) => {
+      const query = vi.fn(async (text: string, _values?: unknown[]) => {
+        if (text.includes('select command from travel_state_events')) return { rows: [], rowCount: 0 }
+        if (text.includes('update demands set')) return { rows: [], rowCount: 1 }
+        return { rows: [], rowCount: 1 }
+      })
+      const client = { query } as unknown as PoolClient
+      const current: TravelLifecycleRecord = {
+        ...demand(),
+        status: command === 'return_to_choice' ? 'pending_cost_approval' : 'pending_choice',
+        version: 8,
+        activeApprovalInstanceId: 'approval-a',
+      }
+
+      await persistTravelTransitionInTransaction(client, principal(), current, command, {
+        idempotencyKey: `demand-a:${command}`,
+        requirements: { humanConfirmed: true },
+        metadata: { source: 'unit-test' },
+      })
+
+      const updateValues = query.mock.calls[2]?.[1] as unknown[]
+      expect(updateValues[9]).toBe(true)
+    },
+  )
 })
 
 function principal(): RequestPrincipal {

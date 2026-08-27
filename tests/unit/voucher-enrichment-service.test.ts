@@ -275,8 +275,23 @@ describe('voucher enrichment service', () => {
 
     expect(query).toHaveBeenCalledTimes(1)
     expect(query.mock.calls[0]?.[1]).toEqual(['tenant-01', ['H-1', 'H-2']])
-    expect(String(query.mock.calls[0]?.[0])).toContain("nullif(traveler.document_number_snapshot, '')")
-    expect(String(query.mock.calls[0]?.[0])).toContain('traveler_employee.company_id = traveler.company_id')
+    const sql = String(query.mock.calls[0]?.[0])
+    expect(sql).toContain("nullif(traveler.document_number_snapshot, '')")
+    expect(sql).toContain('reservation.company_id = voucher.company_id')
+    expect(sql).toContain('demand.company_id = voucher.company_id')
+    expect(sql).toContain('company.id = voucher.company_id')
+    expect(sql).toContain('employee.company_id = voucher.company_id')
+    expect(sql).toContain('requester.company_id = voucher.company_id')
+    expect(sql).toContain('emission.company_id = voucher.company_id')
+    expect(sql).toContain('emission.demand_id = demand.id')
+    expect(sql).toContain('emission.reservation_id = reservation.id')
+    expect(sql).toContain('selection.demand_id = demand.id')
+    expect(sql).toContain('traveler.company_id = voucher.company_id')
+    expect(sql).toContain('traveler_employee.company_id = traveler.company_id')
+    expect(sql).toContain('room.demand_id = room_guest.demand_id')
+    expect(sql).toContain('room_guest.demand_id = room.demand_id')
+    expect(sql).toContain('approved_instance.company_id = voucher.company_id')
+    expect(sql).toContain('approved_instance.demand_id = demand.id')
     expect(enriched.map((voucher) => voucher.id)).toEqual(['H-1', 'H-2'])
     expect(enriched[0]).toEqual(first)
     expect(enriched[0]).not.toBe(first)
@@ -292,6 +307,37 @@ describe('voucher enrichment service', () => {
       total: 520,
       moeda: 'BRL',
     })
+  })
+
+  it('does not project company B PII when a company A voucher has inconsistent references', async () => {
+    const companyAVoucher = baseVoucher({
+      id: 'H-COMPANY-A',
+      empresa_id: 'company-a',
+      atendimento_id: 'demand-b-forged-reference',
+      funcionario_id: 'employee-b-forged-reference',
+      passageiro_nome: 'Hospede seguro A',
+      solicitante_email: 'safe-a@example.com',
+    })
+    const query = vi.fn().mockResolvedValue({ rows: [] })
+    const client = { query } as unknown as PoolClient
+
+    const [enriched] = await enrichVouchersFromDatabase(
+      client,
+      'tenant-01',
+      [companyAVoucher],
+    )
+
+    expect(enriched).toEqual(companyAVoucher)
+    expect(enriched).not.toBe(companyAVoucher)
+    expect(JSON.stringify(enriched)).not.toContain('company-b-secret')
+
+    const sql = String(query.mock.calls[0]?.[0])
+    expect(sql).toMatch(/reservation\.id = voucher\.reservation_id\s+and reservation\.company_id = voucher\.company_id/)
+    expect(sql).toMatch(/demand\.id = coalesce\(voucher\.demand_id, reservation\.demand_id\)\s+and demand\.company_id = voucher\.company_id/)
+    expect(sql).toMatch(/employee\.id = coalesce\([\s\S]+?\)\s+and employee\.company_id = voucher\.company_id/)
+    expect(sql).toMatch(/requester\.id = demand\.requester_id\s+and requester\.company_id = voucher\.company_id/)
+    expect(sql).toMatch(/emission\.id = voucher\.emission_id\s+and emission\.company_id = voucher\.company_id/)
+    expect(sql).toMatch(/selection\.id = reservation\.quote_selection_id\s+and selection\.demand_id = demand\.id/)
   })
 
   it('masks CPF and generic documents deterministically', () => {

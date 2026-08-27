@@ -7,6 +7,10 @@ const pickerSource = readFileSync(
   resolve(process.cwd(), 'components/travel/air-demand-passengers.tsx'),
   'utf8',
 )
+const profileDialogSource = readFileSync(
+  resolve(process.cwd(), 'components/travel/traveler-profile-dialog.tsx'),
+  'utf8',
+)
 const configuratorSource = readFileSync(
   resolve(process.cwd(), 'components/travel/air-demand-configurator.tsx'),
   'utf8',
@@ -22,7 +26,7 @@ const portalSource = readFileSync(
 
 describe('air demand passenger UI', () => {
   it('uses the shared scoped traveler directory with searchable add/remove and primary ordering', () => {
-    expect(pickerSource).toContain("import { searchTravelers } from '@/lib/travelers/client'")
+    expect(pickerSource).toContain('searchTravelers,')
     expect(pickerSource).toContain('{ companyId, q: query.trim() || undefined, limit: 20 }')
     expect(pickerSource).toContain('selectedIds.has(item.id)')
     expect(pickerSource).toContain('onChange([...passengers, { employee_id: item.id, name: item.name }])')
@@ -34,6 +38,42 @@ describe('air demand passenger UI', () => {
     expect(pickerSource).toContain('Tentar novamente')
     expect(pickerSource).toContain('Passageiro {index + 1}')
     expect(pickerSource).toContain('profile?.identificationCode || profile?.registrationCode')
+  })
+
+  it('applies the inherited requester setting only to requester users', () => {
+    expect(pickerSource).toContain("import { getCurrentUser } from '@/lib/auth'")
+    expect(pickerSource).toContain("import { isRequesterUser, userAccessKind } from '@/lib/user-access-kind'")
+    expect(pickerSource).toContain('const requesterUser = isRequesterUser(currentUser)')
+    expect(pickerSource).toContain('|| !requesterUser')
+    expect(pickerSource).toContain("getTravelerManagementSettings('company', companyId, controller.signal)")
+    expect(pickerSource).toContain('const canCreateTraveler = canCreateByPermission || requesterManagementEnabled')
+    expect(pickerSource).toContain('const canCompleteTraveler = canCompleteByPermission || requesterManagementEnabled')
+  })
+
+  it('keeps quick traveler management available to an internal flow operator', () => {
+    expect(pickerSource).toContain("userAccessKind(currentUser) === 'internal'")
+    expect(pickerSource).toContain("includesCompany(companyId, 'criar_demandas')")
+    expect(pickerSource).toContain('|| canManageInAgencyFlow')
+  })
+
+  it('supports keyboard and assistive-technology navigation in the traveler picker', () => {
+    expect(pickerSource).toContain('role="combobox"')
+    expect(pickerSource).toContain('aria-expanded={open && Boolean(companyId) && !disabled}')
+    expect(pickerSource).toContain('aria-controls={listboxId}')
+    expect(pickerSource).toContain('role="listbox"')
+    expect(pickerSource).toContain('role="option"')
+    expect(pickerSource).toContain("event.key === 'ArrowDown'")
+    expect(pickerSource).toContain("event.key === 'Escape'")
+    expect(pickerSource).toContain('event.currentTarget.contains(event.relatedTarget as Node | null)')
+  })
+
+  it('keeps completion errors actionable and accessible', () => {
+    expect(profileDialogSource).toContain('ref={formRef}')
+    expect(profileDialogSource).toContain("querySelector<HTMLElement>('[aria-invalid=\"true\"]')")
+    expect(profileDialogSource).toContain("aria-describedby={errors.cpf ? 'traveler-profile-cpf-error' : undefined}")
+    expect(profileDialogSource).toContain('id={`${htmlFor}-error`} role="alert"')
+    expect(profileDialogSource).toContain('clearError(setErrors,')
+    expect(profileDialogSource).toContain('max={todayISODate()}')
   })
 
   it('embeds the picker once in the reusable air configurator', () => {

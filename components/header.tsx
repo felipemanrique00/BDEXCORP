@@ -7,6 +7,7 @@ import {
   Building2, Users, Hotel as HotelIcon, UserCircle2,
   FileText, ListChecks, Loader2, Sparkles, Download, Menu,
   Network, Plane, TicketCheck, ShieldCheck, Workflow,
+  UserRoundCog, ShieldAlert,
 } from 'lucide-react'
 import { SYSTEM_NAME, SYSTEM_TAGLINE } from '@/lib/branding'
 import { hasPermission, logout, roleLabel, perfilBBTLabel } from '@/lib/auth'
@@ -20,6 +21,7 @@ import type {
 import type { User } from '@/types'
 import { toast } from 'sonner'
 import { CorporateContextSelector } from '@/components/corporate-context-selector'
+import { useImpersonation } from '@/components/impersonation/impersonation-provider'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
@@ -33,6 +35,13 @@ interface HeaderProps {
 
 export function Header({ user, onOpenNavigation }: HeaderProps) {
   const router = useRouter()
+  const {
+    representation,
+    canStartRepresentation,
+    openDialog: openImpersonationDialog,
+    stopRepresentation,
+    stopping: stoppingImpersonation,
+  } = useImpersonation()
   const [darkMode, setDarkMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -267,7 +276,7 @@ export function Header({ user, onOpenNavigation }: HeaderProps) {
             <div className="text-left hidden sm:block">
               <div className="text-sm font-semibold text-bbt-primary dark:text-white leading-tight">{user.name}</div>
               <div className="text-[11px] text-slate-500 leading-tight">
-                {SYSTEM_NAME} · {SYSTEM_TAGLINE}
+                {representation ? 'Acesso assistido ativo' : `${SYSTEM_NAME} · ${SYSTEM_TAGLINE}`}
               </div>
             </div>
             <ChevronDown className={`w-4 h-4 text-slate-400 transition ${profileOpen ? 'rotate-180' : ''}`} />
@@ -282,9 +291,44 @@ export function Header({ user, onOpenNavigation }: HeaderProps) {
                   <span className="text-[10px] bg-white/20 backdrop-blur px-2 py-0.5 rounded-full">
                     {user.perfil_bbt ? perfilBBTLabel(user.perfil_bbt) : roleLabel(user.role)}
                   </span>
+                  {representation && (
+                    <span className="text-[10px] bg-amber-300/25 backdrop-blur px-2 py-0.5 rounded-full">
+                      {representation.mode === 'test' ? 'Teste' : 'Operação'}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="p-1">
+                {representation && (
+                  <div className="mx-2 mb-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                    <div className="flex items-center gap-1.5 font-semibold">
+                      <ShieldAlert className="h-3.5 w-3.5" /> Representado por {representation.actor.name}
+                    </div>
+                  </div>
+                )}
+                {canStartRepresentation && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileOpen(false)
+                      openImpersonationDialog()
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-bbt-text transition hover:bg-cyan-50 dark:text-slate-200 dark:hover:bg-cyan-950/30"
+                  >
+                    <UserRoundCog className="h-4 w-4 text-cyan-600" /> Acessar como usuário
+                  </button>
+                )}
+                {representation && (
+                  <button
+                    type="button"
+                    onClick={() => void stopRepresentation()}
+                    disabled={stoppingImpersonation}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-50 disabled:opacity-60 dark:text-amber-300 dark:hover:bg-amber-950/30"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    {stoppingImpersonation ? 'Encerrando...' : 'Encerrar acesso como'}
+                  </button>
+                )}
                 {user.role === 'master' && (
                   <Link href="/dashboard/meu-perfil" onClick={() => setProfileOpen(false)}
                     className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm hover:bg-bbt-gray-50 dark:hover:bg-slate-900 text-bbt-text dark:text-slate-200 transition">

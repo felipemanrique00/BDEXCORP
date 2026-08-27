@@ -14,10 +14,13 @@ import {
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+const INTERNAL_DEMAND_ROLES = ['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator']
+
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'ver_demandas',
+    roleKeys: INTERNAL_DEMAND_ROLES,
     rateLimit: { key: 'demands:detail:get', limit: 120, windowMs: 60_000 },
   })
   if (guard.response) return guard.response
@@ -43,6 +46,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   const guard = await guardApiRequest(request, {
     requireAuth: true,
     permission: 'criar_demandas',
+    roleKeys: INTERNAL_DEMAND_ROLES,
+    representationAction: 'demand.correct',
     rateLimit: { key: 'demands:detail:update', limit: 60, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

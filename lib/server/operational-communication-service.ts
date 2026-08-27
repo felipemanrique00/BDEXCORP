@@ -93,6 +93,12 @@ export async function getOperationalCommunicationOverview(
          where demand.tenant_id = $1
            and demand.company_id = any($2::text[])
            and demand.deleted_at is null
+           and (demand.travel_order_id is null or exists (
+             select 1 from company_portal_travel_orders visible_order
+             where visible_order.tenant_id = demand.tenant_id
+               and visible_order.id = demand.travel_order_id
+               and visible_order.status = 'submitted'
+           ))
            and demand.created_at >= $3::date
            and demand.created_at < ($4::date + interval '1 day')
            and ($5::text is null or demand.service_type = $5)
@@ -142,9 +148,15 @@ export async function createTravelDeskNote(
     let demandId = input.demandId || null
     if (demandId) {
       const demand = await client.query<{ company_id: string }>(
-        `select company_id
-         from demands
-         where tenant_id = $1 and id = $2 and deleted_at is null`,
+        `select demand.company_id
+         from demands demand
+         where demand.tenant_id = $1 and demand.id = $2 and demand.deleted_at is null
+           and (demand.travel_order_id is null or exists (
+             select 1 from company_portal_travel_orders visible_order
+             where visible_order.tenant_id = demand.tenant_id
+               and visible_order.id = demand.travel_order_id
+               and visible_order.status = 'submitted'
+           ))`,
         [principal.tenantId, demandId],
       )
       if (!demand.rows[0]) {
@@ -372,6 +384,12 @@ async function bootstrapLegacyMessages(
               $2, $10::timestamptz
        from demands demand
        where demand.tenant_id = $1 and demand.id = $11
+         and (demand.travel_order_id is null or exists (
+           select 1 from company_portal_travel_orders visible_order
+           where visible_order.tenant_id = demand.tenant_id
+             and visible_order.id = demand.travel_order_id
+             and visible_order.status = 'submitted'
+         ))
        on conflict do nothing`,
       [
         principal.tenantId,

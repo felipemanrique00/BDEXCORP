@@ -13,6 +13,7 @@ import type { Empresa, Funcionario, GrupoEmpresarial, Permissoes, User } from '@
 import { useCorporateContext } from '@/components/corporate-context-provider'
 import { CorporateBrandingSettingsPanel } from '@/components/branding/corporate-branding-settings-panel'
 import { VoucherPresentationSettingsPanel } from '@/components/vouchers/voucher-presentation-settings-panel'
+import { TravelerManagementSettingsPanel } from '@/components/travelers/traveler-management-settings-panel'
 import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { SearchInput } from '@/components/ui/search-input'
@@ -64,6 +65,20 @@ export default function GruposEmpresariaisPage() {
     gruposEmpresariais,
   ))
   const podeAlterarVoucherGrupo = Boolean(grupoSelecionado && hasFullGroupPermission(
+    user,
+    grupoSelecionado.id,
+    'alterar_configuracoes',
+    empresas,
+    gruposEmpresariais,
+  ))
+  const podeVerViajantesGrupo = Boolean(grupoSelecionado && hasFullGroupPermission(
+    user,
+    grupoSelecionado.id,
+    'ver_funcionarios',
+    empresas,
+    gruposEmpresariais,
+  ))
+  const podeAlterarViajantesGrupo = Boolean(grupoSelecionado && hasFullGroupPermission(
     user,
     grupoSelecionado.id,
     'alterar_configuracoes',
@@ -251,6 +266,17 @@ export default function GruposEmpresariaisPage() {
               scopeId={grupoSelecionado.id}
               scopeName={grupoSelecionado.nome}
               canManage={podeAlterarVoucherGrupo}
+              compact
+            />
+          )}
+
+          {grupoSelecionado && podeVerViajantesGrupo && (
+            <TravelerManagementSettingsPanel
+              key={`group:${grupoSelecionado.id}`}
+              scopeType="group"
+              scopeId={grupoSelecionado.id}
+              scopeName={grupoSelecionado.nome}
+              canManage={podeAlterarViajantesGrupo}
               compact
             />
           )}

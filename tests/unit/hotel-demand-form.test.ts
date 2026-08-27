@@ -20,6 +20,10 @@ const configuratorSource = readFileSync(
   resolve(process.cwd(), 'components/travel/hotel-demand-configurator.tsx'),
   'utf8',
 )
+const travelerPickerSource = readFileSync(
+  resolve(process.cwd(), 'components/travel/hotel-traveler-slot-picker.tsx'),
+  'utf8',
+)
 const catalogClientSource = readFileSync(
   resolve(process.cwd(), 'lib/hotel-catalog/client.ts'),
   'utf8',
@@ -132,7 +136,7 @@ describe('hotel demand guests/admin UI contract', () => {
     'Observações da demanda',
     'Solicitante',
   ])('renders the required field %s', (label) => {
-    expect(panelSource).toContain(label)
+    expect(`${panelSource}\n${travelerPickerSource}`).toContain(label)
   })
 
   it('does not own or import the geographic selector', () => {
@@ -183,7 +187,7 @@ describe('hotel demand preferred hotel catalog', () => {
   })
 
   it('reserves room for both traveler icons while loading', () => {
-    expect(configuratorSource).toContain('className="bbt-input pl-9 pr-10"')
+    expect(travelerPickerSource).toContain('className="bbt-input pl-9 pr-9"')
   })
 
   it('uses the browser-safe date primitive for the request period', () => {

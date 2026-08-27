@@ -16,6 +16,7 @@ import type {
 } from '@/lib/policy'
 
 const TENANT_SCOPE: PolicyScope = { type: 'tenant', specificity: 0 }
+const GROUP_SCOPE: PolicyScope = { type: 'group', id: 'group-a', specificity: 20 }
 const COMPANY_SCOPE: PolicyScope = { type: 'company', id: 'company-a', specificity: 30 }
 
 function policy(
@@ -232,6 +233,73 @@ describe('policy evaluation', () => {
 
     const result = evaluatePolicies([companyOverride, legal], context({ trip: { type: 'international' } }))
     expect(result.requiredDocuments.map((item) => item.policyVersionId)).toContain('version-passport-required')
+  })
+
+  it.each(['disable', 'stop_inheritance', 'replace', 'override'] as const)(
+    'nao permite que politica comum em modo %s suprima o gatilho canonico da matriz',
+    (inheritanceMode) => {
+      const matrixTrigger = policy(
+        'matrix.trigger.cost.group.abc',
+        { fact: 'operation.ready', operator: 'eq', value: true },
+        [{
+          type: 'request_approval',
+          message: 'Aprovacao da matriz obrigatoria.',
+          configuration: { workflow: 'matrix.cost.group.abc' },
+        }],
+        {
+          category: 'approval_matrix_cost',
+          inheritanceMode: 'replace',
+          scopes: [GROUP_SCOPE],
+        },
+      )
+      const genericCompanyPolicy = policy(
+        `generic-${inheritanceMode}`,
+        { fact: 'operation.ready', operator: 'eq', value: true },
+        [{ type: 'allow', message: 'Regra comum da empresa.' }],
+        {
+          category: 'approval_matrix_cost',
+          inheritanceMode,
+          scopes: [COMPANY_SCOPE],
+        },
+      )
+
+      const result = evaluatePolicies(
+        [genericCompanyPolicy, matrixTrigger],
+        context(
+          { operation: { ready: true } },
+          { scopes: [{ type: 'tenant' }, { type: 'group', id: 'group-a' }, { type: 'company', id: 'company-a' }] },
+        ),
+      )
+
+      expect(result.approvalsRequired.map((item) => item.policyCode)).toContain(matrixTrigger.code)
+      expect(result.policyVersions).toContain(matrixTrigger.versionId)
+    },
+  )
+
+  it('permite que matriz de empresa mais especifica substitua a matriz herdada do grupo', () => {
+    const groupMatrix = policy(
+      'matrix.trigger.cost.group.abc',
+      { fact: 'operation.ready', operator: 'eq', value: true },
+      [{ type: 'request_approval', message: 'Aprovacao do grupo.', configuration: { workflow: 'matrix.cost.group.abc' } }],
+      { category: 'approval_matrix_cost', inheritanceMode: 'replace', scopes: [GROUP_SCOPE] },
+    )
+    const companyMatrix = policy(
+      'matrix.trigger.cost.company.def',
+      { fact: 'operation.ready', operator: 'eq', value: true },
+      [{ type: 'request_approval', message: 'Aprovacao da empresa.', configuration: { workflow: 'matrix.cost.company.def' } }],
+      { category: 'approval_matrix_cost', inheritanceMode: 'replace', scopes: [COMPANY_SCOPE] },
+    )
+
+    const result = evaluatePolicies(
+      [companyMatrix, groupMatrix],
+      context(
+        { operation: { ready: true } },
+        { scopes: [{ type: 'tenant' }, { type: 'group', id: 'group-a' }, { type: 'company', id: 'company-a' }] },
+      ),
+    )
+
+    expect(result.approvalsRequired.map((item) => item.policyCode)).toEqual([companyMatrix.code])
+    expect(result.policyVersions).toEqual([companyMatrix.versionId])
   })
 
   it('aplica versoes por vigencia sem depender da ordem de entrada', () => {

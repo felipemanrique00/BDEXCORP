@@ -30,12 +30,14 @@ export type ApproverSelectorType =
   | 'group'
   | 'company'
   | 'branch'
+  | 'department'
   | 'cost_center'
   | 'project'
   | 'account'
   | 'requester'
   | 'traveler'
   | 'manager'
+  | 'approver_group'
   | 'authority'
   | 'amount'
   | 'currency'
@@ -58,7 +60,7 @@ export interface ApproverResolutionSpec {
   minimumApprovers: number
   maximumApprovers?: number
   allowSelfApproval: boolean
-  separationOfDuties?: Array<'requester' | 'traveler' | 'last_editor' | 'financial_executor'>
+  separationOfDuties?: Array<'requester' | 'traveler' | 'last_editor' | 'financial_executor' | 'prior_approver'>
 }
 
 export interface ApprovalWorkflowNode {
@@ -114,11 +116,15 @@ export interface ApprovalSubject {
   companyId: string
   groupId?: string | null
   branchId?: string | null
+  department?: string | null
   requesterUserId?: string | null
   travelerUserId?: string | null
   managerUserId?: string | null
   lastEditorUserId?: string | null
   financialExecutorUserId?: string | null
+  assistedActorUserId?: string | null
+  conflictedUserIds?: string[]
+  priorApproverUserIds?: string[]
   costCenterId?: string | null
   projectId?: string | null
   accountId?: string | null
@@ -133,7 +139,16 @@ export interface ApprovalSubject {
   product?: string | null
   destination?: string | null
   policyViolationCodes?: string[]
+  audienceGroupIds?: string[]
+  routing?: ApprovalRoutingFacts
   riskLevel?: string | null
+}
+
+export interface ApprovalRoutingFacts {
+  requiredLevel: 1 | 2
+  requiresSecondLevel: boolean
+  reasons: Array<'policy_required_second_level' | 'authority_limit_exceeded'>
+  sourcePolicyEvaluationIds: string[]
 }
 
 export interface ApprovalCandidate {
@@ -147,12 +162,17 @@ export interface ApprovalCandidate {
   companyIds: string[]
   groupIds: string[]
   branchIds?: string[]
+  departments?: string[]
   costCenterIds?: string[]
   projectIds?: string[]
   accountIds?: string[]
   budgetIds?: string[]
+  approverGroupIds?: string[]
+  audienceGroupIds?: string[]
   approvalKinds: ApprovalKind[]
   authorityMatched?: boolean
+  authorityLevel?: 1 | 2
+  authoritySpecificity?: number
   maxAmount?: number | null
   accumulatedAmountLimit?: number | null
   maxPercentageAboveLowest?: number | null
@@ -177,6 +197,8 @@ export interface ResolvedApprover {
 export interface ApproverResolutionResult {
   approvers: ResolvedApprover[]
   usedFallback: boolean
+  requiresEscalation: boolean
+  escalationReasons: Array<'authority_limit_exceeded'>
   explanations: string[]
 }
 

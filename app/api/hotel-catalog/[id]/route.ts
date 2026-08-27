@@ -11,6 +11,7 @@ export const dynamic = 'force-dynamic'
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const guard = await guardApiRequest(request, {
     requireAuth: true,
+    roleKeys: ['tenant_admin', 'supervisor', 'agent', 'operator', 'financial_manager'],
     rateLimit: { key: 'hotel-catalog:get', limit: 180, windowMs: 60_000 },
   })
   if (guard.response) return guard.response

@@ -9,6 +9,7 @@
   Database,
   FileBarChart,
   FileStack,
+  FlaskConical,
   History,
   Hotel,
   Inbox,
@@ -103,6 +104,13 @@ export function buildSidebarMenu({
           description: user.corporate_profile ? 'Portal corporativo autorizado' : 'Visão cliente, empresa e grupo',
           icon: Building2,
           hidden: !podeVerEmpresas,
+        },
+        {
+          href: '/dashboard/portal-empresa-lab',
+          label: 'Portal empresa · Laboratório',
+          description: 'Teste do novo fluxo aéreo offline',
+          icon: FlaskConical,
+          hidden: !podeVerDemandas && !podeCriarDemandas,
         },
         {
           href: '/dashboard/minha-viagem',

@@ -34,13 +34,16 @@ import type { RequestPrincipal } from '@/lib/server/request-context'
 import {
   BRANDING_IMAGE_MAX_BYTES,
   BRANDING_IMAGE_MAX_PIXELS,
+  BRANDING_SVG_MAX_PIXELS,
   BrandingImageValidationError,
+  detectBrandingImageFormat,
   validateBrandingImageEnvelope,
 } from '@/lib/security/branding-image'
 import type { Permissoes } from '@/types'
 
 const BRANDING_LOGO_MAX_BYTES = BRANDING_IMAGE_MAX_BYTES
 const BRANDING_LOGO_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const
+const BRANDING_IMAGE_PROCESSING_TIMEOUT_SECONDS = 3
 
 interface BrandingSettingRow extends QueryResultRow {
   id: string
@@ -575,24 +578,35 @@ async function normalizeBrandingLogo(
     // container build separately verifies that Sharp/libvips is available for
     // uploads, while a packaging regression cannot take the GET API down.
     const { default: sharp } = await import('sharp')
-    validateBrandingImageEnvelope(bytes, originalName, declaredMimeType)
+    const inputFormat = validateBrandingImageEnvelope(
+      bytes,
+      originalName,
+      declaredMimeType,
+      { allowSvg: true },
+    )
+    const inputPixelLimit = inputFormat === 'svg'
+      ? BRANDING_SVG_MAX_PIXELS
+      : BRANDING_IMAGE_MAX_PIXELS
     const input = sharp(bytes, {
       failOn: 'warning',
-      limitInputPixels: BRANDING_IMAGE_MAX_PIXELS,
+      limitInputPixels: inputPixelLimit,
       animated: false,
-    })
+    }).timeout({ seconds: BRANDING_IMAGE_PROCESSING_TIMEOUT_SECONDS })
     const metadata = await input.metadata()
+    if ((metadata as { format?: string }).format !== inputFormat) {
+      throw new BrandingImageValidationError('O tipo da logomarca nao corresponde ao conteudo decodificado.')
+    }
     if (
       !metadata.width
       || !metadata.height
-      || metadata.width * metadata.height > BRANDING_IMAGE_MAX_PIXELS
+      || metadata.width * metadata.height > inputPixelLimit
       || (metadata.pages || 1) > 1
     ) {
       throw new BrandingImageValidationError('Dimensoes da logomarca invalidas.')
     }
     const normalized = await sharp(bytes, {
       failOn: 'warning',
-      limitInputPixels: BRANDING_IMAGE_MAX_PIXELS,
+      limitInputPixels: inputPixelLimit,
       animated: false,
     })
       .rotate()
@@ -603,8 +617,13 @@ async function normalizeBrandingLogo(
         withoutEnlargement: true,
       })
       .webp({ quality: 90, alphaQuality: 95, effort: 5 })
+      .timeout({ seconds: BRANDING_IMAGE_PROCESSING_TIMEOUT_SECONDS })
       .toBuffer()
-    if (!normalized.length || normalized.length > BRANDING_IMAGE_MAX_BYTES) {
+    if (
+      !normalized.length
+      || normalized.length > BRANDING_IMAGE_MAX_BYTES
+      || detectBrandingImageFormat(normalized) !== 'webp'
+    ) {
       throw new BrandingImageValidationError('Nao foi possivel normalizar a logomarca dentro do limite de 5 MB.')
     }
     return normalized

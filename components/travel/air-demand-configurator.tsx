@@ -26,6 +26,7 @@ interface AirDemandConfiguratorProps {
     profile: TravelerDirectoryItem | null,
   ) => void
   onPassengerValidationChange?: (value: AirPassengerValidationState) => void
+  showPassengers?: boolean
   disabled?: boolean
 }
 
@@ -50,6 +51,7 @@ export function AirDemandConfigurator({
   legacyUnlinkedPassengerName = '',
   onPrimaryPassengerChange,
   onPassengerValidationChange,
+  showPassengers = true,
   disabled = false,
 }: AirDemandConfiguratorProps) {
   const tripType = value.trip_type || (value.data_volta ? 'round_trip' : 'one_way')
@@ -137,15 +139,17 @@ export function AirDemandConfigurator({
 
   return (
     <section className="space-y-4 rounded-xl border border-bbt-gray-100 p-4 dark:border-slate-700" aria-labelledby="air-demand-title">
-      <AirDemandPassengers
-        companyId={companyId}
-        value={passengers}
-        onChange={setPassengers}
-        onValidationChange={onPassengerValidationChange}
-        onPrimaryTravelerChange={onPrimaryPassengerChange}
-        legacyUnlinkedPassengerName={legacyUnlinkedPassengerName}
-        disabled={disabled}
-      />
+      {showPassengers && (
+        <AirDemandPassengers
+          companyId={companyId}
+          value={passengers}
+          onChange={setPassengers}
+          onValidationChange={onPassengerValidationChange}
+          onPrimaryTravelerChange={onPrimaryPassengerChange}
+          legacyUnlinkedPassengerName={legacyUnlinkedPassengerName}
+          disabled={disabled}
+        />
+      )}
 
       <header>
         <h4 id="air-demand-title" className="flex items-center gap-2 font-semibold text-bbt-primary dark:text-white">

@@ -307,24 +307,32 @@ export async function enrichVouchersFromDatabase(
      left join reservations reservation
        on reservation.tenant_id = voucher.tenant_id
       and reservation.id = voucher.reservation_id
+      and reservation.company_id = voucher.company_id
      left join demands demand
        on demand.tenant_id = voucher.tenant_id
       and demand.id = coalesce(voucher.demand_id, reservation.demand_id)
+      and demand.company_id = voucher.company_id
      left join companies company
        on company.tenant_id = voucher.tenant_id
-      and company.id = coalesce(voucher.company_id, reservation.company_id, demand.company_id)
+      and company.id = voucher.company_id
      left join employees employee
        on employee.tenant_id = voucher.tenant_id
       and employee.id = coalesce(voucher.employee_id, reservation.employee_id, demand.employee_id)
+      and employee.company_id = voucher.company_id
      left join requesters requester
        on requester.tenant_id = voucher.tenant_id
       and requester.id = demand.requester_id
+      and requester.company_id = voucher.company_id
      left join travel_emissions emission
        on emission.tenant_id = voucher.tenant_id
       and emission.id = voucher.emission_id
+      and emission.company_id = voucher.company_id
+      and emission.demand_id = demand.id
+      and emission.reservation_id = reservation.id
      left join travel_quote_selections selection
        on selection.tenant_id = voucher.tenant_id
       and selection.id = reservation.quote_selection_id
+      and selection.demand_id = demand.id
      left join lateral (
        select jsonb_agg(
          jsonb_build_object(
@@ -363,9 +371,11 @@ export async function enrichVouchersFromDatabase(
         and room_guest.traveler_id = traveler.id
        left join hotel_demand_rooms room
          on room.tenant_id = room_guest.tenant_id
+        and room.demand_id = room_guest.demand_id
         and room.id = room_guest.room_id
        where traveler.tenant_id = voucher.tenant_id
          and traveler.demand_id = demand.id
+         and traveler.company_id = voucher.company_id
          and traveler.deleted_at is null
      ) guest_projection on true
      left join lateral (
@@ -386,6 +396,7 @@ export async function enrichVouchersFromDatabase(
           and traveler.id = room_guest.traveler_id
           and traveler.deleted_at is null
          where room_guest.tenant_id = room.tenant_id
+           and room_guest.demand_id = room.demand_id
            and room_guest.room_id = room.id
        ) room_guests on true
        where room.tenant_id = voucher.tenant_id
@@ -399,10 +410,15 @@ export async function enrichVouchersFromDatabase(
            order by decision.decided_at, decision.id
          ) filter (where approver.name is not null) as items,
          max(decision.decided_at) as authorized_at
-       from approval_decisions decision
+       from approval_instances approved_instance
+       join approval_decisions decision
+         on decision.tenant_id = approved_instance.tenant_id
+        and decision.approval_instance_id = approved_instance.id
        left join users approver on approver.id = decision.decided_by_user_id
-       where decision.tenant_id = voucher.tenant_id
-         and decision.approval_instance_id = selection.approval_instance_id
+       where approved_instance.tenant_id = voucher.tenant_id
+         and approved_instance.id = selection.approval_instance_id
+         and approved_instance.company_id = voucher.company_id
+         and approved_instance.demand_id = demand.id
          and decision.decision = 'approved'
      ) approval_projection on true
      where voucher.tenant_id = $1

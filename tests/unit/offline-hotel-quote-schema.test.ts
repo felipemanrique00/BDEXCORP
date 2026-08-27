@@ -129,6 +129,29 @@ describe('offline hotel quote schemas', () => {
     }).success).toBe(false)
   })
 
+  it('preserves an immutable emission observation only in last-emission mode', () => {
+    const observationId = '349fb9b5-85df-4b54-8f25-cced65b97d47'
+    const parsed = offlineHotelQuoteOptionSchema.parse({
+      ...option('client-observed', 'hotel-observed'),
+      pricingMode: 'last_emission',
+      emissionObservationReference: { id: observationId },
+    })
+    expect(parsed).toMatchObject({
+      pricingMode: 'last_emission',
+      emissionObservationReference: { id: observationId },
+    })
+
+    expect(offlineHotelQuoteOptionSchema.safeParse({
+      ...option('client-observed', 'hotel-observed'),
+      pricingMode: 'last_emission',
+    }).success).toBe(false)
+    expect(offlineHotelQuoteOptionSchema.safeParse({
+      ...option('client-manual', 'hotel-manual'),
+      pricingMode: 'manual',
+      emissionObservationReference: { id: observationId },
+    }).success).toBe(false)
+  })
+
   it('rejects too few or too many options', () => {
     expect(offlineHotelQuoteCreateSchema.safeParse({
       ...quoteInput(),

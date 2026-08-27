@@ -99,8 +99,8 @@ const OPERATION_ONLY: OfflineServiceCapabilities = {
 export const OFFLINE_SERVICE_DEFINITIONS: readonly OfflineServiceDefinition[] = [
   { key: 'hotelaria', relationalCode: 'hotel', label: LABELS.hotelaria, shortLabel: 'Hotel', capabilities: COMPLETE },
   { key: 'aereo', relationalCode: 'air', label: LABELS.aereo, shortLabel: 'Aéreo', capabilities: COMPLETE },
-  { key: 'locacao', relationalCode: 'car', label: LABELS.locacao, shortLabel: 'Carro', capabilities: OPERATION_ONLY },
-  { key: 'rodoviario', relationalCode: 'bus', label: LABELS.rodoviario, shortLabel: 'Rodoviário', capabilities: OPERATION_ONLY },
+  { key: 'locacao', relationalCode: 'car', label: LABELS.locacao, shortLabel: 'Carro', capabilities: COMPLETE },
+  { key: 'rodoviario', relationalCode: 'bus', label: LABELS.rodoviario, shortLabel: 'Rodoviário', capabilities: COMPLETE },
   { key: 'transfer', relationalCode: 'transfer', label: LABELS.transfer, shortLabel: 'Transfer', capabilities: OPERATION_ONLY },
   { key: 'seguro', relationalCode: 'insurance', label: LABELS.seguro, shortLabel: 'Seguro', capabilities: OPERATION_ONLY },
   { key: 'ferroviario', relationalCode: 'rail', label: LABELS.ferroviario, shortLabel: 'Ferroviário', capabilities: OPERATION_ONLY },
@@ -161,6 +161,7 @@ export function offlineLegacyServiceType(value: string): TipoServico {
   if (service === 'aereo') return 'Aéreo'
   if (service === 'hotelaria') return 'Hotel'
   if (service === 'locacao') return 'Carro'
+  if (service === 'rodoviario') return 'Rodoviário'
   if (service === 'pacotes' || service === 'lazer' || service === 'transfer' || service === 'seguro') {
     return 'Pacote'
   }

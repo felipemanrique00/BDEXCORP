@@ -17,10 +17,11 @@ import { useState, useEffect } from 'react'
 import { Modal } from '@/components/ui/modal'
 import { toast } from 'sonner'
 import { PoliticaModal } from '@/components/ui/politica-modal'
-import { SolicitantesEmpresaTab } from '@/components/empresas/solicitantes-empresa-tab'
+import { CompanyPeopleAccessTab } from '@/components/empresas/company-people-access-tab'
 import { CostCentersCompanyTab } from '@/components/empresas/cost-centers-company-tab'
 import { CorporateBrandingSettingsPanel } from '@/components/branding/corporate-branding-settings-panel'
 import { VoucherPresentationSettingsPanel } from '@/components/vouchers/voucher-presentation-settings-panel'
+import { TravelerManagementSettingsPanel } from '@/components/travelers/traveler-management-settings-panel'
 import { getEmissoesByEmpresa, getRankingHoteisByEmpresa, type Emissao } from '@/lib/emissoes-storage'
 import { loadManualHotelBookingsFromServer } from '@/lib/manual-hotel-booking-client'
 import { getEstatisticas, getAtendimentosByEmpresa, getEstatisticasPorTipo } from '@/lib/atendimentos-storage'
@@ -55,8 +56,30 @@ export default function EmpresaDetalhePage() {
   const { empresas, funcionarios, politicas, gruposEmpresariais, updatePolitica, addPolitica } = useStore()
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const empresa = empresas.find((e) => e.id === id)
+  const empresaGroup = empresa?.grupo_id
+    ? gruposEmpresariais.find((group) => group.id === empresa.grupo_id)
+    : null
+  const groupCompanies = empresaGroup
+    ? empresas.filter((company) => (
+        company.ativa
+        && (company.grupo_id === empresaGroup.id || empresaGroup.empresa_ids.includes(company.id))
+      ))
+    : []
+  const groupWorkflowAuthorities = empresaGroup
+    ? user?.corporate_access?.groups.find((group) => group.groupId === empresaGroup.id)?.delegationAuthorities
+      ?.filter((authority) => authority.source === 'group' && authority.permissions.gerenciar_workflows) || []
+    : []
+  const hasTenantWideWorkflowAccess = Boolean(user?.platform_admin || user?.role === 'master' || user?.corporate_access?.tenantWide)
+  const manageableGroupCompanyIds = hasTenantWideWorkflowAccess
+    ? groupCompanies.map((company) => company.id)
+    : [...new Set(groupWorkflowAuthorities.flatMap((authority) => authority.companyIds))]
+  const canManageAllGroupCompanies = Boolean(
+    empresaGroup
+    && (hasTenantWideWorkflowAccess || groupWorkflowAuthorities.some((authority) => authority.accessMode === 'all_companies'))
+  )
   const funcs = funcionarios.filter((f) => f.company_id === id)
   const pols = politicas.filter((p) => p.company_id === id)
+  const solicitantesEmpresa = getSolicitantesPorEmpresa(id)
 
   const canViewEmployees = includesCompany(id, 'ver_funcionarios')
   const canManageEmployees = includesCompany(id, 'gerenciar_funcionarios')
@@ -64,9 +87,12 @@ export default function EmpresaDetalhePage() {
   const canManageRequesters = includesCompany(id, 'gerenciar_solicitantes')
   const canViewCostCenters = includesCompany(id, 'ver_centros_custo')
   const canManageCostCenters = includesCompany(id, 'gerenciar_centros_custo')
+  const canViewApprovals = includesCompany(id, 'ver_aprovacoes')
+  const canManageApprovalRules = includesCompany(id, 'gerenciar_workflows')
   const canViewVouchers = includesCompany(id, 'ver_vouchers')
   const canManageVoucherSettings = includesCompany(id, 'alterar_configuracoes')
   const canManageBranding = includesCompany(id, 'alterar_configuracoes')
+  const canManageTravelerSettings = includesCompany(id, 'alterar_configuracoes')
   const canManageRequesterLogins = canManageUserAccess(user)
     && canAccessCompanyPermission(
       user,
@@ -114,7 +140,7 @@ export default function EmpresaDetalhePage() {
   const tabs: { id: Tab; label: string; icon: any; count?: number }[] = [
     { id: 'dados', label: 'Dados', icon: Building2 },
     ...(canViewEmployees ? [{ id: 'funcionarios' as const, label: 'Funcionários', icon: Users, count: funcs.length }] : []),
-    ...(canViewRequesters ? [{ id: 'solicitantes' as const, label: 'Acessos', icon: UserRound, count: getSolicitantesPorEmpresa(id).length }] : []),
+    ...(canViewRequesters ? [{ id: 'solicitantes' as const, label: 'Pessoas e acessos', icon: UserRound, count: solicitantesEmpresa.length }] : []),
     ...(canViewCostCenters ? [{ id: 'centros_custo' as const, label: 'Centros de custo', icon: DollarSign }] : []),
     ...(canManageBranding ? [{ id: 'branding' as const, label: 'Identidade visual', icon: Palette }] : []),
     ...(canViewVouchers ? [{ id: 'voucher' as const, label: 'Voucher', icon: FileText }] : []),
@@ -194,7 +220,7 @@ export default function EmpresaDetalhePage() {
             </div>}
             {canViewRequesters && <div className="bbt-card p-6">
               <div className="text-sm text-slate-500">Acessos do portal</div>
-              <div className="text-4xl font-bold text-bbt-primary dark:text-white mt-2">{getSolicitantesPorEmpresa(id).length}</div>
+              <div className="text-4xl font-bold text-bbt-primary dark:text-white mt-2">{solicitantesEmpresa.length}</div>
               <button onClick={() => setTab('solicitantes')} className="text-sm text-bbt-accent hover:underline mt-3 inline-flex items-center gap-1">
                 <UserRound className="w-4 h-4" /> Gerenciar acessos
               </button>
@@ -211,15 +237,31 @@ export default function EmpresaDetalhePage() {
       )}
 
       {tab === 'funcionarios' && (
-        <FuncionariosTab companyId={empresa.id} companyName={empresa.nome} funcs={funcs} canEdit={canManageEmployees} onImport={() => setImportModalOpen(true)} />
+        <div className="space-y-4">
+          <TravelerManagementSettingsPanel
+            key={`company:${empresa.id}`}
+            scopeType="company"
+            scopeId={empresa.id}
+            scopeName={empresa.nome}
+            canManage={canManageTravelerSettings}
+          />
+          <FuncionariosTab companyId={empresa.id} companyName={empresa.nome} funcs={funcs} canEdit={canManageEmployees} onImport={() => setImportModalOpen(true)} />
+        </div>
       )}
 
       {tab === 'solicitantes' && (
-        <SolicitantesEmpresaTab
+        <CompanyPeopleAccessTab
           empresa={empresa}
-          funcionarios={funcionarios}
-          canEdit={canManageRequesters}
+          funcionarios={funcs}
+          solicitantes={solicitantesEmpresa}
+          canEditPeople={canManageRequesters}
           canManageLogins={canManageRequesterLogins}
+          canViewApprovals={canViewApprovals}
+          canManageApprovals={canManageApprovalRules}
+          businessGroupName={empresaGroup?.nome || null}
+          groupCompanies={groupCompanies.map((company) => ({ id: company.id, name: company.nome }))}
+          manageableGroupCompanyIds={manageableGroupCompanyIds}
+          canManageAllGroupCompanies={canManageAllGroupCompanies}
         />
       )}
 

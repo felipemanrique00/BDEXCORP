@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   assessDemandUpdate,
+  lifecycleAllowsNormalAirDemandEdit,
   lifecycleAllowsNormalHotelDemandEdit,
   lifecycleAllowsMaterialDemandEdit,
   type DemandUpdateSnapshot,
@@ -92,14 +93,34 @@ describe('demand update governance', () => {
     expect(lifecycleAllowsMaterialDemandEdit('closed')).toBe(false)
   })
 
-  it('bloqueia a edicao hoteleira comum desde a cotacao', () => {
-    expect(lifecycleAllowsNormalHotelDemandEdit('submitted')).toBe(true)
+  it('bloqueia a hospedagem enviada salvo devolucao auditada', () => {
+    expect(lifecycleAllowsNormalHotelDemandEdit('draft')).toBe(true)
+    expect(lifecycleAllowsNormalHotelDemandEdit('draft', false, true)).toBe(false)
+    expect(lifecycleAllowsNormalHotelDemandEdit('draft', true, true)).toBe(true)
+    expect(lifecycleAllowsNormalHotelDemandEdit('submitted')).toBe(false)
     expect(lifecycleAllowsNormalHotelDemandEdit('quoting')).toBe(false)
     expect(lifecycleAllowsNormalHotelDemandEdit('pending_choice')).toBe(false)
+    expect(lifecycleAllowsNormalHotelDemandEdit('submitted', true)).toBe(true)
+    expect(lifecycleAllowsNormalHotelDemandEdit('pending_choice', true)).toBe(true)
+    expect(lifecycleAllowsNormalHotelDemandEdit('quoting', true)).toBe(false)
     expect(lifecycleAllowsNormalHotelDemandEdit('pending_cost_approval')).toBe(false)
     expect(lifecycleAllowsNormalHotelDemandEdit('approved')).toBe(false)
     expect(lifecycleAllowsNormalHotelDemandEdit('reserved')).toBe(false)
     expect(demandServiceSource).toContain('HOTEL_DEMAND_NORMAL_EDIT_LOCKED')
-    expect(demandServiceSource).toContain('lifecycleAllowsNormalHotelDemandEdit(current.lifecycle_status)')
+    expect(demandServiceSource).toContain('hotelRequestAdjustmentAllowed')
+    expect(demandServiceSource).toContain('requestAdjustmentEditAllowed')
+  })
+
+  it('mantem toda solicitacao aerea persistida bloqueada salvo devolucao auditada', () => {
+    expect(lifecycleAllowsNormalAirDemandEdit('draft')).toBe(false)
+    expect(lifecycleAllowsNormalAirDemandEdit('submitted')).toBe(false)
+    expect(lifecycleAllowsNormalAirDemandEdit('pending_choice')).toBe(false)
+    expect(lifecycleAllowsNormalAirDemandEdit('submitted', true)).toBe(true)
+    expect(lifecycleAllowsNormalAirDemandEdit('pending_choice', true)).toBe(true)
+    expect(lifecycleAllowsNormalAirDemandEdit('quoting', true)).toBe(false)
+    expect(demandServiceSource).toContain('AIR_DEMAND_NORMAL_EDIT_LOCKED')
+    expect(demandServiceSource).toContain("demandRequestAdjustmentAllows(\n      current.metadata,\n      'edit_request'")
+    expect(demandServiceSource).toContain('supersedeDemandQuoteRoundsForRequestAdjustment(')
+    expect(demandServiceSource).toContain("'return_for_adjustment'")
   })
 })

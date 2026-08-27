@@ -16,7 +16,10 @@ const querySchema = z.object({
     'financial', 'executive', 'cost_center', 'project', 'company', 'group',
     'traveler', 'debit', 'national', 'second_level', 'list', 'allocation_line',
   ]).optional(),
-  status: z.enum(['scheduled', 'active', 'suspended', 'revoked', 'expired']).optional(),
+  status: z.enum(['draft', 'scheduled', 'active', 'suspended', 'revoked', 'expired']).optional(),
+  companyId: z.string().trim().min(1).max(200).optional(),
+  includeInherited: z.enum(['true', 'false']).transform((value) => value === 'true').default('false'),
+  approvalLevel: z.coerce.number().int().min(1).max(2).optional().transform((value) => value as 1 | 2 | undefined),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 })

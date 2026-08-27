@@ -289,7 +289,7 @@ export function calcularEstatisticasAtendimentos(base: Atendimento[]): Estatisti
     em_andamento: 0, aguardando_cliente: 0, finalizado: 0, cancelado: 0, pendente: 0,
   }
   const por_tipo: Record<TipoServico, number> = {
-    'Aéreo': 0, Hotel: 0, Carro: 0, Pacote: 0, Outro: 0,
+    'Aéreo': 0, Hotel: 0, Carro: 0, Rodoviário: 0, Pacote: 0, Outro: 0,
   }
   const por_prioridade: Record<Prioridade, number> = {
     baixa: 0, media: 0, alta: 0, urgente: 0,
@@ -357,6 +357,7 @@ export function getEstatisticasPorTipo(filtro: FiltroAtendimento = {}): Record<T
     'Aéreo': { quantidade: 0, custo: 0, venda: 0, markup: 0, taxa: 0, faturado: 0 },
     Hotel: { quantidade: 0, custo: 0, venda: 0, markup: 0, taxa: 0, faturado: 0 },
     Carro: { quantidade: 0, custo: 0, venda: 0, markup: 0, taxa: 0, faturado: 0 },
+    Rodoviário: { quantidade: 0, custo: 0, venda: 0, markup: 0, taxa: 0, faturado: 0 },
     Pacote: { quantidade: 0, custo: 0, venda: 0, markup: 0, taxa: 0, faturado: 0 },
     Outro: { quantidade: 0, custo: 0, venda: 0, markup: 0, taxa: 0, faturado: 0 },
   }

@@ -20,8 +20,15 @@ import {
   classifyTechMutationFailure,
   type TechMutationFailureStatus,
 } from '@/lib/integrations/tech/tech-errors'
-import { sha256, type PolicyEvaluationResult, type PolicyScopeContext } from '@/lib/policy'
-import { createApprovalInstance } from '@/lib/server/approval-service'
+import {
+  sha256,
+  type PolicyEvaluationResult,
+  type PolicyResultItem,
+  type PolicyScopeContext,
+} from '@/lib/policy'
+import { policyResultsRequireSecondLevel } from '@/lib/approvals/policy-routing'
+import { offlinePolicyCoverageFingerprint } from '@/lib/offline-travel/policy-coverage'
+import { createTrustedApprovalInstance } from '@/lib/server/approval-service'
 import {
   getAccessibleCompanyIds,
   requireCompanyAccess,
@@ -30,6 +37,7 @@ import {
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import { evaluateAndPersistPoliciesInTransaction } from '@/lib/server/policy-service'
+import { resolvePolicyApprovalWorkflowCode } from '@/lib/server/policy-approval-workflow'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import {
   isRequesterReadPrincipal,
@@ -255,6 +263,7 @@ type QuotePreparation =
       employeeId: string | null
       workflowCode: string
       policyEvaluationId: string
+      policyCoverageFingerprint: string | null
       idempotencyKey: string
       subject: Record<string, unknown>
       requirements: TravelTransitionRequirements
@@ -365,6 +374,12 @@ export interface TravelQuoteExecutionResult {
 
 export interface GovernedTravelQuoteExecutionOptions {
   provider?: IntegrationProvider
+  loadPolicyTravelers?: (context: {
+    client: PoolClient
+    principal: RequestPrincipal
+    demand: GovernedTravelQuotePolicyDemand
+    request: TravelQuoteRequest
+  }) => Promise<GovernedTravelQuotePolicyTraveler[]>
   persistOptionDetails?: (context: {
     client: PoolClient
     principal: RequestPrincipal
@@ -374,6 +389,33 @@ export interface GovernedTravelQuoteExecutionOptions {
     optionIdsByProviderId: ReadonlyMap<string, string>
     quote: TravelQuote
   }) => Promise<void>
+}
+
+export interface GovernedTravelQuotePolicyDemand {
+  id: string
+  tenant_id: string
+  company_id: string
+  employee_id: string | null
+  service_type: string
+  passenger_name_snapshot: string
+  cost_center: string | null
+  employee_name: string | null
+  employee_department: string | null
+  employee_cost_center: string | null
+  metadata: Record<string, unknown>
+}
+
+export interface GovernedTravelQuotePolicyTraveler {
+  demandTravelerId: string | null
+  employeeId: string | null
+  name: string
+  document: string | null
+  email: string | null
+  phone: string | null
+  jobTitle: string | null
+  department: string | null
+  costCenter: string | null
+  sequence: number
 }
 
 export interface TravelReservationExecutionResult {
@@ -808,18 +850,20 @@ export async function executeGovernedTravelQuote(
   options: GovernedTravelQuoteExecutionOptions = {},
 ): Promise<TravelQuoteExecutionResult> {
   const provider = options.provider || PROVIDER
-  const preparation = await prepareQuote(principal, request, fallbackIdempotencyKey, provider)
+  const preparation = await prepareQuote(principal, request, fallbackIdempotencyKey, provider, options)
   if (preparation.kind === 'replay') return { ...preparation.result, replayed: true }
   if (preparation.kind === 'stop') throw preparation.error
   if (preparation.kind === 'approval') {
-    const instance = await createApprovalInstance(principal, {
+    const instance = await createTrustedApprovalInstance(principal, {
       workflowCode: preparation.workflowCode,
       companyId: preparation.companyId,
       demandId: preparation.demandId,
       employeeId: preparation.employeeId,
       instanceType: 'merit',
       subject: preparation.subject,
-      idempotencyKey: `${preparation.idempotencyKey}:approval:${preparation.workflowCode}`,
+      idempotencyKey: `${preparation.idempotencyKey}:approval:${preparation.workflowCode}${
+        preparation.policyCoverageFingerprint ? `:${preparation.policyCoverageFingerprint}` : ''
+      }`,
     })
     await moveDemandToMeritApproval(
       principal,
@@ -859,7 +903,7 @@ export async function executeGovernedTravelReservation(
   if (preparation.kind === 'replay') return { ...preparation.result, replayed: true }
   if (preparation.kind === 'stop') throw preparation.error
   if (preparation.kind === 'approval') {
-    const instance = await createApprovalInstance(principal, {
+    const instance = await createTrustedApprovalInstance(principal, {
       workflowCode: preparation.workflowCode,
       companyId: preparation.companyId,
       demandId: preparation.demandId,
@@ -909,7 +953,7 @@ export async function executeGovernedTravelIssue(
   if (preparation.kind === 'replay') return { ...preparation.result, replayed: true }
   if (preparation.kind === 'stop') throw preparation.error
   if (preparation.kind === 'approval') {
-    const instance = await createApprovalInstance(principal, {
+    const instance = await createTrustedApprovalInstance(principal, {
       workflowCode: preparation.workflowCode,
       companyId: preparation.companyId,
       demandId: preparation.demandId,
@@ -965,7 +1009,7 @@ export async function executeGovernedTravelCancellation(
   if (preparation.kind === 'replay') return { ...preparation.result, replayed: true }
   if (preparation.kind === 'stop') throw preparation.error
   if (preparation.kind === 'approval') {
-    const instance = await createApprovalInstance(principal, {
+    const instance = await createTrustedApprovalInstance(principal, {
       workflowCode: preparation.workflowCode,
       companyId: preparation.companyId,
       demandId: preparation.demandId,
@@ -1151,7 +1195,13 @@ async function prepareIssue(
       }
     }
 
-    const approval = await approvalState(client, principal.tenantId, demand.active_approval_instance_id, 'issuance')
+    const approval = await approvalState(
+      client,
+      principal.tenantId,
+      demand.active_approval_instance_id,
+      'issuance',
+      { demandId: demand.id, companyId: demand.company_id },
+    )
     if (policy.result.approvalsRequired.length && !approval.satisfied) {
       if (approval.instanceId && ['pending', 'in_progress'].includes(approval.status || '')) {
         return {
@@ -1164,7 +1214,7 @@ async function prepareIssue(
           ),
         }
       }
-      const workflowCode = await resolveApprovalWorkflowCode(client, principal.tenantId, policy.result)
+      const workflowCode = await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policy.result)
       if (!workflowCode) {
         return {
           kind: 'stop',
@@ -1322,7 +1372,13 @@ async function prepareCancellation(
       reservation.id,
     )
 
-    const approval = await approvalState(client, principal.tenantId, demand.active_approval_instance_id, 'cancellation')
+    const approval = await approvalState(
+      client,
+      principal.tenantId,
+      demand.active_approval_instance_id,
+      'cancellation',
+      { demandId: demand.id, companyId: demand.company_id },
+    )
     if (policy.result.approvalsRequired.length && !approval.satisfied) {
       if (approval.instanceId && ['pending', 'in_progress'].includes(approval.status || '')) {
         return {
@@ -1335,7 +1391,7 @@ async function prepareCancellation(
           ),
         }
       }
-      const workflowCode = await resolveApprovalWorkflowCode(client, principal.tenantId, policy.result)
+      const workflowCode = await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policy.result)
       if (!workflowCode) {
         return {
           kind: 'stop',
@@ -1358,6 +1414,7 @@ async function prepareCancellation(
         idempotencyKey,
         subject: {
           ...postBookingApprovalSubject(demand, reservation, policy.result, 'cancellation'),
+          policyEvaluationIds: [policy.databaseEvaluationId],
           reason: request.reason || null,
           cancellationType: operationType === 'cancel_ticket' ? 'ticket' : 'reservation',
         },
@@ -1407,6 +1464,7 @@ async function prepareQuote(
   request: TravelQuoteRequest,
   fallbackIdempotencyKey: string,
   provider: IntegrationProvider = PROVIDER,
+  options: GovernedTravelQuoteExecutionOptions = {},
 ): Promise<QuotePreparation> {
   const idempotencyKey = normalizedIdempotencyKey(request.idempotencyKey || fallbackIdempotencyKey)
   return withTenantTransaction(principal.tenantId, async (client) => {
@@ -1445,31 +1503,93 @@ async function prepareQuote(
       throwPendingOrFailedOperation(existing)
     }
 
-    const policy = await evaluateAndPersistPoliciesInTransaction(client, principal, {
-      companyId: demand.company_id,
-      employeeId: demand.employee_id,
-      demandId: demand.id,
-      context: {
-        checkpoint: 'quotation',
-        evaluatedAt: new Date().toISOString(),
-        mode: 'enforce',
-        scopes: policyScopes(demand),
-        facts: buildPolicyFacts(demand, providerRequest, 'quotation'),
-      },
-    })
-    const policyStop = policyStopError(policy.result, request.policyJustification)
-    if (policyStop) return { kind: 'stop', error: policyStop }
-    await persistPolicyJustification(
-      client,
-      principal,
-      demand,
-      policy.databaseEvaluationId,
-      'quotation',
-      request.policyJustification,
-      policy.result.justificationsRequired.length > 0,
+    const evaluatedAt = new Date().toISOString()
+    const travelers = options.loadPolicyTravelers
+      ? await options.loadPolicyTravelers({ client, principal, demand, request: providerRequest })
+      : [defaultQuotePolicyTraveler(demand)]
+    if (!travelers.length) {
+      return {
+        kind: 'stop',
+        error: new TravelGovernanceError(
+          'TRAVEL_POLICY_TRAVELER_MISSING',
+          'Nao foi possivel identificar os viajantes ativos para avaliar as politicas.',
+          409,
+        ),
+      }
+    }
+    const policyEvaluations: Array<{
+      databaseEvaluationId: string
+      result: PolicyEvaluationResult
+      traveler: GovernedTravelQuotePolicyTraveler
+    }> = []
+    for (const traveler of travelers) {
+      const evaluation = await evaluateAndPersistPoliciesInTransaction(client, principal, {
+        companyId: demand.company_id,
+        employeeId: traveler.employeeId,
+        demandId: demand.id,
+        context: {
+          checkpoint: 'quotation',
+          evaluatedAt,
+          mode: 'enforce',
+          scopes: policyScopes(demand, traveler),
+          facts: buildPolicyFacts(demand, providerRequest, 'quotation', traveler, evaluatedAt),
+        },
+      })
+      policyEvaluations.push({ ...evaluation, traveler })
+    }
+    const primaryPolicy = policyEvaluations[0]
+    const policyResult = mergeQuotePolicyResults(
+      policyEvaluations.map((evaluation) => evaluation.result),
+      evaluatedAt,
     )
-    const approval = await approvalState(client, principal.tenantId, demand.active_approval_instance_id, 'merit')
-    if (policy.result.approvalsRequired.length && !approval.satisfied) {
+    const policyEvaluationRefs = policyEvaluations.map((evaluation) => ({
+      databaseEvaluationId: evaluation.databaseEvaluationId,
+      demandTravelerId: evaluation.traveler.demandTravelerId,
+      employeeId: evaluation.traveler.employeeId,
+      sequence: evaluation.traveler.sequence,
+    }))
+    const policyCoverageFingerprint = policyResult.approvalsRequired.length
+      && travelers.every((traveler) => traveler.demandTravelerId)
+      ? offlinePolicyCoverageFingerprint(
+          travelers.map((traveler) => traveler.demandTravelerId as string),
+          policyResult.approvalsRequired,
+        )
+      : null
+    const policyStop = policyStopError(policyResult, request.policyJustification)
+    if (policyStop) return { kind: 'stop', error: policyStop }
+    for (const evaluation of policyEvaluations) {
+      await persistPolicyJustification(
+        client,
+        principal,
+        demand,
+        evaluation.databaseEvaluationId,
+        'quotation',
+        request.policyJustification,
+        evaluation.result.justificationsRequired.length > 0,
+      )
+    }
+    let approval = await approvalState(
+      client,
+      principal.tenantId,
+      demand.active_approval_instance_id,
+      'merit',
+      {
+        demandId: demand.id,
+        companyId: demand.company_id,
+        policyCoverageFingerprint,
+      },
+    )
+    if (approval.coverageMismatch) {
+      await supersedeQuoteApprovalCoverage(
+        client,
+        principal,
+        demand,
+        approval.instanceId,
+        policyCoverageFingerprint,
+      )
+      approval = { satisfied: false, status: null, instanceId: null }
+    }
+    if (policyResult.approvalsRequired.length && !approval.satisfied) {
       if (approval.instanceId && ['pending', 'in_progress'].includes(approval.status || '')) {
         return {
           kind: 'stop',
@@ -1481,7 +1601,7 @@ async function prepareQuote(
           ),
         }
       }
-      const workflowCode = await resolveApprovalWorkflowCode(client, principal.tenantId, policy.result)
+      const workflowCode = await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policyResult)
       if (!workflowCode) {
         return {
           kind: 'stop',
@@ -1489,29 +1609,33 @@ async function prepareQuote(
             'TRAVEL_APPROVAL_WORKFLOW_NOT_CONFIGURED',
             'A politica exige aprovacao, mas nao aponta para um unico workflow publicado.',
             422,
-            { policies: policy.result.approvalsRequired.map((item) => item.policyCode) },
+            { policies: policyResult.approvalsRequired.map((item) => item.policyCode) },
           ),
         }
       }
-      const requirements = policyRequirements(policy.databaseEvaluationId, policy.result, approval.instanceId, false, demand)
+      const requirements = policyRequirements(primaryPolicy.databaseEvaluationId, policyResult, approval.instanceId, false, demand)
       return {
         kind: 'approval',
         demandId: demand.id,
         companyId: demand.company_id,
         employeeId: demand.employee_id,
         workflowCode,
-        policyEvaluationId: policy.databaseEvaluationId,
+        policyEvaluationId: primaryPolicy.databaseEvaluationId,
+        policyCoverageFingerprint,
         idempotencyKey,
         requirements,
-        subject: approvalSubject(demand, providerRequest, policy.result),
+        subject: approvalSubject(demand, providerRequest, policyResult, {
+          policyCoverageFingerprint,
+          policyEvaluationRefs,
+        }),
       }
     }
 
     const requirements = policyRequirements(
-      policy.databaseEvaluationId,
-      policy.result,
+      primaryPolicy.databaseEvaluationId,
+      policyResult,
       approval.instanceId,
-      approval.satisfied || policy.result.approvalsRequired.length === 0,
+      approval.satisfied || policyResult.approvalsRequired.length === 0,
       demand,
     )
     demand = await advanceDemandToQuotation(client, principal, demand, idempotencyKey, requirements, requestHash)
@@ -1543,7 +1667,7 @@ async function prepareQuote(
       demandId: demand.id,
       companyId: demand.company_id,
       providerCompanyId,
-      policyEvaluationId: policy.databaseEvaluationId,
+      policyEvaluationId: primaryPolicy.databaseEvaluationId,
       request: providerRequest,
     }
   })
@@ -1670,7 +1794,43 @@ async function prepareReservation(
       }
     }
 
-    const approval = await approvalState(client, principal.tenantId, demand.active_approval_instance_id, 'cost')
+    const policyWorkflowCode = policy.result.approvalsRequired.length
+      ? await resolvePolicyApprovalWorkflowCode(client, principal.tenantId, policy.result)
+      : null
+    if (policy.result.approvalsRequired.length && !policyWorkflowCode) {
+      return {
+        kind: 'stop',
+        error: new TravelGovernanceError(
+          'TRAVEL_APPROVAL_WORKFLOW_NOT_CONFIGURED',
+          'A politica exige aprovacao, mas nao aponta para um unico workflow publicado.',
+          422,
+          { policies: policy.result.approvalsRequired.map((item) => item.policyCode) },
+        ),
+      }
+    }
+    const requiresSecondLevel = policyResultsRequireSecondLevel([policy.result])
+    let approval = await approvalState(
+      client,
+      principal.tenantId,
+      demand.active_approval_instance_id,
+      'cost',
+      {
+        demandId: demand.id,
+        companyId: demand.company_id,
+        workflowCode: policyWorkflowCode,
+        requiresSecondLevel,
+      },
+    )
+    if (approval.policyIntentMismatch) {
+      await supersedeQuoteApprovalCoverage(
+        client,
+        principal,
+        demand,
+        approval.instanceId,
+        sha256({ checkpoint: 'reservation', workflowCode: policyWorkflowCode, requiresSecondLevel }),
+      )
+      approval = { satisfied: false, status: null, instanceId: null }
+    }
     if (policy.result.approvalsRequired.length && !approval.satisfied) {
       if (approval.instanceId && ['pending', 'in_progress'].includes(approval.status || '')) {
         return {
@@ -1683,30 +1843,19 @@ async function prepareReservation(
           ),
         }
       }
-      const workflowCode = await resolveApprovalWorkflowCode(client, principal.tenantId, policy.result)
-      if (!workflowCode) {
-        return {
-          kind: 'stop',
-          error: new TravelGovernanceError(
-            'TRAVEL_APPROVAL_WORKFLOW_NOT_CONFIGURED',
-            'A politica exige aprovacao, mas nao aponta para um unico workflow publicado.',
-            422,
-            { policies: policy.result.approvalsRequired.map((item) => item.policyCode) },
-          ),
-        }
-      }
       const requirements = policyRequirements(policy.databaseEvaluationId, policy.result, approval.instanceId, false, demand)
       return {
         kind: 'approval',
         demandId: demand.id,
         companyId: demand.company_id,
         employeeId: demand.employee_id,
-        workflowCode,
+        workflowCode: policyWorkflowCode as string,
         policyEvaluationId: policy.databaseEvaluationId,
         idempotencyKey,
         requirements: { ...requirements, budgetSatisfied: Boolean(budget) || !budgetRequired, offerSelected: true },
         subject: {
           ...approvalSubject(demand, { service: request.service, destino: demand.destination || undefined }, policy.result),
+          policyEvaluationIds: [policy.databaseEvaluationId],
           amount: selectedAmount,
           currency: selection.currency,
           percentageAboveLowest: percentageAbove(selectedAmount, numberValue(selection.minimum_amount)),
@@ -2660,6 +2809,12 @@ async function loadDemandForUpdate(
      left join employees employee
        on employee.tenant_id = demand.tenant_id and employee.id = demand.employee_id
      where demand.tenant_id = $1 and demand.deleted_at is null
+       and (demand.travel_order_id is null or exists (
+         select 1 from company_portal_travel_orders visible_order
+         where visible_order.tenant_id = demand.tenant_id
+           and visible_order.id = demand.travel_order_id
+           and visible_order.status = 'submitted'
+       ))
        and (($2::text is not null and demand.id = $2) or ($2::text is null and demand.demand_number = $3))
        ${companyClause}
      for update of demand`,
@@ -3396,6 +3551,69 @@ function policyStopError(result: PolicyEvaluationResult, justification?: string)
   return null
 }
 
+function defaultQuotePolicyTraveler(demand: DemandRow): GovernedTravelQuotePolicyTraveler {
+  return {
+    demandTravelerId: null,
+    employeeId: demand.employee_id,
+    name: demand.employee_name || demand.passenger_name_snapshot,
+    document: demand.employee_document,
+    email: demand.employee_email,
+    phone: demand.employee_phone,
+    jobTitle: demand.employee_job_title,
+    department: demand.employee_department,
+    costCenter: demand.employee_cost_center || demand.cost_center,
+    sequence: 1,
+  }
+}
+
+function mergeQuotePolicyResults(
+  results: PolicyEvaluationResult[],
+  evaluatedAt: string,
+): PolicyEvaluationResult {
+  const primary = results[0]
+  if (!primary) {
+    throw new TravelGovernanceError(
+      'TRAVEL_POLICY_EVALUATION_MISSING',
+      'Nao foi possivel avaliar as politicas desta cotacao.',
+      500,
+    )
+  }
+  const core = {
+    passed: results.every((result) => result.passed),
+    errors: mergeQuotePolicyItems(results.flatMap((result) => result.errors)),
+    warnings: mergeQuotePolicyItems(results.flatMap((result) => result.warnings)),
+    justificationsRequired: mergeQuotePolicyItems(
+      results.flatMap((result) => result.justificationsRequired),
+    ),
+    approvalsRequired: mergeQuotePolicyItems(results.flatMap((result) => result.approvalsRequired)),
+    blocks: mergeQuotePolicyItems(results.flatMap((result) => result.blocks)),
+    requiredDocuments: mergeQuotePolicyItems(
+      results.flatMap((result) => result.requiredDocuments),
+    ),
+    requiredActions: mergeQuotePolicyItems(results.flatMap((result) => result.requiredActions)),
+    applicablePolicies: Array.from(new Set(results.flatMap((result) => result.applicablePolicies))),
+    policyVersions: Array.from(new Set(results.flatMap((result) => result.policyVersions))),
+    alternatives: Array.from(new Set(results.flatMap((result) => result.alternatives))),
+    remediation: Array.from(new Set(results.flatMap((result) => result.remediation))),
+    evaluationId: primary.evaluationId,
+    factsHash: sha256(results.map((result) => result.factsHash)),
+    evaluatedAt,
+    checkpoint: 'quotation',
+    mode: primary.mode,
+    decisions: results.flatMap((result) => result.decisions),
+  }
+  return { ...core, resultHash: sha256(core) }
+}
+
+function mergeQuotePolicyItems(items: PolicyResultItem[]): PolicyResultItem[] {
+  const unique = new Map<string, PolicyResultItem>()
+  for (const item of items) {
+    const key = `${item.policyVersionId}:${item.policyCode}:${item.action}`
+    if (!unique.has(key)) unique.set(key, item)
+  }
+  return Array.from(unique.values())
+}
+
 async function persistPolicyJustification(
   client: PoolClient,
   principal: RequestPrincipal,
@@ -3429,31 +3647,6 @@ async function persistPolicyJustification(
   )
 }
 
-async function resolveApprovalWorkflowCode(
-  client: PoolClient,
-  tenantId: string,
-  result: PolicyEvaluationResult,
-): Promise<string | null> {
-  const configured = result.approvalsRequired.flatMap((item) => {
-    const workflow = item.configuration.workflow
-    return typeof workflow === 'string' && workflow.trim() ? [workflow.trim()] : []
-  })
-  const versionIds = Array.from(new Set(result.approvalsRequired.map((item) => item.policyVersionId)))
-  const dependencies = versionIds.length
-    ? await client.query<{ dependency_key: string }>(
-        `select distinct dependency_key from policy_dependencies
-         where tenant_id = $1 and policy_version_id = any($2::uuid[])
-           and dependency_type = 'workflow' and required = true`,
-        [tenantId, versionIds],
-      )
-    : { rows: [] as Array<{ dependency_key: string }> }
-  const candidates = Array.from(new Set([
-    ...configured,
-    ...dependencies.rows.map((row) => row.dependency_key.trim()).filter(Boolean),
-  ]))
-  return candidates.length === 1 ? candidates[0] : null
-}
-
 function policyRequirements(
   policyEvaluationId: string,
   result: PolicyEvaluationResult,
@@ -3476,6 +3669,15 @@ function approvalSubject(
   demand: DemandRow,
   request: TravelQuoteRequest,
   result: PolicyEvaluationResult,
+  coverage?: {
+    policyCoverageFingerprint: string | null
+    policyEvaluationRefs: Array<{
+      databaseEvaluationId: string
+      demandTravelerId: string | null
+      employeeId: string | null
+      sequence: number
+    }>
+  },
 ): Record<string, unknown> {
   return {
     amount: numberValue(demand.estimated_amount),
@@ -3484,6 +3686,10 @@ function approvalSubject(
     product: request.service,
     destination: request.destino || demand.destination,
     policyViolationCodes: result.approvalsRequired.map((item) => item.policyCode),
+    ...(coverage ? {
+      offlinePolicyCoverageFingerprint: coverage.policyCoverageFingerprint,
+      offlinePolicyEvaluations: coverage.policyEvaluationRefs,
+    } : {}),
   }
 }
 
@@ -3517,8 +3723,93 @@ async function moveDemandToMeritApproval(
       await persistTransition(client, principal, demand, 'request_merit_approval', {
         idempotencyKey: `${idempotencyKey}:request-merit`, requirements, metadata: { approvalInstanceId },
       })
+      return
+    }
+    if (demand.lifecycle_status === 'pending_merit_approval' && !demand.active_approval_instance_id) {
+      const rebound = await client.query(
+        `update demands set
+           active_approval_instance_id = $3,
+           last_policy_evaluation_id = $4,
+           lifecycle_version = lifecycle_version + 1,
+           updated_by = $5,
+           updated_at = now()
+         where tenant_id = $1 and id = $2
+           and lifecycle_status = 'pending_merit_approval'
+           and active_approval_instance_id is null`,
+        [principal.tenantId, demand.id, approvalInstanceId, policyEvaluationId, principal.user.id],
+      )
+      if (rebound.rowCount !== 1) {
+        throw new TravelGovernanceError(
+          'TRAVEL_APPROVAL_POLICY_COVERAGE_CHANGED',
+          'A aprovacao da cotacao mudou durante a reavaliacao. Atualize a pagina e tente novamente.',
+          409,
+        )
+      }
     }
   })
+}
+
+async function supersedeQuoteApprovalCoverage(
+  client: PoolClient,
+  principal: RequestPrincipal,
+  demand: DemandRow,
+  approvalInstanceId: string | null,
+  nextCoverageFingerprint: string | null,
+): Promise<void> {
+  if (!approvalInstanceId) return
+  const superseded = await client.query(
+    `update approval_instances set
+       status = 'superseded', completed_at = coalesce(completed_at, now()),
+       version = version + 1, updated_at = now()
+     where tenant_id = $1 and id = $2 and demand_id = $3
+       and status in ('pending', 'in_progress', 'approved')`,
+    [principal.tenantId, approvalInstanceId, demand.id],
+  )
+  if (superseded.rowCount !== 1) {
+    throw new TravelGovernanceError(
+      'TRAVEL_APPROVAL_POLICY_COVERAGE_CHANGED',
+      'A aprovacao anterior mudou durante a reavaliacao. Atualize a pagina e tente novamente.',
+      409,
+    )
+  }
+  await client.query(
+    `update approval_steps set status = 'cancelled', completed_at = now(), version = version + 1
+     where tenant_id = $1 and approval_instance_id = $2
+       and status in ('waiting', 'pending')`,
+    [principal.tenantId, approvalInstanceId],
+  )
+  await client.query(
+    `update approval_assignments assignment set status = 'cancelled', responded_at = now()
+     from approval_steps step
+     where assignment.tenant_id = $1 and step.tenant_id = assignment.tenant_id
+       and step.id = assignment.approval_step_id and step.approval_instance_id = $2
+       and assignment.status = 'pending'`,
+    [principal.tenantId, approvalInstanceId],
+  )
+  await client.query(
+    `update approval_escalations set status = 'cancelled',
+            result = jsonb_build_object('reason', 'policy_coverage_superseded')
+     where tenant_id = $1 and approval_instance_id = $2 and status = 'scheduled'`,
+    [principal.tenantId, approvalInstanceId],
+  )
+  await client.query(
+    `update demands set active_approval_instance_id = null,
+       updated_by = $4, updated_at = now()
+     where tenant_id = $1 and id = $2 and active_approval_instance_id = $3`,
+    [principal.tenantId, demand.id, approvalInstanceId, principal.user.id],
+  )
+  demand.active_approval_instance_id = null
+  await client.query(
+    `insert into approval_events (
+       tenant_id, approval_instance_id, actor_user_id, event_type, payload
+     ) values ($1, $2, $3, 'offline_policy_coverage_superseded', $4::jsonb)`,
+    [
+      principal.tenantId,
+      approvalInstanceId,
+      principal.user.id,
+      JSON.stringify({ demandId: demand.id, nextCoverageFingerprint }),
+    ],
+  )
 }
 
 async function approvalState(
@@ -3526,15 +3817,79 @@ async function approvalState(
   tenantId: string,
   approvalInstanceId: string | null,
   expectedType: string,
-): Promise<{ satisfied: boolean; status: string | null; instanceId: string | null }> {
+  expected: {
+    demandId: string
+    companyId: string
+    policyCoverageFingerprint?: string | null
+    workflowCode?: string | null
+    requiresSecondLevel?: boolean
+  },
+): Promise<{
+  satisfied: boolean
+  status: string | null
+  instanceId: string | null
+  coverageMismatch?: boolean
+  policyIntentMismatch?: boolean
+}> {
   if (!approvalInstanceId) return { satisfied: false, status: null, instanceId: null }
-  const result = await client.query<{ status: string; instance_type: string }>(
-    'select status, instance_type from approval_instances where tenant_id = $1 and id = $2',
+  const result = await client.query<{
+    status: string
+    instance_type: string
+    demand_id: string | null
+    company_id: string
+    workflow_code: string
+    subject_snapshot: Record<string, unknown>
+  }>(
+    `select status, instance_type, demand_id, company_id, subject_snapshot,
+            (select workflow.workflow_code
+             from approval_workflow_definitions workflow
+             where workflow.tenant_id = approval_instances.tenant_id
+               and workflow.id = approval_instances.workflow_definition_id) as workflow_code
+     from approval_instances where tenant_id = $1 and id = $2`,
     [tenantId, approvalInstanceId],
   )
   const instance = result.rows[0]
-  if (!instance || instance.instance_type !== expectedType) {
+  if (!instance) {
     return { satisfied: false, status: null, instanceId: null }
+  }
+  if (
+    instance.instance_type !== expectedType
+    || instance.demand_id !== expected.demandId
+    || instance.company_id !== expected.companyId
+  ) {
+    throw new TravelGovernanceError(
+      'TRAVEL_APPROVAL_SCOPE_MISMATCH',
+      'A aprovacao ativa nao pertence ao escopo desta demanda.',
+      409,
+      { approvalInstanceId },
+    )
+  }
+  if (
+    'policyCoverageFingerprint' in expected
+    && (textValue(instance.subject_snapshot?.offlinePolicyCoverageFingerprint) || null)
+      !== expected.policyCoverageFingerprint
+  ) {
+    return {
+      satisfied: false,
+      status: instance.status,
+      instanceId: approvalInstanceId,
+      coverageMismatch: true,
+    }
+  }
+  if (
+    expected.workflowCode
+    && !approvalPolicyIntentMatchesSnapshot(
+      instance.subject_snapshot,
+      instance.workflow_code,
+      { workflowCode: expected.workflowCode, requiresSecondLevel: expected.requiresSecondLevel === true },
+    )
+  ) {
+    return {
+      satisfied: false,
+      status: instance.status,
+      instanceId: approvalInstanceId,
+      policyIntentMismatch: true,
+    }
   }
   return {
     satisfied: instance.status === 'approved',
@@ -3543,27 +3898,54 @@ async function approvalState(
   }
 }
 
-function buildPolicyFacts(demand: DemandRow, request: TravelQuoteRequest, checkpoint: string): Record<string, unknown> {
+export function approvalPolicyIntentMatchesSnapshot(
+  subjectSnapshot: Record<string, unknown>,
+  actualWorkflowCode: string,
+  expected: { workflowCode: string; requiresSecondLevel: boolean },
+): boolean {
+  if (actualWorkflowCode !== expected.workflowCode) return false
+  if (!expected.requiresSecondLevel) return true
+  const routing = subjectSnapshot.routing
+  return Boolean(
+    routing
+    && typeof routing === 'object'
+    && !Array.isArray(routing)
+    && (routing as Record<string, unknown>).requiresSecondLevel === true,
+  )
+}
+
+function buildPolicyFacts(
+  demand: DemandRow,
+  request: TravelQuoteRequest,
+  checkpoint: string,
+  traveler: GovernedTravelQuotePolicyTraveler = defaultQuotePolicyTraveler(demand),
+  evaluatedAt = new Date().toISOString(),
+): Record<string, unknown> {
   const start = parseDate(request.dataInicio || demand.travel_start_date)
   const end = parseDate(request.dataFim || demand.travel_end_date)
-  const now = new Date()
+  const now = new Date(evaluatedAt)
   const advanceDays = start ? Math.ceil((start.getTime() - now.getTime()) / 86_400_000) : null
   return {
     tenant: { id: demand.tenant_id },
     organization: { groupId: demand.group_id, companyId: demand.company_id },
     company: { id: demand.company_id, name: demand.company_name, groupId: demand.group_id },
     employee: {
-      id: demand.employee_id,
-      name: demand.employee_name || demand.passenger_name_snapshot,
-      document: demand.employee_document,
-      email: demand.employee_email,
-      phone: demand.employee_phone,
-      jobTitle: demand.employee_job_title,
-      department: demand.employee_department,
-      costCenter: demand.employee_cost_center || demand.cost_center,
-      registered: Boolean(demand.employee_id),
+      id: traveler.employeeId,
+      name: traveler.name,
+      document: traveler.document,
+      email: traveler.email,
+      phone: traveler.phone,
+      jobTitle: traveler.jobTitle,
+      department: traveler.department,
+      costCenter: traveler.costCenter || demand.cost_center,
+      registered: Boolean(traveler.employeeId),
     },
-    traveler: { id: demand.employee_id, name: demand.employee_name || demand.passenger_name_snapshot },
+    traveler: {
+      id: traveler.employeeId,
+      demandTravelerId: traveler.demandTravelerId,
+      name: traveler.name,
+      sequence: traveler.sequence,
+    },
     request: {
       id: demand.id,
       number: demand.demand_number,
@@ -3588,13 +3970,17 @@ function buildPolicyFacts(demand: DemandRow, request: TravelQuoteRequest, checkp
   }
 }
 
-function policyScopes(demand: DemandRow): PolicyScopeContext[] {
+function policyScopes(
+  demand: DemandRow,
+  traveler: GovernedTravelQuotePolicyTraveler = defaultQuotePolicyTraveler(demand),
+): PolicyScopeContext[] {
   return [
     { type: 'tenant', id: null },
     ...(demand.group_id ? [{ type: 'group' as const, id: demand.group_id }] : []),
     { type: 'company', id: demand.company_id },
-    ...(demand.employee_department ? [{ type: 'department' as const, id: demand.employee_department }] : []),
-    ...(demand.employee_id ? [{ type: 'traveler' as const, id: demand.employee_id }] : []),
+    ...(traveler.department ? [{ type: 'department' as const, id: traveler.department }] : []),
+    ...(traveler.costCenter ? [{ type: 'cost_center' as const, id: traveler.costCenter }] : []),
+    ...(traveler.employeeId ? [{ type: 'traveler' as const, id: traveler.employeeId }] : []),
     ...(demand.requester_id ? [{ type: 'requester' as const, id: demand.requester_id }] : []),
   ]
 }

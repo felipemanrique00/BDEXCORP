@@ -134,6 +134,44 @@ describe('corporate access policy', () => {
       .toEqual(['company-a', 'company-b'])
   })
 
+  it('projeta a elegibilidade do Portal Empresa sem revogar o acesso corporativo global', () => {
+    const directory = companies.map((company) => ({
+      ...company,
+      company_portal_enabled: company.id !== 'company-b',
+    }))
+    const corporate = calculateCorporateAccess(
+      baseInput,
+      directory,
+      groups,
+      [groupGrant({ corporate_profile: 'owner' })],
+      [],
+      null,
+      true,
+    )
+    const internal = calculateCorporateAccess(
+      {
+        ...baseInput,
+        roleKey: 'tenant_admin',
+        membershipPermissions: PERMISSOES_PADRAO_POR_PERFIL.lider,
+      },
+      directory,
+      groups,
+      [],
+      [],
+      null,
+      false,
+    )
+
+    expect(corporate.summary.companyIds).toEqual(['company-a', 'company-b'])
+    expect(corporate.summary.groups[0].companyIds).toEqual(['company-a', 'company-b'])
+    expect(corporate.summary.contexts.find((context) => context.type === 'group')?.companyIds)
+      .toEqual(['company-a', 'company-b'])
+    expect(corporate.summary.companies.find((company) => company.companyId === 'company-b'))
+      .toMatchObject({ companyPortalEnabled: false })
+    expect(corporate.effectivePermissions.acessar_portal_viajante).toBe(true)
+    expect(internal.summary.companyIds).toEqual(['company-a', 'company-b', 'company-c'])
+  })
+
   it('mantem selected_companies restrito e une acessos diretos de outros grupos', () => {
     const result = calculateCorporateAccess(
       baseInput,
@@ -265,6 +303,17 @@ describe('corporate permission templates and validation', () => {
     expect(merged.ver_relatorios).toBe(true)
     expect(merged.ver_financeiro).toBe(true)
     expect(merged.gerenciar_usuarios).toBe(false)
+  })
+
+  it('preserva a permissao interna de representacao em escopo empresarial sem expo-la a perfis corporativos', () => {
+    const scopedInternal = {
+      ...permissionsForCorporateProfile('viewer', {}),
+      gerenciar_personificacoes: true,
+    }
+    expect(mergePermissions([scopedInternal]).gerenciar_personificacoes).toBe(true)
+    expect(permissionsForCorporateProfile('owner', {
+      gerenciar_personificacoes: true,
+    }).gerenciar_personificacoes).toBe(false)
   })
 
   it('rejeita grupo parcial vazio, duplicidades e permissoes desconhecidas', () => {

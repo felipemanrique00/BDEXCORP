@@ -1,7 +1,9 @@
 import { assessTravelReapproval } from '@/lib/travel-lifecycle'
 export {
+  lifecycleAllowsNormalAirDemandEdit,
   lifecycleAllowsMaterialDemandEdit,
   lifecycleAllowsNormalHotelDemandEdit,
+  lifecycleAllowsNormalGroundDemandEdit,
 } from '@/lib/demands/edit-eligibility'
 
 export interface DemandUpdateSnapshot {

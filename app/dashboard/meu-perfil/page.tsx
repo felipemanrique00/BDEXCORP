@@ -9,7 +9,7 @@ import {
 } from '@/lib/atendimentos-storage'
 import {
   BarChart3, Clock, CheckCircle2, AlertTriangle, XCircle, AlertCircle,
-  Plus, Plane, Hotel as HotelIcon, Car, Package, Zap, Edit2, FileText,
+  Plus, Plane, Hotel as HotelIcon, Car, BusFront, Package, Zap, Edit2, FileText,
   Download, Calendar, Paperclip, DollarSign, TrendingUp, Percent, Wand2,
 } from 'lucide-react'
 import { formatCurrency, formatDate } from '@/lib/utils'
@@ -22,7 +22,7 @@ import type { Atendimento, StatusAtendimento, Prioridade, TipoServico } from '@/
 import { STATUS_LABEL, PRIORIDADE_LABEL, calcularFinanceiro } from '@/types'
 
 const TIPO_ICON: Record<TipoServico, any> = {
-  'Aéreo': Plane, 'Hotel': HotelIcon, 'Carro': Car, 'Pacote': Package, 'Outro': FileText,
+  'Aéreo': Plane, 'Hotel': HotelIcon, 'Carro': Car, 'Rodoviário': BusFront, 'Pacote': Package, 'Outro': FileText,
 }
 
 const PRIORIDADE_COLOR: Record<Prioridade, string> = {

@@ -112,6 +112,16 @@ export async function listServerAuditLogs(
        from audit_logs log
        left join users actor on actor.id = log.actor_user_id
        where log.tenant_id = $1
+         and (
+           log.entity_type is distinct from 'travel_order'
+           or exists (
+             select 1
+             from company_portal_travel_orders visible_order
+             where visible_order.tenant_id = log.tenant_id
+               and visible_order.id::text = log.entity_id
+               and visible_order.status = 'submitted'
+           )
+         )
          and ($2::text is null or log.action ilike '%' || $2 || '%')
          and ($3::text is null or log.result = $3)
          and ($4::text is null or log.entity_type = $4)

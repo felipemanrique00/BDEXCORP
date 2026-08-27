@@ -10,8 +10,8 @@ import {
   VOUCHER_EMAIL_MAX_CUSTOM_RECIPIENTS,
   VOUCHER_EMAIL_MAX_TOTAL_RECIPIENTS,
   voucherEmailRecipients,
+  type VoucherEmailSource,
 } from '@/lib/vouchers/email'
-import type { VoucherEmitido } from '@/types'
 
 export const MAX_CUSTOM_VOUCHER_EMAIL_RECIPIENTS = VOUCHER_EMAIL_MAX_CUSTOM_RECIPIENTS
 export const MAX_TOTAL_VOUCHER_EMAIL_RECIPIENTS = VOUCHER_EMAIL_MAX_TOTAL_RECIPIENTS
@@ -81,8 +81,18 @@ export function mergeCustomVoucherEmailRecipients({
   return { recipients, error: null }
 }
 
-export function SendVoucherEmailDialog({ voucher }: { voucher: VoucherEmitido }) {
-  const recipients = useMemo(() => voucherEmailRecipients(voucher), [voucher])
+type SendVoucherEmailDialogProps =
+  | { voucher: VoucherEmailSource; voucherId?: never; loadVoucher?: never }
+  | { voucher?: never; voucherId: string; loadVoucher: () => Promise<VoucherEmailSource> }
+
+export function SendVoucherEmailDialog({ voucher, voucherId, loadVoucher }: SendVoucherEmailDialogProps) {
+  const [loadedVoucher, setLoadedVoucher] = useState<VoucherEmailSource | null>(null)
+  const [loadingVoucher, setLoadingVoucher] = useState(false)
+  const activeVoucher = voucher || loadedVoucher
+  const recipients = useMemo(
+    () => activeVoucher ? voucherEmailRecipients(activeVoucher) : [],
+    [activeVoucher],
+  )
   const linkedEmails = useMemo(() => recipients.map((recipient) => recipient.email), [recipients])
   const [open, setOpen] = useState(false)
   const [sending, setSending] = useState(false)
@@ -96,13 +106,29 @@ export function SendVoucherEmailDialog({ voucher }: { voucher: VoucherEmitido })
   const hasCustomRecipients = customRecipients.length > 0
   const hasPendingCustomInput = Boolean(customInput.trim())
 
-  function begin() {
-    setSelected(linkedEmails.slice(0, MAX_TOTAL_VOUCHER_EMAIL_RECIPIENTS))
+  async function begin() {
+    let resolvedVoucher = activeVoucher
+    if (!resolvedVoucher && loadVoucher) {
+      setLoadingVoucher(true)
+      try {
+        resolvedVoucher = await loadVoucher()
+        setLoadedVoucher(resolvedVoucher)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'NÃ£o foi possÃ­vel carregar os destinatÃ¡rios do voucher.')
+        return
+      } finally {
+        setLoadingVoucher(false)
+      }
+    }
+    if (!resolvedVoucher) return
+    const resolvedLinkedEmails = voucherEmailRecipients(resolvedVoucher)
+      .map((recipient) => recipient.email)
+    setSelected(resolvedLinkedEmails.slice(0, MAX_TOTAL_VOUCHER_EMAIL_RECIPIENTS))
     setCustomRecipients([])
     setCustomInput('')
     setCustomError('')
     setExternalSharingConfirmed(false)
-    setIdempotencyKey(createIdempotencyKey(voucher.id))
+    setIdempotencyKey(createIdempotencyKey(resolvedVoucher.id))
     setOpen(true)
   }
 
@@ -152,7 +178,7 @@ export function SendVoucherEmailDialog({ voucher }: { voucher: VoucherEmitido })
   }
 
   async function send() {
-    if (sending) return
+    if (sending || !activeVoucher) return
 
     const resolvedCount = selected.length + customRecipients.length
     if (!resolvedCount) {
@@ -171,7 +197,7 @@ export function SendVoucherEmailDialog({ voucher }: { voucher: VoucherEmitido })
     setSending(true)
     try {
       const result = await sendVoucherEmailFromServer(
-        voucher.id,
+        activeVoucher.id,
         selected,
         idempotencyKey,
         customRecipients,
@@ -199,15 +225,18 @@ export function SendVoucherEmailDialog({ voucher }: { voucher: VoucherEmitido })
     <>
       <button
         type="button"
-        onClick={begin}
+        onClick={() => { void begin() }}
+        disabled={loadingVoucher}
         className="bbt-button-ghost flex items-center gap-2 text-sm"
+        aria-label={`Enviar voucher ${activeVoucher?.id || voucherId} por e-mail`}
         aria-haspopup="dialog"
         aria-expanded={open}
       >
-        <Mail className="h-4 w-4" /> Enviar por e-mail
+        {loadingVoucher ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+        {loadingVoucher ? 'Carregando...' : 'Enviar por e-mail'}
       </button>
 
-      {open && (
+      {open && activeVoucher && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/55 p-4" role="presentation">
           <div
             role="dialog"
@@ -219,7 +248,7 @@ export function SendVoucherEmailDialog({ voucher }: { voucher: VoucherEmitido })
             <div className="flex shrink-0 items-start justify-between gap-4 border-b border-bbt-gray-100 px-5 py-4 dark:border-slate-700">
               <div>
                 <h2 id="voucher-email-title" className="text-base font-bold text-bbt-primary dark:text-white">
-                  Enviar voucher {voucher.id}
+                  Enviar voucher {activeVoucher.id}
                 </h2>
                 <p id="voucher-email-description" className="mt-1 text-xs text-slate-500">
                   O sistema enviará diretamente pelo SMTP configurado. Nenhum aplicativo de e-mail será aberto.

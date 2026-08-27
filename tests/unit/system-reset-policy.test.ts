@@ -29,9 +29,14 @@ describe('tenant reset policy', () => {
       'air_reservation_details',
       'air_reservation_segments',
       'air_emission_tickets',
+      'approval_approver_group_members',
+      'approval_approver_groups',
+      'approval_audience_group_members',
+      'approval_audience_groups',
+      'approval_matrices',
     ]))
-    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(173)
-    expect(TENANT_RESET_PRESERVED_TABLES).toHaveLength(17)
+    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(200)
+    expect(TENANT_RESET_PRESERVED_TABLES).toHaveLength(18)
   })
 
   it('keeps reset and preserved tables disjoint', () => {

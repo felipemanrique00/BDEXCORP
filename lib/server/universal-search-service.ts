@@ -170,6 +170,12 @@ export async function searchUniversal(
          left join business_groups bg on bg.tenant_id = c.tenant_id and bg.id = c.group_id
          where d.tenant_id = $1
            and d.deleted_at is null
+           and (d.travel_order_id is null or exists (
+             select 1 from company_portal_travel_orders visible_order
+             where visible_order.tenant_id = d.tenant_id
+               and visible_order.id = d.travel_order_id
+               and visible_order.status = 'submitted'
+           ))
            and d.company_id = any($7::text[])
            and 'demand' = any($3::text[])
 

@@ -190,6 +190,16 @@ async function loadWorkerTargets(tenantId: string): Promise<AutomationWorkerTarg
            from domain_outbox source
            where source.tenant_id = definition.tenant_id
              and source.event_type = version.event_type
+             and (source.aggregate_type <> 'demand' or not exists (
+               select 1
+               from demands guarded_demand
+               join company_portal_travel_orders guarded_order
+                 on guarded_order.tenant_id = guarded_demand.tenant_id
+                and guarded_order.id = guarded_demand.travel_order_id
+               where guarded_demand.tenant_id = source.tenant_id
+                 and guarded_demand.id = source.aggregate_id
+                 and guarded_order.status <> 'submitted'
+             ))
              and source.created_at >= coalesce(
                version.valid_from,
                version.published_at,

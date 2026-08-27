@@ -1,5 +1,13 @@
 import type { HotelRoomCategory } from '@/lib/hotel-catalog/room-categories'
 
+export interface HotelCatalogMedia {
+  id: string
+  imageUrl: string
+  altText: string | null
+  sortOrder: number
+  roomTypeId: string | null
+}
+
 export interface HotelCatalogRoomType {
   id: string
   code: string
@@ -13,6 +21,7 @@ export interface HotelCatalogRoomType {
   maxChildren: number
   bedConfiguration: string | null
   isActive: boolean
+  media?: HotelCatalogMedia[]
 }
 
 export interface HotelCatalogSupplier {
@@ -52,6 +61,7 @@ export interface HotelCatalogItem {
   billingEnabled: boolean
   billingInfo: string | null
   amenities: Record<string, unknown>
+  media?: HotelCatalogMedia[]
   status: 'active' | 'inactive'
   source: string
   version: number

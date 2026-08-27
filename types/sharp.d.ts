@@ -29,12 +29,17 @@ declare module 'sharp' {
     adaptiveFiltering?: boolean
   }
 
+  interface SharpTimeoutOptions {
+    seconds: number
+  }
+
   interface SharpInstance {
     metadata(): Promise<SharpMetadata>
     rotate(): SharpInstance
     resize(options: SharpResizeOptions): SharpInstance
     png(options?: SharpPngOptions): SharpInstance
     webp(options?: SharpWebpOptions): SharpInstance
+    timeout(options: SharpTimeoutOptions): SharpInstance
     toBuffer(): Promise<Buffer>
   }
 

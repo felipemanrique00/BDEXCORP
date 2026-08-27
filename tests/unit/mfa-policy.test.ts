@@ -26,6 +26,16 @@ describe('administrative MFA policy', () => {
     }))).toBe(false)
   })
 
+  it('requires MFA when representation access is explicitly delegated', () => {
+    expect(requiresAdministrativeMfa(principal({
+      roleKey: 'operator',
+      permissions: {
+        ...NO_PERMISSIONS,
+        gerenciar_personificacoes: true,
+      },
+    }))).toBe(true)
+  })
+
   it('always requires MFA for tenant and platform administrators', () => {
     expect(requiresAdministrativeMfa(principal({
       roleKey: 'tenant_admin',

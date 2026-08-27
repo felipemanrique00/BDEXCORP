@@ -38,6 +38,7 @@ interface DirectoryCompany {
   defaultCostCenterId: string | null
   defaultCostCenter: string | null
   active: boolean
+  portalEnabled: boolean | null
   billingSettings: JsonRecord
   createdAt: Date
   updatedAt: Date
@@ -118,8 +119,12 @@ export async function syncCorporateDirectoryFromStorage(
       `insert into companies (
          id, tenant_id, group_id, legal_name, trade_name, document_number,
          customer_code, contact_name, contact_email, contact_phone,
-         default_cost_center, status, billing_settings, created_at, updated_at
-       ) values ($1, $2, $3, $4, $4, $5, $6, $7, $8::citext, $9, $10, $11, $12::jsonb, $13, $14)
+         default_cost_center, company_portal_enabled, status, billing_settings,
+         created_at, updated_at
+       ) values (
+         $1, $2, $3, $4, $4, $5, $6, $7, $8::citext, $9, $10,
+         coalesce($11::boolean, false), $12, $13::jsonb, $14, $15
+       )
        on conflict (id) do update set
          group_id = excluded.group_id,
          legal_name = excluded.legal_name,
@@ -130,6 +135,7 @@ export async function syncCorporateDirectoryFromStorage(
          contact_email = excluded.contact_email,
          contact_phone = excluded.contact_phone,
          default_cost_center = excluded.default_cost_center,
+         company_portal_enabled = coalesce($11::boolean, companies.company_portal_enabled),
          status = excluded.status,
          billing_settings = excluded.billing_settings,
          updated_at = excluded.updated_at,
@@ -139,7 +145,8 @@ export async function syncCorporateDirectoryFromStorage(
         company.id, tenantId, groupId, company.name, documentNumber,
         company.customerCode, company.contactName, company.contactEmail,
         company.contactPhone, company.defaultCostCenter,
-        company.active ? 'active' : 'inactive', JSON.stringify(company.billingSettings),
+        company.portalEnabled, company.active ? 'active' : 'inactive',
+        JSON.stringify(company.billingSettings),
         company.createdAt, company.updatedAt,
       ],
     )
@@ -460,6 +467,9 @@ function parseCompany(value: unknown, groupByCompany: Map<string, string>): Dire
     defaultCostCenterId: nullableUuid(value.centro_custo_padrao_id),
     defaultCostCenter: nullableText(value.centro_custo_padrao, 240),
     active: value.ativa !== false,
+    portalEnabled: typeof value.portal_empresa_habilitado === 'boolean'
+      ? value.portal_empresa_habilitado
+      : null,
     billingSettings: settings,
     createdAt: dateValue(value.created_at),
     updatedAt: dateValue(value.updated_at),
