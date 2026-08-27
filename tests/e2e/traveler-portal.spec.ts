@@ -41,7 +41,8 @@ test.describe('portal do viajante', () => {
       code: loginBody.code || null,
       error: loginBody.error || null,
     }).toEqual({ status: 200, code: null, error: null })
-    await page.goto('/dashboard/minha-viagem')
+    await page.goto('/dashboard')
+    await expect(page).toHaveURL(/\/dashboard\/minha-viagem$/)
     await expect(page.getByRole('heading', { name: 'Minha viagem' })).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText(fixture.destination, { exact: true }).first()).toBeVisible()
     await expect(page.getByText(fixture.deniedDestination, { exact: true })).toHaveCount(0)

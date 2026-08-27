@@ -37,6 +37,10 @@ export function storageKeysForDashboardPath(pathname: string): SharedStorageKey[
     // The isolated portal is hydrated exclusively through projected BFF DTOs.
     return []
   }
+  if (path === '/dashboard/minha-viagem') {
+    // The traveler portal uses scoped traveler APIs and its own offline IndexedDB snapshot.
+    return []
+  }
   if (path.startsWith('/dashboard/relatorios') || path === '/dashboard/portal-empresa') return [...REPORT_KEYS]
   if (path === '/dashboard' || path.startsWith('/dashboard/risco')) {
     return [...REPORT_KEYS]
