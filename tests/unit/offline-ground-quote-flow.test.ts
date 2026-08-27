@@ -140,7 +140,9 @@ describe('offline car and bus quote contracts', () => {
     const selection = source('lib/server/offline-quote-service.ts')
 
     expect(service).toContain("requireCompanyAccess(principal, demand.company_id, 'operar_cotacoes')")
-    expect(service).toContain("requireCompanyAccess(principal, demand.company_id, 'ver_reservas')")
+    expect(service).toContain(
+      "resolveCompanyPortalResourceCompanyId(principal, demand.company_id, 'ver_reservas')",
+    )
     expect(service).toContain('assertRequesterOwnsDemand(client, principal, demand)')
     expect(service).toContain('executeGovernedTravelQuote(')
     expect(service).toContain('loadPolicyTravelers: async ({ client, demand })')

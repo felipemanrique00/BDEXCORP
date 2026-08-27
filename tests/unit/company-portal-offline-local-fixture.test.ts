@@ -68,6 +68,7 @@ describe('company portal offline local fixture', () => {
     expect(source).toContain("'0078_company_portal_ground_offline_catalog.sql'")
     expect(source).toContain("'0081_hotel_catalog_media.sql'")
     expect(source).toContain("'0086_company_portal_company_enablement.sql'")
+    expect(source).toContain("'0087_employee_portal_memberships.sql'")
     expect(source).toContain('new pg.Client({ connectionString }).connectionParameters')
     expect(source).toContain('...target.poolConfig')
     expect(source).toContain('await requireConnectedLocalTarget(client, target)')
@@ -108,6 +109,13 @@ describe('company portal offline local fixture', () => {
     expect(source).not.toMatch(/\btruncate\b/i)
     expect(source).toMatch(/insert into companies[\s\S]*?company_portal_enabled[\s\S]*?values[\s\S]*?true/i)
     expect(source).toContain('company_portal_enabled = true')
+    expect(source).toContain('ensureFixtureApproverEmployeeLink')
+    expect(source).toContain('insert into employee_portal_memberships')
+    expect(source).toContain("'active', true, 'not_required'")
+    expect(source).toContain("set approval_enabled = true")
+    expect(source).toContain("link.status = 'active'")
+    expect(source).toContain('link.approval_enabled = true')
+    expect(source).toContain('approver_links: approver?.granted ? 1 : 0')
   })
 
   it('additively merges the relational fixture IDs into a wrapped Zustand directory without replacing state', () => {

@@ -7,7 +7,7 @@ const root = process.cwd()
 const execFileAsync = promisify(execFile)
 const ignoredDirectories = new Set([
   '.git', '.next', 'node_modules', 'coverage', 'playwright-report', 'test-results',
-  '.server-backups', '.server-runtime', '.bbt-storage',
+  '.server-backups', '.server-runtime', '.runtime', '.bbt-storage',
 ])
 const textExtensions = new Set([
   '.cjs', '.css', '.env', '.example', '.html', '.js', '.json', '.md', '.mjs',

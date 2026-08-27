@@ -63,7 +63,7 @@ export function resolveCompanyPortalScopeCompanyIdsWithAnyPermission(
     )
   }
 
-  const corporateUser = userAccessKind(principal.user) === 'corporate'
+  const corporateUser = isCorporatePortalCaller(principal)
   const portalEnabledCompanyIds = corporateUser
     ? new Set(access.companies
         .filter((company) => company.companyPortalEnabled !== false)
@@ -125,6 +125,82 @@ export function resolveCompanyPortalScopeCompanyIdsWithAnyPermission(
     )
   }
   return narrowed
+}
+
+/**
+ * Authorizes a company-bound Portal Empresa resource after its company was
+ * loaded from the relational record (for example, a demand or reservation).
+ *
+ * Corporate callers are evaluated through the exact company context so a
+ * stale/default client context cannot widen or accidentally narrow the
+ * resource check. Internal agency callers keep their operational company
+ * scope and are not blocked by the Portal Empresa enablement flag.
+ */
+export function resolveCompanyPortalResourceCompanyId(
+  principal: RequestPrincipal,
+  companyIdInput: string,
+  permission: keyof Permissoes,
+): string {
+  const companyId = companyIdInput.trim()
+  if (!companyId) {
+    throw scopeDenied(
+      'COMPANY_PORTAL_COMPANY_SCOPE_INVALID',
+      'A empresa do recurso corporativo nao foi informada.',
+    )
+  }
+  const scope: CompanyPortalScope = isCorporatePortalCaller(principal)
+    ? { scopeType: 'company', scopeId: companyId, companyId }
+    : { companyId }
+  const companyIds = resolveCompanyPortalScopeCompanyIds(principal, scope, permission)
+  if (companyIds.length !== 1 || companyIds[0] !== companyId) {
+    throw scopeDenied(
+      'COMPANY_PORTAL_COMPANY_SCOPE_DENIED',
+      'Empresa fora do contexto corporativo autorizado.',
+    )
+  }
+  return companyId
+}
+
+/**
+ * Gates tenant-wide catalogs used by the Portal Empresa when the catalog has
+ * no company-owned record from which to derive an exact scope. Corporate
+ * callers need at least one enabled Portal Empresa context; internal agency
+ * callers retain their permission-scoped operational view.
+ */
+export function resolveAnyEnabledCompanyPortalContextCompanyIds(
+  principal: RequestPrincipal,
+  permission: keyof Permissoes,
+): string[] {
+  if (!isCorporatePortalCaller(principal)) {
+    return resolveCompanyPortalScopeCompanyIds(principal, {}, permission)
+  }
+
+  const access = principal.corporateAccess
+  if (!access) {
+    return resolveCompanyPortalScopeCompanyIds(principal, {}, permission)
+  }
+  for (const context of access.contexts) {
+    try {
+      const companyIds = resolveCompanyPortalScopeCompanyIds(
+        principal,
+        { scopeType: context.type, scopeId: context.id },
+        permission,
+      )
+      if (companyIds.length) return companyIds
+    } catch (error) {
+      if (!(error instanceof CorporateAccessDeniedError)) throw error
+    }
+  }
+  throw scopeDenied(
+    'COMPANY_PORTAL_SCOPE_EMPTY',
+    'O usuario nao possui um contexto habilitado no Portal Empresa para este recurso.',
+  )
+}
+
+function isCorporatePortalCaller(principal: RequestPrincipal): boolean {
+  const internalAgencyActor = principal.actor
+    && userAccessKind(principal.actor.user) === 'internal'
+  return userAccessKind(principal.user) === 'corporate' && !internalAgencyActor
 }
 
 function narrowToRequestedCompany(companyIds: string[], companyId?: string): string[] {

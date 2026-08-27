@@ -2,7 +2,7 @@
 
 > Arquivo gerado por `npm run inventory:features`. Nao editar manualmente.
 
-Paginas encontradas: **65**. Rotas de API encontradas: **243**.
+Paginas encontradas: **65**. Rotas de API encontradas: **244**.
 
 ## Paginas
 
@@ -146,6 +146,7 @@ Paginas encontradas: **65**. Rotas de API encontradas: **243**.
 | `/api/commercial-suppliers/[id]/hotel-links` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/commercial-suppliers/[id]` | `GET, PATCH` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/commercial-suppliers` | `GET, POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/companies/[companyId]/approvers` | `GET, POST, DELETE` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/company-portal/approvals/[id]/decision` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/company-portal/approvals/[id]` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/company-portal/approvals` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |

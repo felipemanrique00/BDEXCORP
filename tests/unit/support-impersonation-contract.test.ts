@@ -56,13 +56,15 @@ describe('support impersonation security contract', () => {
 
   it('allows represented corrections only through the governed correction route', () => {
     const migration = source('deploy/postgres/migrations/0079_support_impersonation_demand_correction.sql')
-    const service = source('lib/server/impersonation-service.ts')
+    const policy = source('lib/impersonation-action-policy.ts')
     const route = source('app/api/demands/[id]/route.ts')
     const dialog = source('components/impersonation/impersonation-dialog.tsx')
 
     expect(migration).toContain("'demand.correct'")
     expect(migration).toContain('support_impersonations_allowed_actions_check')
-    expect(service).toContain("? 'demand.correct' : null")
+    expect(policy).toContain("action: 'demand.correct'")
+    expect(policy).toContain("actorPermission: 'criar_demandas'")
+    expect(policy).toContain("targetPermission: 'criar_demandas'")
     expect(route).toContain("representationAction: 'demand.correct'")
     expect(dialog).toContain("'demand.correct': 'corrigir pedidos devolvidos'")
   })
@@ -77,8 +79,30 @@ describe('support impersonation security contract', () => {
     expect(service).toContain('restrictPrincipalToRepresentationCompanies(target, row.company_ids)')
     expect(service).toContain('tenantWide: false')
     expect(service).toContain("'action_scope_changed'")
+    expect(service).toContain('allowedImpersonationActions(actor, target, row.company_ids)')
+    expect(service).toContain('allowedImpersonationActions(principal, target, companyIds)')
     expect(service).toContain('mergePermissions(companies.map')
     expect(service).toContain('gerenciar_personificacoes: false')
+  })
+
+  it('pins every representation to one explicitly selected shared company', () => {
+    const route = source('app/api/auth/impersonation/start/route.ts')
+    const client = source('lib/impersonation-client.ts')
+    const dialog = source('components/impersonation/impersonation-dialog.tsx')
+    const service = source('lib/server/impersonation-service.ts')
+
+    expect(route).toContain('companyId: z.string().trim().min(1).max(200)')
+    expect(route).not.toContain('companyId: z.string().uuid()')
+    expect(client).toContain('companyScopes: ImpersonationCompanyScope[]')
+    expect(client).toContain('companyId: input.companyId.trim()')
+    expect(dialog).toContain('Empresa do atendimento *')
+    expect(dialog).toContain('selectedCompanyScope.allowedActions')
+    expect(service).toContain('const sharedCompanyIds = representationCompanyScope(principal, target)')
+    expect(service).toContain('!sharedCompanyIds.includes(selectedCompanyId)')
+    expect(service).toContain('const companyIds = [selectedCompanyId]')
+    expect(service).toContain('allowedImpersonationActions(principal, target, companyIds)')
+    expect(service).toContain('row.company_ids.length !== 1')
+    expect(service).toContain('allowedImpersonationActions(actor, target, [companyId])')
   })
 
   it('keeps the internal representation permission out of corporate profiles', () => {
@@ -87,6 +111,6 @@ describe('support impersonation security contract', () => {
     const editor = source('components/users/corporate-access-editor.tsx')
     expect(types).toMatch(/owner:\s*\{[\s\S]*?gerenciar_personificacoes: false/)
     expect(corporateAccess).toContain("permission !== 'gerenciar_personificacoes'")
-    expect(editor).toContain('CORPORATE_PERMISSION_KEYS.map')
+    expect(editor).toContain('GENERIC_CORPORATE_PERMISSION_KEYS.map')
   })
 })

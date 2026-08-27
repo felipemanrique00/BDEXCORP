@@ -161,7 +161,7 @@ export async function resolveEffectiveCorporateAccessInTransaction(
   client: PoolClient,
   input: ResolveCorporateAccessInput,
 ): Promise<ResolvedCorporateAccess> {
-  const companies = await loadCompanies(client, input.tenantId)
+  const companies = await loadCompanies(client, input.tenantId, input.membershipId)
   const groups = await loadGroups(client, input.tenantId)
   const groupGrants = await loadGroupGrants(client, input.tenantId, input.membershipId)
   const companyGrants = await loadCompanyGrants(client, input.tenantId, input.membershipId)
@@ -601,7 +601,11 @@ function selectDefaultContext(
   return fallback ? { type: fallback.type, id: fallback.id } : null
 }
 
-async function loadCompanies(client: PoolClient, tenantId: string): Promise<CorporateAccessCompanyRow[]> {
+async function loadCompanies(
+  client: PoolClient,
+  tenantId: string,
+  membershipId: string,
+): Promise<CorporateAccessCompanyRow[]> {
   const result = await client.query<CorporateAccessCompanyRow>(
     `select company_row.id,
             coalesce(company_row.trade_name, company_row.legal_name) as name,
@@ -616,8 +620,9 @@ async function loadCompanies(client: PoolClient, tenantId: string): Promise<Corp
      where company_row.tenant_id = $1
        and company_row.status = 'active'
        and company_row.deleted_at is null
+       and employee_portal_membership_allows_company($1, $2, company_row.id)
      order by coalesce(company_row.trade_name, company_row.legal_name)`,
-    [tenantId],
+    [tenantId, membershipId],
   )
   return result.rows
 }

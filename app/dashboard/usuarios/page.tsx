@@ -37,6 +37,17 @@ import {
   type InternalPermissionBases,
 } from '@/lib/permission-overrides'
 import {
+  AGENCY_CONSULTANT_ASSISTED_CAPABILITIES,
+  AGENCY_CONSULTANT_DIRECT_CAPABILITIES,
+  AGENCY_CONSULTANT_PRESET_LABEL,
+  createAgencyConsultantPreset,
+  internalAgencyScopePayload,
+  isAgencyConsultantPreset,
+  isInternalAgencyScopeReady,
+  resolveInternalAgencyScopeMode,
+  type InternalAgencyScopeMode,
+} from '@/lib/internal-agency-access'
+import {
   corporateDraftPermissionState,
   isCorporateAccessDraftReady,
 } from '@/lib/corporate-access-draft'
@@ -46,8 +57,8 @@ const PERFIS: { value: PerfilBBT; label: string; desc: string }[] = [
   { value: 'lider', label: 'Líder / Dono', desc: 'Master do ambiente: todas as empresas e gestão de outros Donos' },
   { value: 'gestor_financeiro', label: 'Gestor Financeiro', desc: 'Financeiro + relatórios + produtividade geral' },
   { value: 'supervisor', label: 'Supervisor', desc: 'Gestão operacional (sem editar valores)' },
-  { value: 'agente', label: 'Agente', desc: 'Cria demandas, só vê suas próprias' },
-  { value: 'operacional', label: 'Operacional', desc: 'Acesso mínimo, leitura apenas' },
+  { value: 'agente', label: 'Agente', desc: 'Opera solicitações, cotações, reservas e emissões no escopo definido' },
+  { value: 'operacional', label: 'Operacional', desc: 'Executa o fluxo operacional com acesso controlado' },
 ]
 
 export default function UsuariosPage() {
@@ -278,7 +289,7 @@ export default function UsuariosPage() {
                               groupIds: u.grupo_ids || [],
                               // O modal substitui este resumo pelo alvo autoritativo retornado
                               // pelo servidor antes de habilitar qualquer operacao.
-                              allowedActions: [],
+                              companyScopes: [],
                             })}
                             className="rounded-lg p-2 text-slate-500 transition hover:bg-cyan-50 hover:text-cyan-700 focus:outline-none focus:ring-2 focus:ring-cyan-500 dark:hover:bg-cyan-950/30 dark:hover:text-cyan-300"
                             title={`Acessar como ${u.name}`}
@@ -417,6 +428,7 @@ function UsuarioModal({
   const [permissionOverrides, setPermissionOverrides] = useState<Partial<Permissoes>>({})
   const [empresaIds, setEmpresaIds] = useState<string[]>([])
   const [grupoIds, setGrupoIds] = useState<string[]>([])
+  const [internalScopeMode, setInternalScopeMode] = useState<InternalAgencyScopeMode>('all')
   const [accessKind, setAccessKind] = useState<'corporate' | 'internal'>('corporate')
   const [corporateDraft, setCorporateDraft] = useState<CorporateAccessDraft>(() => createCorporateAccessDraft('viewer'))
   const [loadedCorporateAccessUserId, setLoadedCorporateAccessUserId] = useState<string | null>(null)
@@ -441,6 +453,7 @@ function UsuarioModal({
       setPermissoes(permissionsForInternalProfile(editingProfile, sparseOverrides, editingBase))
       setEmpresaIds(editing.empresa_ids || [])
       setGrupoIds(editing.grupo_ids || [])
+      setInternalScopeMode(resolveInternalAgencyScopeMode(editing.empresa_ids, editing.grupo_ids))
       setPassword('')
       setPasswordConfirm('')
       setCreationMode('temporary-password')
@@ -454,6 +467,7 @@ function UsuarioModal({
       setPermissionOverrides({})
       setEmpresaIds([])
       setGrupoIds([])
+      setInternalScopeMode('all')
       setAccessKind('corporate')
     }
   }, [open, editing, internalPermissionBases])
@@ -488,6 +502,22 @@ function UsuarioModal({
     setUseCustomPermissoes(next.customPermissions)
     setPermissionOverrides(next.permissionOverrides)
     setPermissoes(next.permissions)
+  }
+
+  function applyConsultantPreset() {
+    const preset = createAgencyConsultantPreset(internalPermissionBases.agente)
+    setPerfil(preset.profile)
+    setUseCustomPermissoes(preset.customPermissions)
+    setPermissionOverrides(preset.permissionOverrides)
+    setPermissoes(preset.permissions)
+  }
+
+  function changeInternalScopeMode(mode: InternalAgencyScopeMode) {
+    setInternalScopeMode(mode)
+    if (mode === 'all') {
+      setEmpresaIds([])
+      setGrupoIds([])
+    }
   }
 
   function changeCustomPermissions(enabled: boolean) {
@@ -553,6 +583,10 @@ function UsuarioModal({
       toast.error('Selecione ao menos uma empresa em cada grupo configurado como parcial.')
       return
     }
+    if (accessKind === 'internal' && !isInternalAgencyScopeReady(internalScopeMode, empresaIds, grupoIds)) {
+      toast.error('Selecione ao menos um grupo ou uma empresa, ou use o acesso a todas as empresas.')
+      return
+    }
 
     if (!editing && creationMode === 'temporary-password') {
       // Novo usuário: senha obrigatória
@@ -578,6 +612,7 @@ function UsuarioModal({
 
     setSaving(true)
     try {
+      const internalScope = internalAgencyScopePayload(internalScopeMode, empresaIds, grupoIds)
       const response = await fetch(editing ? `/api/users/${encodeURIComponent(editing.id)}` : '/api/users', {
         method: editing ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -589,8 +624,8 @@ function UsuarioModal({
           permissions: accessKind === 'internal'
             ? internalPermissionMutationPayload(useCustomPermissoes, permissionOverrides)
             : undefined,
-          companyIds: accessKind === 'internal' ? empresaIds : undefined,
-          groupIds: accessKind === 'internal' ? grupoIds : undefined,
+          companyIds: accessKind === 'internal' ? internalScope.companyIds : undefined,
+          groupIds: accessKind === 'internal' ? internalScope.groupIds : undefined,
           corporateAccess: accessKind === 'corporate' ? corporateDraftToPayload(corporateDraft) : undefined,
           active: editing?.ativo !== false,
           ...((editing || creationMode === 'temporary-password') && password ? { password } : {}),
@@ -694,6 +729,60 @@ function UsuarioModal({
         ) : (
         <>
 
+        {!isPlatformAdmin && (
+          <div className="rounded-lg border border-cyan-200 bg-cyan-50/70 p-4 dark:border-cyan-900 dark:bg-cyan-950/20">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold text-bbt-primary dark:text-cyan-100">
+                  <Shield className="h-4 w-4 text-cyan-600 dark:text-cyan-300" />
+                  {AGENCY_CONSULTANT_PRESET_LABEL}
+                </div>
+                <p className="mt-1 max-w-2xl text-xs text-slate-600 dark:text-slate-300">
+                  Preset do perfil Agente para conduzir o atendimento da empresa do pedido à emissão,
+                  com suporte assistido e rastreável nos atos que pertencem ao cliente.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={applyConsultantPreset}
+                disabled={isAgencyConsultantPreset(perfil, permissoes)}
+                className="bbt-button-primary shrink-0 text-xs disabled:cursor-default disabled:opacity-70"
+              >
+                {isAgencyConsultantPreset(perfil, permissoes) ? 'Preset aplicado' : 'Aplicar preset'}
+              </button>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div className="rounded-md border border-emerald-200 bg-white/70 p-3 dark:border-emerald-900 dark:bg-slate-900/40">
+                <div className="text-xs font-semibold uppercase text-emerald-700 dark:text-emerald-300">Operação direta</div>
+                <ul className="mt-2 space-y-1.5">
+                  {AGENCY_CONSULTANT_DIRECT_CAPABILITIES.map((capability) => (
+                    <li key={capability} className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-300">
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" /> {capability}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                  A abertura da demanda exige solicitante e viajante ativos na empresa atendida.
+                </p>
+              </div>
+              <div className="rounded-md border border-amber-200 bg-white/70 p-3 dark:border-amber-900 dark:bg-slate-900/40">
+                <div className="text-xs font-semibold uppercase text-amber-700 dark:text-amber-300">Suporte assistido</div>
+                <ul className="mt-2 space-y-1.5">
+                  {AGENCY_CONSULTANT_ASSISTED_CAPABILITIES.map((capability) => (
+                    <li key={capability} className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-300">
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" /> {capability}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                  Exige MFA recente, motivo e referência. O usuário corporativo continua sendo o responsável pelo ato;
+                  a separação de funções e a alçada não são ignoradas.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div>
           <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400 mb-2">Perfil</label>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -763,47 +852,88 @@ function UsuarioModal({
 
         {!isPlatformAdmin && (
           <div className="border border-bbt-gray-100 dark:border-slate-700 rounded-lg p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-bbt-primary dark:text-white">Escopo de acesso</div>
-                <p className="mt-1 text-xs text-slate-500">
-                  Sem selecao = acesso global conforme perfil. Com selecao = limita relatorios e grupos as empresas/grupos marcados.
-                </p>
-              </div>
-              {(empresaIds.length > 0 || grupoIds.length > 0) && (
-                <button type="button" onClick={() => { setEmpresaIds([]); setGrupoIds([]) }} className="bbt-button-ghost h-8 text-xs">
-                  Limpar
-                </button>
-              )}
+            <div>
+              <div className="text-sm font-semibold text-bbt-primary dark:text-white">Escopo de acesso</div>
+              <p className="mt-1 text-xs text-slate-500">
+                Defina claramente em quais empresas este usuário da agência poderá operar.
+              </p>
             </div>
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <div>
-                <div className="mb-2 text-xs font-semibold uppercase text-slate-500">Grupos</div>
-                <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-bbt-gray-100 p-2 dark:border-slate-700">
-                  {gruposEmpresariais.length === 0 ? (
-                    <div className="text-xs text-slate-400">Nenhum grupo cadastrado.</div>
-                  ) : gruposEmpresariais.map((grupo) => (
-                    <label key={grupo.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bbt-gray-50 dark:hover:bg-slate-800">
-                      <input type="checkbox" checked={grupoIds.includes(grupo.id)} onChange={() => toggleGrupo(grupo.id)} />
-                      <span className="truncate">{grupo.nome}</span>
-                    </label>
-                  ))}
+            <div className="mt-3 grid gap-2">
+              <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition ${
+                internalScopeMode === 'all'
+                  ? 'border-cyan-500 bg-cyan-50 dark:border-cyan-700 dark:bg-cyan-950/20'
+                  : 'border-bbt-gray-100 dark:border-slate-700'
+              }`}>
+                <input
+                  type="radio"
+                  name="internal-scope-mode"
+                  checked={internalScopeMode === 'all'}
+                  onChange={() => changeInternalScopeMode('all')}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-slate-700 dark:text-slate-200">Todas as empresas atuais e futuras</span>
+                  <span className="mt-0.5 block text-xs text-slate-500">Acesso global do tenant conforme o perfil e as permissões atribuídas.</span>
+                </span>
+              </label>
+              <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition ${
+                internalScopeMode === 'selected'
+                  ? 'border-cyan-500 bg-cyan-50 dark:border-cyan-700 dark:bg-cyan-950/20'
+                  : 'border-bbt-gray-100 dark:border-slate-700'
+              }`}>
+                <input
+                  type="radio"
+                  name="internal-scope-mode"
+                  checked={internalScopeMode === 'selected'}
+                  onChange={() => changeInternalScopeMode('selected')}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-slate-700 dark:text-slate-200">Somente empresas e grupos selecionados</span>
+                  <span className="mt-0.5 block text-xs text-slate-500">Limita todo o fluxo operacional aos itens marcados abaixo.</span>
+                </span>
+              </label>
+            </div>
+            {internalScopeMode === 'selected' && (
+              <div className="mt-3">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-xs text-amber-700 dark:text-amber-300">Selecione ao menos um grupo ou uma empresa.</p>
+                  {(empresaIds.length > 0 || grupoIds.length > 0) && (
+                    <button type="button" onClick={() => { setEmpresaIds([]); setGrupoIds([]) }} className="bbt-button-ghost h-8 text-xs">
+                      Limpar seleção
+                    </button>
+                  )}
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <div className="mb-2 text-xs font-semibold uppercase text-slate-500">Grupos</div>
+                    <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-bbt-gray-100 p-2 dark:border-slate-700">
+                      {gruposEmpresariais.length === 0 ? (
+                        <div className="text-xs text-slate-400">Nenhum grupo cadastrado.</div>
+                      ) : gruposEmpresariais.map((grupo) => (
+                        <label key={grupo.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bbt-gray-50 dark:hover:bg-slate-800">
+                          <input type="checkbox" checked={grupoIds.includes(grupo.id)} onChange={() => toggleGrupo(grupo.id)} />
+                          <span className="truncate">{grupo.nome}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-2 text-xs font-semibold uppercase text-slate-500">Empresas avulsas</div>
+                    <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-bbt-gray-100 p-2 dark:border-slate-700">
+                      {empresas.length === 0 ? (
+                        <div className="text-xs text-slate-400">Nenhuma empresa cadastrada.</div>
+                      ) : empresas.map((empresa) => (
+                        <label key={empresa.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bbt-gray-50 dark:hover:bg-slate-800">
+                          <input type="checkbox" checked={empresaIds.includes(empresa.id)} onChange={() => toggleEmpresa(empresa.id)} />
+                          <span className="truncate">{empresa.nome}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div>
-                <div className="mb-2 text-xs font-semibold uppercase text-slate-500">Empresas avulsas</div>
-                <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-bbt-gray-100 p-2 dark:border-slate-700">
-                  {empresas.length === 0 ? (
-                    <div className="text-xs text-slate-400">Nenhuma empresa cadastrada.</div>
-                  ) : empresas.map((empresa) => (
-                    <label key={empresa.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bbt-gray-50 dark:hover:bg-slate-800">
-                      <input type="checkbox" checked={empresaIds.includes(empresa.id)} onChange={() => toggleEmpresa(empresa.id)} />
-                      <span className="truncate">{empresa.nome}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            </div>
+            )}
           </div>
         )}
         </>
@@ -900,6 +1030,7 @@ function formatPermKey(k: string): string {
     gerar_relatorios: 'Gerar relatórios',
     importar_planilhas: 'Importar planilhas',
     ver_produtividade_todos: 'Ver produtividade de todos os agentes',
+    decidir_aprovacoes: 'Dar suporte assistido a decisões de aprovação',
     gerenciar_usuarios: 'Gerenciar usuários do sistema',
     excluir_demandas: 'Excluir demandas',
   }

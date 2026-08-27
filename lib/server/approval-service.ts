@@ -64,6 +64,10 @@ import {
   resolveEffectiveCorporateAccessInTransaction,
 } from '@/lib/server/corporate-access-service'
 import { withTenantTransaction } from '@/lib/server/database'
+import {
+  assertEmployeeAuthorizerDecisionLink,
+  EmployeeAuthorizerServiceError,
+} from '@/lib/server/employee-authorizer-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import { assertPolicyVersionPublishableInTransaction } from '@/lib/server/policy-service'
 import {
@@ -400,6 +404,19 @@ export function hasExplicitCorporateCompanyPermission(
   const company = access.companies.find((candidate) => candidate.companyId === companyId)
   return Boolean(company?.delegationAuthorities?.some((authority) => (
     authority.companyIds.includes(companyId) && authority.permissions[permission]
+  )))
+}
+
+function hasExplicitDirectCorporateCompanyPermission(
+  access: CorporateAccessSummary,
+  companyId: string,
+  permission: keyof Permissoes,
+): boolean {
+  const company = access.companies.find((candidate) => candidate.companyId === companyId)
+  return Boolean(company?.delegationAuthorities?.some((authority) => (
+    authority.source === 'company'
+    && authority.companyIds.includes(companyId)
+    && authority.permissions[permission]
   )))
 }
 
@@ -909,6 +926,13 @@ async function createApprovalInstanceWithOrigin(
       const company = await loadCompanyContext(client, principal.tenantId, input.companyId)
       await validateApprovalEntityOwnership(client, principal.tenantId, input)
       const selected = await loadPublishedWorkflowForCompany(client, principal.tenantId, input, company.groupId)
+      if (!company.portalEnabled && selected.definition.workflow_code.startsWith('matrix.')) {
+        throw new ApprovalServiceError(
+          'COMPANY_PORTAL_APPROVAL_DISABLED',
+          'Habilite o Portal Empresa antes de iniciar uma aprovacao corporativa.',
+          409,
+        )
+      }
       assertApprovalInstanceWorkflowOrigin(selected.definition.workflow_code, origin)
       const parsedSubject = approvalSubjectInputSchema.parse(input.subject)
       const canonicalSubject = await loadCanonicalApprovalSubjectContext(client, principal, input, parsedSubject)
@@ -1087,6 +1111,19 @@ export async function decideApprovalAssignment(
       }
       replayed = true
       return
+    }
+    try {
+      await assertEmployeeAuthorizerDecisionLink(
+        client,
+        principal.tenantId,
+        assignment.assignee_user_id,
+        instance.company_id,
+      )
+    } catch (error) {
+      if (error instanceof EmployeeAuthorizerServiceError) {
+        throw new ApprovalServiceError(error.code, error.message, error.status)
+      }
+      throw error
     }
     const decisionActor = await authorizeApprovalDecisionActor(client, principal, assignment, instance, step)
     const actionTokenId = input.actionToken && !decisionActor.representation
@@ -1371,8 +1408,11 @@ async function assertActiveDelegatedAssignment(
       and delegate.user_id = $5
       and delegate.status = 'active'
      where delegation.tenant_id = $1 and delegation.id::text = $2
-       and delegation.status in ('active', 'scheduled')
-       and delegation.valid_from <= now() and delegation.valid_until > now()
+       and delegation.status in ('active', 'scheduled', 'expired')
+       and $7::timestamptz >= delegation.valid_from
+       and $7::timestamptz < delegation.valid_until
+       and corporate_user_can_decide_for_company($1, delegator.id, $3)
+       and corporate_user_can_decide_for_company($1, delegate.id, $3)
        and exists (
          select 1 from approval_delegation_modules module
          where module.tenant_id = delegation.tenant_id
@@ -1385,18 +1425,15 @@ async function assertActiveDelegatedAssignment(
              and company_scope.delegation_id = delegation.id
              and company_scope.company_id = $3
          )
-         or exists (
-           select 1 from approval_instances scoped_instance
-           join approval_delegation_groups group_scope
-             on group_scope.tenant_id = delegation.tenant_id
-            and group_scope.delegation_id = delegation.id
-           join companies company
-             on company.tenant_id = scoped_instance.tenant_id
-            and company.id = scoped_instance.company_id
-            and company.group_id = group_scope.group_id
-           where scoped_instance.tenant_id = delegation.tenant_id
-             and scoped_instance.id = $6
-         )
+          or exists (
+            select 1 from approval_instances scoped_instance
+            join approval_delegation_groups group_scope
+              on group_scope.tenant_id = delegation.tenant_id
+             and group_scope.delegation_id = delegation.id
+            where scoped_instance.tenant_id = delegation.tenant_id
+              and scoped_instance.id = $6
+              and nullif(scoped_instance.subject_snapshot->>'groupId', '') = group_scope.group_id
+          )
        )
      for share of delegation`,
     [
@@ -1406,12 +1443,13 @@ async function assertActiveDelegatedAssignment(
       assignment.delegated_from_user_id,
       assignment.assignee_user_id,
       instance.id,
+      assignment.assigned_at,
     ],
   )
   if (!result.rows[0]) {
     throw new ApprovalServiceError(
       'APPROVAL_DELEGATION_NO_LONGER_VALID',
-      'A delegacao expirou, foi revogada ou nao cobre mais esta empresa. A atribuicao deve ser reavaliada.',
+      'A delegacao foi revogada, nao estava valida na atribuicao ou perdeu a elegibilidade corporativa. A atribuicao deve ser reavaliada.',
       409,
     )
   }
@@ -1583,7 +1621,73 @@ export async function createApprovalDelegation(
   }
   const delegationId = await withTenantTransaction(principal.tenantId, async (client) => {
     await expireApprovalDelegations(client, principal.tenantId)
-    const memberships = await loadDelegationMemberships(client, principal, [input.delegatorMembershipId, input.delegateMembershipId])
+    let approvalCompanyIds: string[] = []
+    if (input.modules.includes('approvals')) {
+      if (input.groupIds.length) {
+        const validGroups = await client.query<{ id: string }>(
+          `select distinct business_group.id
+           from business_groups business_group
+           where business_group.tenant_id = $1
+             and business_group.id = any($2::text[])
+             and business_group.status = 'active'
+             and business_group.deleted_at is null
+             and exists (
+               select 1 from companies company
+               where company.tenant_id = business_group.tenant_id
+                 and company.group_id = business_group.id
+                 and company.status = 'active'
+                 and company.deleted_at is null
+                 and company.company_portal_enabled = true
+             )`,
+          [principal.tenantId, input.groupIds],
+        )
+        const validGroupIds = new Set(validGroups.rows.map((group) => group.id))
+        if (input.groupIds.some((groupId) => !validGroupIds.has(groupId))) {
+          throw new ApprovalServiceError(
+            'DELEGATION_APPROVAL_SCOPE_INVALID',
+            'Todo grupo da delegacao de aprovacoes precisa estar ativo e ter empresa com Portal Empresa habilitado.',
+            409,
+          )
+        }
+      }
+      const scopedCompanies = await client.query<{ id: string }>(
+        `select id from companies
+         where tenant_id = $1
+           and status = 'active'
+           and deleted_at is null
+           and company_portal_enabled = true
+           and (
+             id = any($2::text[])
+             or group_id = any($3::text[])
+           )`,
+        [principal.tenantId, input.companyIds, input.groupIds],
+      )
+      approvalCompanyIds = uniqueStrings(scopedCompanies.rows.map((company) => company.id))
+      const scopedCompanySet = new Set(approvalCompanyIds)
+      if (input.companyIds.some((companyId) => !scopedCompanySet.has(companyId))) {
+        throw new ApprovalServiceError(
+          'DELEGATION_APPROVAL_SCOPE_INVALID',
+          'Toda empresa da delegacao de aprovacoes precisa estar ativa e com Portal Empresa habilitado.',
+          409,
+        )
+      }
+      if (!approvalCompanyIds.length) {
+        throw new ApprovalServiceError(
+          'DELEGATION_APPROVAL_COMPANY_REQUIRED',
+          'A delegacao de aprovacoes exige ao menos uma empresa ativa com Portal Empresa habilitado.',
+          409,
+        )
+      }
+    }
+    const memberships = await loadDelegationMemberships(
+      client,
+      principal,
+      [input.delegatorMembershipId, input.delegateMembershipId],
+      {
+        approvalCompanyIds,
+        approvalGroupIds: input.modules.includes('approvals') ? input.groupIds : [],
+      },
+    )
     const existingRows = await client.query<{
       id: string
       delegator_membership_id: string
@@ -1631,6 +1735,27 @@ export async function createApprovalDelegation(
       existing,
       new Date().toISOString(),
     )
+    if (validated.modules.includes('approvals')) {
+      const ineligible = await client.query<{ membership_id: string; company_id: string }>(
+        `select membership_scope.membership_id, company_scope.company_id
+         from unnest($2::uuid[]) membership_scope(membership_id)
+         cross join unnest($3::text[]) company_scope(company_id)
+         where not corporate_user_can_decide_for_company($1, membership_scope.membership_id, company_scope.company_id)
+         limit 1`,
+        [
+          principal.tenantId,
+          [validated.delegatorMembershipId, validated.delegateMembershipId],
+          approvalCompanyIds,
+        ],
+      )
+      if (ineligible.rowCount) {
+        throw new ApprovalServiceError(
+          'DELEGATION_APPROVER_EMPLOYEE_LINK_REQUIRED',
+          'Delegante e delegado precisam ser funcionarios autorizadores ativos em todas as empresas da delegacao.',
+          409,
+        )
+      }
+    }
     const inserted = await client.query<{ id: string }>(
       `insert into approval_delegations (
          tenant_id, delegator_membership_id, delegate_membership_id,
@@ -1698,6 +1823,23 @@ export async function revokeApprovalDelegation(
     }
     if (!['active', 'scheduled'].includes(delegation.status)) {
       throw new ApprovalServiceError('DELEGATION_ALREADY_CLOSED', 'A delegacao ja esta encerrada.', 409)
+    }
+    const pendingAssignments = await client.query(
+      `select id from approval_assignments
+       where tenant_id = $1
+         and source_reference = $2
+         and delegated_from_user_id is not null
+         and status = 'pending'
+       limit 1
+       for update`,
+      [principal.tenantId, delegationId],
+    )
+    if (pendingAssignments.rowCount) {
+      throw new ApprovalServiceError(
+        'DELEGATION_PENDING_ASSIGNMENTS',
+        'Reatribua as aprovacoes pendentes antes de revogar esta delegacao.',
+        409,
+      )
     }
     await client.query(
       `update approval_delegations set status = 'revoked', revoked_by_membership_id = $3,
@@ -1849,7 +1991,11 @@ export async function listApprovalCandidates(
     if (filters.allCompanies && filters.businessGroupId) {
       const groupCompanies = await client.query<{ id: string }>(
         `select id from companies
-         where tenant_id = $1 and group_id = $2 and deleted_at is null
+         where tenant_id = $1
+           and group_id = $2
+           and status = 'active'
+           and deleted_at is null
+           and company_portal_enabled = true
          order by id`,
         [principal.tenantId, filters.businessGroupId],
       )
@@ -1939,13 +2085,8 @@ export async function listApprovalCandidates(
       if (companies.some((company) => !company)) continue
       const companyAccess = companies.filter((company): company is NonNullable<typeof company> => Boolean(company))
       if (requireDecisionInEveryCompany && companyAccess.some((company) => (
-        !hasExplicitCorporateCompanyPermission(access.summary, company.companyId, 'decidir_aprovacoes')
+        !hasExplicitDirectCorporateCompanyPermission(access.summary, company.companyId, 'decidir_aprovacoes')
       ))) continue
-      if (filters.allCompanies && filters.businessGroupId && !hasExplicitCorporateGroupAllPermission(
-        access.summary,
-        filters.businessGroupId,
-        'decidir_aprovacoes',
-      )) continue
       const effectiveProfiles = uniqueStrings(companyAccess.flatMap((company) => company.profiles))
       const effectivePermissions = Object.fromEntries(
         Object.keys(companyAccess[0].permissions).map((permission) => [
@@ -2032,13 +2173,14 @@ async function insertApprovalAuthorityInTransaction(
   ))) {
     throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_DENIED', 'O usuario nao possui acesso a empresa da alcada.', 409)
   }
-  if (input.groupId && (
-    !targetAccess.summary.groupIds.includes(input.groupId)
-    || !targetAccess.summary.companies.some((company) => (
-      company.groupId === input.groupId && company.permissions.decidir_aprovacoes
-    ))
-  )) {
-    throw new ApprovalServiceError('APPROVAL_AUTHORITY_SCOPE_DENIED', 'O usuario nao possui acesso ao grupo da alcada.', 409)
+  if (input.groupId) {
+    await assertCorporateGroupApprovalCoverage(
+      client,
+      principal.tenantId,
+      target.membership_id,
+      targetAccess.summary,
+      input.groupId,
+    )
   }
   if (statusMode === 'effective') {
     await assertAuthorityCanBeGranted(client, principal, scopedInput)
@@ -2090,17 +2232,10 @@ function assertEligibleCorporateAuthorityTarget(
     )
   }
   if (input.groupId) {
-    if (!hasExplicitCorporateGroupAllPermission(access, input.groupId, 'decidir_aprovacoes')) {
-      throw new ApprovalServiceError(
-        'APPROVAL_AUTHORITY_GROUP_ALL_REQUIRED',
-        'A alcada de grupo exige um grant corporativo all_companies com permissao para decidir aprovacoes.',
-        409,
-      )
-    }
     return
   }
   if (input.companyId) {
-    if (!hasExplicitCorporateCompanyPermission(access, input.companyId, 'decidir_aprovacoes')) {
+    if (!hasExplicitDirectCorporateCompanyPermission(access, input.companyId, 'decidir_aprovacoes')) {
       throw new ApprovalServiceError(
         'APPROVAL_AUTHORITY_SCOPE_DENIED',
         'O usuario nao possui grant corporativo explicito para decidir aprovacoes nesta empresa.',
@@ -2110,12 +2245,62 @@ function assertEligibleCorporateAuthorityTarget(
     return
   }
   const hasExplicitDecisionGrant = access.companies.some((company) => (
-    hasExplicitCorporateCompanyPermission(access, company.companyId, 'decidir_aprovacoes')
+    hasExplicitDirectCorporateCompanyPermission(access, company.companyId, 'decidir_aprovacoes')
   ))
   if (!hasExplicitDecisionGrant) {
     throw new ApprovalServiceError(
       'APPROVAL_AUTHORITY_TARGET_EXPLICIT_ACCESS_REQUIRED',
       'O usuario precisa de ao menos um grant corporativo explicito para receber alcada.',
+      409,
+    )
+  }
+}
+
+async function assertCorporateGroupApprovalCoverage(
+  client: PoolClient,
+  tenantId: string,
+  membershipId: string,
+  access: CorporateAccessSummary,
+  groupId: string,
+): Promise<void> {
+  const coveredCompanies = await client.query<{ id: string }>(
+    `select id from companies
+     where tenant_id = $1
+       and group_id = $2
+       and status = 'active'
+       and deleted_at is null
+       and company_portal_enabled = true
+     order by id`,
+    [tenantId, groupId],
+  )
+  const companyIds = coveredCompanies.rows.map((company) => company.id)
+  if (!companyIds.length) {
+    throw new ApprovalServiceError(
+      'APPROVAL_AUTHORITY_GROUP_EMPTY',
+      'O grupo nao possui empresas ativas com Portal Empresa habilitado para receber a alcada.',
+      409,
+    )
+  }
+  if (companyIds.some((companyId) => (
+    !hasExplicitDirectCorporateCompanyPermission(access, companyId, 'decidir_aprovacoes')
+  ))) {
+    throw new ApprovalServiceError(
+      'APPROVAL_AUTHORITY_GROUP_SCOPE_INCOMPLETE',
+      'A alcada de grupo exige vinculo e grant decisorio direto em cada empresa atualmente abrangida.',
+      409,
+    )
+  }
+  const ineligible = await client.query<{ company_id: string }>(
+    `select company_id
+     from unnest($3::text[]) company_scope(company_id)
+     where not corporate_user_can_decide_for_company($1, $2, company_id)
+     limit 1`,
+    [tenantId, membershipId, companyIds],
+  )
+  if (ineligible.rowCount) {
+    throw new ApprovalServiceError(
+      'APPROVAL_AUTHORITY_GROUP_SCOPE_INCOMPLETE',
+      'A alcada de grupo exige autorizador funcionario ativo em cada empresa atualmente abrangida.',
       409,
     )
   }
@@ -2483,7 +2668,12 @@ async function validateMatrixRootScope(
     const companyIds = uniqueStrings(scope.companyIds)
     const companies = await client.query<{ id: string }>(
       `select id from companies
-       where tenant_id = $1 and id = any($2::text[]) and group_id = $3 and deleted_at is null`,
+       where tenant_id = $1
+         and id = any($2::text[])
+         and group_id = $3
+         and status = 'active'
+         and deleted_at is null
+         and company_portal_enabled = true`,
       [principal.tenantId, companyIds, scope.businessGroupId],
     )
     if (companies.rowCount !== companyIds.length) {
@@ -2491,12 +2681,22 @@ async function validateMatrixRootScope(
     }
     coveredCompanyIds = companies.rows.map((company) => company.id)
   } else {
-    const companies = await client.query<{ id: string }>(
-      `select id from companies
-       where tenant_id = $1 and group_id = $2 and deleted_at is null
+    const companies = await client.query<{ id: string; company_portal_enabled: boolean }>(
+      `select id, company_portal_enabled from companies
+       where tenant_id = $1
+         and group_id = $2
+         and status = 'active'
+         and deleted_at is null
        order by id`,
       [principal.tenantId, scope.businessGroupId],
     )
+    if (companies.rows.some((company) => !company.company_portal_enabled)) {
+      throw new ApprovalServiceError(
+        'APPROVAL_MATRIX_GROUP_PORTAL_DISABLED',
+        'Habilite o Portal Empresa em todas as empresas ativas do grupo antes de usar abrangencia total.',
+        409,
+      )
+    }
     coveredCompanyIds = companies.rows.map((company) => company.id)
   }
   if (!coveredCompanyIds.length) {
@@ -2568,17 +2768,29 @@ async function assertApprovalMatrixTargetCoverage(
       422,
     )
   }
-  const complete = options.allCompaniesGroupId
-    ? hasExplicitCorporateGroupAllPermission(access.summary, options.allCompaniesGroupId, 'decidir_aprovacoes')
-    : options.coveredCompanyIds.every((companyId) => (
-        hasExplicitCorporateCompanyPermission(access.summary, companyId, 'decidir_aprovacoes')
-      ))
+  const complete = options.coveredCompanyIds.every((companyId) => (
+    hasExplicitDirectCorporateCompanyPermission(access.summary, companyId, 'decidir_aprovacoes')
+  ))
   if (!complete) {
     throw new ApprovalServiceError(
       'APPROVAL_MATRIX_APPROVER_SCOPE_INCOMPLETE',
       options.allCompaniesGroupId
-        ? 'Cada autorizador precisa de grant corporativo all_companies para decidir inclusive em empresas futuras do grupo.'
+        ? 'Cada autorizador precisa de um vinculo e grant decisorio direto em todas as empresas atualmente abrangidas pelo grupo.'
         : 'Cada autorizador da matriz precisa de grant corporativo explicito para decidir em todas as empresas abrangidas.',
+      409,
+    )
+  }
+  const ineligible = await client.query<{ company_id: string }>(
+    `select company_id
+     from unnest($3::text[]) company_scope(company_id)
+     where not corporate_user_can_decide_for_company($1, $2, company_id)
+     limit 1`,
+    [tenantId, membershipId, options.coveredCompanyIds],
+  )
+  if (ineligible.rowCount) {
+    throw new ApprovalServiceError(
+      'APPROVAL_MATRIX_APPROVER_SCOPE_INCOMPLETE',
+      'Cada autorizador da matriz precisa de vinculo de funcionario ativo em todas as empresas abrangidas.',
       409,
     )
   }
@@ -3088,16 +3300,35 @@ export async function transitionApprovalMatrix(
       const coveredCompanies = matrix.access_mode === 'selected_companies'
         ? await client.query<{ id: string }>(
             `select id from companies
-             where tenant_id = $1 and group_id = $2 and id = any($3::text[]) and deleted_at is null
+             where tenant_id = $1
+               and group_id = $2
+               and id = any($3::text[])
+               and status = 'active'
+               and deleted_at is null
+               and company_portal_enabled = true
              order by id`,
             [principal.tenantId, matrix.business_group_id, uniqueStrings(matrix.selected_company_ids || [])],
           )
-        : await client.query<{ id: string }>(
-            `select id from companies
-             where tenant_id = $1 and group_id = $2 and deleted_at is null
+        : await client.query<{ id: string; company_portal_enabled: boolean }>(
+            `select id, company_portal_enabled from companies
+             where tenant_id = $1
+               and group_id = $2
+               and status = 'active'
+               and deleted_at is null
              order by id`,
             [principal.tenantId, matrix.business_group_id],
           )
+      if (
+        matrix.access_mode === 'all_companies'
+        && coveredCompanies.rows.some((company) => !('company_portal_enabled' in company)
+          || !company.company_portal_enabled)
+      ) {
+        throw new ApprovalServiceError(
+          'APPROVAL_MATRIX_GROUP_PORTAL_DISABLED',
+          'Habilite o Portal Empresa em todas as empresas ativas do grupo antes de publicar a matriz.',
+          409,
+        )
+      }
       const expectedCoverage = matrix.access_mode === 'selected_companies'
         ? uniqueStrings(matrix.selected_company_ids || []).length
         : coveredCompanies.rowCount
@@ -3738,6 +3969,10 @@ async function loadDelegationMemberships(
   client: PoolClient,
   principal: RequestPrincipal,
   membershipIds: string[],
+  options: {
+    approvalCompanyIds: string[]
+    approvalGroupIds: string[]
+  } = { approvalCompanyIds: [], approvalGroupIds: [] },
 ): Promise<DelegationMembership[]> {
   const uniqueIds = uniqueStrings(membershipIds)
   const rows = await client.query<MembershipCandidateRow>(
@@ -3751,7 +3986,10 @@ async function loadDelegationMemberships(
             ), '{}'::jsonb) || membership.custom_permissions as permissions,
             user_row.metadata as user_metadata
      from tenant_memberships membership
-     join users user_row on user_row.id = membership.user_id and user_row.deleted_at is null
+     join users user_row
+       on user_row.id = membership.user_id
+      and user_row.status = 'active'
+      and user_row.deleted_at is null
      join roles role_row on role_row.id = membership.role_id
      where membership.tenant_id = $1 and membership.id = any($2::uuid[])`,
     [principal.tenantId, uniqueIds],
@@ -3770,20 +4008,43 @@ async function loadDelegationMemberships(
       legacyCompanyIds: row.allowed_company_ids || [],
       legacyGroupIds: row.allowed_group_ids || [],
     })
+    const approvalRequested = options.approvalCompanyIds.length > 0
+    const approvalEligibility = approvalRequested
+      ? await client.query<{ eligible: boolean }>(
+          `select not exists (
+             select 1 from unnest($3::text[]) company_scope(company_id)
+             where not corporate_user_can_decide_for_company($1, $2, company_scope.company_id)
+           ) as eligible`,
+          [principal.tenantId, row.membership_id, options.approvalCompanyIds],
+        )
+      : null
+    const canDelegateApprovals = approvalRequested
+      ? Boolean(approvalEligibility?.rows[0]?.eligible)
+        && isCorporateApprovalMembershipEligible({
+          roleKey: row.role_key,
+          platformAdmin: row.platform_admin,
+          tenantWide: access.summary.tenantWide,
+        })
+      : permissions.decidir_aprovacoes
     result.push({
       membershipId: row.membership_id,
       tenantId: principal.tenantId,
       active: row.membership_status === 'active',
       platformAdmin: row.platform_admin,
       companyIds: access.summary.companyIds,
-      groupIds: access.summary.groupIds,
+      groupIds: uniqueStrings([
+        ...access.summary.groupIds,
+        ...(canDelegateApprovals ? options.approvalGroupIds : []),
+      ]),
       delegableModules: [
-        permissions.decidir_aprovacoes ? 'approvals' : '',
+        canDelegateApprovals ? 'approvals' : '',
         permissions.gerenciar_workflows ? 'workflows' : '',
         permissions.gerenciar_politicas ? 'policies' : '',
         permissions.editar_financeiro ? 'finance' : '',
       ].filter(Boolean),
-      canReceiveDelegation: row.membership_status === 'active' && !row.platform_admin && permissions.decidir_aprovacoes,
+      canReceiveDelegation: row.membership_status === 'active'
+        && !row.platform_admin
+        && canDelegateApprovals,
     })
   }
   return result
@@ -4595,13 +4856,22 @@ async function assertEntityCompany(
   if (!result.rowCount) throw new ApprovalServiceError('APPROVAL_ENTITY_SCOPE_MISMATCH', 'Entidade nao pertence a empresa informada.', 409)
 }
 
-async function loadCompanyContext(client: PoolClient, tenantId: string, companyId: string): Promise<{ groupId: string | null }> {
-  const result = await client.query<{ group_id: string | null }>(
-    `select group_id from companies where tenant_id = $1 and id = $2 and deleted_at is null`,
+async function loadCompanyContext(
+  client: PoolClient,
+  tenantId: string,
+  companyId: string,
+): Promise<{ groupId: string | null; portalEnabled: boolean }> {
+  const result = await client.query<{ group_id: string | null; company_portal_enabled: boolean }>(
+    `select group_id, company_portal_enabled
+     from companies
+     where tenant_id = $1 and id = $2 and status = 'active' and deleted_at is null`,
     [tenantId, companyId],
   )
   if (!result.rows[0]) throw new ApprovalServiceError('COMPANY_NOT_FOUND', 'Empresa nao encontrada.', 404)
-  return { groupId: result.rows[0].group_id }
+  return {
+    groupId: result.rows[0].group_id,
+    portalEnabled: result.rows[0].company_portal_enabled,
+  }
 }
 
 export async function loadCanonicalApprovalSubjectContext(
@@ -4688,7 +4958,7 @@ export async function loadCanonicalApprovalSubjectContext(
          where employee_id is not null
          group by employee_id
        )
-       select distinct traveler_employee.employee_id, requester.user_id, traveler_employee.is_primary
+       select distinct traveler_employee.employee_id, employee_identity.user_id, traveler_employee.is_primary
        from traveler_employees traveler_employee
        join employees traveler_profile
          on traveler_profile.tenant_id = $1
@@ -4696,13 +4966,31 @@ export async function loadCanonicalApprovalSubjectContext(
         and traveler_profile.id = traveler_employee.employee_id
         and traveler_profile.status = 'active'
         and traveler_profile.deleted_at is null
-       left join requesters requester
-         on requester.tenant_id = $1
-        and requester.company_id = $3
-        and requester.employee_id = traveler_employee.employee_id
-        and requester.status = 'active'
-        and requester.deleted_at is null
-        and requester.user_id is not null`,
+       left join lateral (
+         select requester.user_id
+         from requesters requester
+         where requester.tenant_id = $1
+           and requester.company_id = $3
+           and requester.employee_id = traveler_employee.employee_id
+           and requester.status = 'active'
+           and requester.deleted_at is null
+           and requester.user_id is not null
+         union
+         select membership.user_id
+         from employee_portal_memberships employee_link
+         join tenant_memberships membership
+           on membership.tenant_id = employee_link.tenant_id
+          and membership.id = employee_link.membership_id
+          and membership.status = 'active'
+         join users linked_user
+           on linked_user.id = membership.user_id
+          and linked_user.status = 'active'
+          and linked_user.deleted_at is null
+         where employee_link.tenant_id = $1
+           and employee_link.company_id = $3
+           and employee_link.employee_id = traveler_employee.employee_id
+           and employee_link.status = 'active'
+       ) employee_identity on true`,
       [tenantId, input.demandId, input.companyId, employeeId],
     )
     audienceEmployeeIds = uniqueStrings(travelers.rows.map((traveler) => traveler.employee_id))
@@ -4714,15 +5002,47 @@ export async function loadCanonicalApprovalSubjectContext(
       ? primaryTravelerUserIds[0]
       : travelerUserIds.length === 1 ? travelerUserIds[0] : null
   } else if (employeeId) {
-    const employee = await client.query<{ department: string | null; cost_center_id: string | null }>(
-      `select department, cost_center_id from employees
-       where tenant_id = $1 and id = $2 and company_id = $3
-         and status = 'active' and deleted_at is null`,
+    const employee = await client.query<{
+      department: string | null
+      cost_center_id: string | null
+      user_id: string | null
+    }>(
+      `select employee.department, employee.cost_center_id, employee_identity.user_id
+       from employees employee
+       left join lateral (
+         select requester.user_id
+         from requesters requester
+         where requester.tenant_id = employee.tenant_id
+           and requester.company_id = employee.company_id
+           and requester.employee_id = employee.id
+           and requester.status = 'active'
+           and requester.deleted_at is null
+           and requester.user_id is not null
+         union
+         select membership.user_id
+         from employee_portal_memberships employee_link
+         join tenant_memberships membership
+           on membership.tenant_id = employee_link.tenant_id
+          and membership.id = employee_link.membership_id
+          and membership.status = 'active'
+         join users linked_user
+           on linked_user.id = membership.user_id
+          and linked_user.status = 'active'
+          and linked_user.deleted_at is null
+         where employee_link.tenant_id = employee.tenant_id
+           and employee_link.company_id = employee.company_id
+           and employee_link.employee_id = employee.id
+           and employee_link.status = 'active'
+       ) employee_identity on true
+       where employee.tenant_id = $1 and employee.id = $2 and employee.company_id = $3
+         and employee.status = 'active' and employee.deleted_at is null`,
       [tenantId, employeeId, input.companyId],
     )
     department = employee.rows[0]?.department || null
     costCenterId = employee.rows[0]?.cost_center_id || null
     audienceEmployeeIds = employee.rows[0] ? [employeeId] : []
+    travelerUserIds = uniqueStrings(employee.rows.flatMap((row) => row.user_id ? [row.user_id] : []))
+    primaryTravelerUserId = travelerUserIds.length === 1 ? travelerUserIds[0] : null
   }
 
   if (department) result.department = department
@@ -5691,8 +6011,10 @@ async function loadApprovalCandidates(
      from tenant_memberships membership
      join users user_row on user_row.id = membership.user_id and user_row.status = 'active' and user_row.deleted_at is null
      join roles role_row on role_row.id = membership.role_id
-     where membership.tenant_id = $1 and membership.status = 'active'`,
-    [principal.tenantId],
+     where membership.tenant_id = $1
+       and membership.status = 'active'
+       and employee_authorizer_can_decide_for_company($1, membership.id, $2)`,
+    [principal.tenantId, subject.companyId],
   )
   const memberIds = members.rows.map((member) => member.membership_id)
   const matrixWorkflow = workflow.code.startsWith('matrix.')
@@ -5863,11 +6185,19 @@ async function resolveDelegatedAssignment(
        and delegate.id = delegation.delegate_membership_id
        and delegate.status = 'active'
      join users delegate_user
-       on delegate_user.id = delegate.user_id and delegate_user.status = 'active'
+       on delegate_user.id = delegate.user_id
+      and delegate_user.status = 'active'
+      and delegate_user.deleted_at is null
+      and not delegate_user.platform_admin
+     join roles delegate_role
+       on delegate_role.id = delegate.role_id
+      and delegate_role.role_key not in ('tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator')
      where delegation.tenant_id = $1
        and delegation.delegator_membership_id = $2
        and delegation.status in ('active', 'scheduled')
        and delegation.valid_from <= now() and delegation.valid_until > now()
+       and corporate_user_can_decide_for_company($1, delegation.delegator_membership_id, $3)
+       and corporate_user_can_decide_for_company($1, delegate.id, $3)
        and exists (
          select 1 from approval_delegation_modules module
          where module.tenant_id = delegation.tenant_id
@@ -5888,7 +6218,8 @@ async function resolveDelegatedAssignment(
          ))
        )
      order by delegation.valid_from desc, delegation.id
-     limit 1`,
+     limit 1
+     for share of delegation`,
     [tenantId, approver.membershipId, subject.companyId, subject.groupId || null],
   )
   const delegated = result.rows[0]

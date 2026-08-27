@@ -1,6 +1,6 @@
 {
   "name": "bbt-corporativo",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "description": "BBT Corporativo - plataforma corporativa de viagens, despesas, vouchers e suporte IA",
   "scripts": {

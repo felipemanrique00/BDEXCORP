@@ -25,6 +25,14 @@ import {
 } from '@/lib/server/database'
 import { emailConfigured, sendTransactionalEmail } from '@/lib/server/email'
 import { getServerEnvironment } from '@/lib/server/environment'
+import {
+  assertEmployeeAuthorizerIdentityMutationAllowedInTransaction,
+  assertGenericEmployeeAuthorizerActivationAllowedInTransaction,
+  EmployeeAuthorizerServiceError,
+  markEmployeeAuthorizerInviteDeliveryState,
+  rebindPendingEmployeeAuthorizerInviteInTransaction,
+  revokeInvalidEmployeeAuthorizerLinksInTransaction,
+} from '@/lib/server/employee-authorizer-service'
 import { logError } from '@/lib/server/logger'
 import {
   applyPermissionOverrides,
@@ -186,7 +194,11 @@ export async function createTenantUser(
   assertLegacyUserMutationAllowed(principal, input)
   assertMembershipPermissionOverridesAllowed(principal, input.permissions)
   if (input.corporateAccess) {
-    assertCorporateAccessDelegation(principal, input.corporateAccess, { requireAtLeastOneGrant: true })
+    assertCorporateAccessDelegation(
+      principal,
+      corporateAccessWithoutEmployeeDecision(input.corporateAccess),
+      { requireAtLeastOneGrant: true },
+    )
   }
   const corporateProfile = primaryCorporateProfile(input.corporateAccess)
   const roleKey = corporateProfile
@@ -347,34 +359,33 @@ export async function resendTenantUserInvite(
     )
     if (!membership.rowCount) throw new UserConflictError('Convite pendente nao encontrado.')
     await client.query(
+      `update user_invites set expires_at = least(expires_at, now())
+       where tenant_id = $1 and membership_id = $2 and accepted_at is null`,
+      [principal.tenantId, membership.rows[0].id],
+    )
+    await client.query(
       `insert into user_invites (id, tenant_id, user_id, membership_id, token_hash, expires_at, created_by)
        values ($1, $2, $3, $4, $5, now() + interval '72 hours', $6)`,
       [inviteId, principal.tenantId, userId, membership.rows[0].id, inviteHash, principal.user.id],
+    )
+    await rebindPendingEmployeeAuthorizerInviteInTransaction(
+      client,
+      principal.tenantId,
+      membership.rows[0].id,
+      inviteId,
     )
   })
 
   try {
     await sendUserInvitationEmail({ email: user.email, name: user.name, token: inviteToken })
-    await withTenantTransaction(principal.tenantId, (client) => client.query(
-      `update user_invites set expires_at = now()
-       where tenant_id = $1 and user_id = $2 and accepted_at is null and id <> $3`,
-      [principal.tenantId, userId, inviteId],
-    ))
+    await markEmployeeAuthorizerInviteDeliveryState(principal.tenantId, inviteId, 'sent')
   } catch (error) {
-    await withTenantTransaction(principal.tenantId, (client) => client.query(
-      'delete from user_invites where id = $1 and tenant_id = $2 and accepted_at is null',
-      [inviteId, principal.tenantId],
-    )).catch((cleanupError) => {
-      logError('tenant_user_invite_retry_cleanup_failed', cleanupError, {
-        errorCode: 'TENANT_USER_INVITE_RETRY_CLEANUP_FAILED',
-        tenantId: principal.tenantId,
-        userId,
-      })
-    })
     logError('tenant_user_invite_retry_delivery_failed', error, {
       errorCode: 'TENANT_USER_INVITE_RETRY_DELIVERY_FAILED',
       tenantId: principal.tenantId,
       userId,
+      inviteId,
+      invitationState: 'delivery_pending',
     })
     throw new UserInvitationUnavailableError('Nao foi possivel reenviar o convite. Verifique o SMTP e tente novamente.')
   }
@@ -396,7 +407,12 @@ export async function updateTenantUser(
   if (input.password) assertStrongPassword(input.password)
   assertLegacyUserMutationAllowed(principal, input)
   assertMembershipPermissionOverridesAllowed(principal, input.permissions)
-  if (input.corporateAccess) assertCorporateAccessDelegation(principal, input.corporateAccess)
+  if (input.corporateAccess) {
+    assertCorporateAccessDelegation(
+      principal,
+      corporateAccessWithoutEmployeeDecision(input.corporateAccess),
+    )
+  }
   const nextAvatar = resolveUserAvatarUpdate(current.avatar, input.avatar)
   const changesSharedIdentity = input.name.trim() !== current.name
     || input.email.trim().toLowerCase() !== current.email.toLowerCase()
@@ -456,7 +472,29 @@ export async function updateTenantUser(
   const nextMembershipStatus = current.status === 'invited'
     ? input.password ? 'active' : 'invited'
     : input.active === false ? 'inactive' : 'active'
+  const emailChanged = input.email.trim().toLowerCase() !== current.email.toLowerCase()
+  const invalidatesEmployeeIdentity = emailChanged
+    || nextMembershipStatus === 'inactive'
+    || Object.prototype.hasOwnProperty.call(INTERNAL_PROFILE_BY_ROLE_KEY, roleKey)
+  const activatesEmployeeInviteOutsideAcceptance = current.status === 'invited' && Boolean(input.password)
   await withTenantTransaction(principal.tenantId, async (client) => {
+    if (!current.membership_id) throw new UserNotFoundError()
+    if (activatesEmployeeInviteOutsideAcceptance) {
+      await translateEmployeeAuthorizerConflict(() =>
+        assertGenericEmployeeAuthorizerActivationAllowedInTransaction(
+          client,
+          principal.tenantId,
+          current.membership_id!,
+        ))
+    }
+    if (invalidatesEmployeeIdentity) {
+      await translateEmployeeAuthorizerConflict(() =>
+        assertEmployeeAuthorizerIdentityMutationAllowedInTransaction(
+          client,
+          principal.tenantId,
+          current.membership_id!,
+        ))
+    }
     if (changesSharedIdentity && !principal.platformAdmin) {
       await applyDatabaseSecurityContext(client, { identityUserId: userId })
       const memberships = await client.query<{ tenant_count: number; current_tenant: boolean }>(
@@ -566,6 +604,13 @@ export async function updateTenantUser(
     } else if (isTenantAccessAdministrator(principal)) {
       await revokeCorporateAccessInTransaction(client, principal.tenantId, membership.rows[0].id)
     }
+    if (invalidatesEmployeeIdentity) {
+      await revokeInvalidEmployeeAuthorizerLinksInTransaction(
+        client,
+        principal.tenantId,
+        principal.user.id,
+      )
+    }
     if (input.password) {
       await client.query(
         `update user_credentials set
@@ -604,7 +649,16 @@ export async function setTenantUserActive(
   }
 
   await withTenantTransaction(principal.tenantId, async (client) => {
-    const membership = await client.query(
+    if (!existing.membership_id) throw new UserNotFoundError()
+    if (!active) {
+      await translateEmployeeAuthorizerConflict(() =>
+        assertEmployeeAuthorizerIdentityMutationAllowedInTransaction(
+          client,
+          principal.tenantId,
+          existing.membership_id!,
+        ))
+    }
+    const membership = await client.query<{ id: string }>(
       `update tenant_memberships
        set status = $3, updated_at = now()
        where tenant_id = $1 and user_id = $2
@@ -612,6 +666,13 @@ export async function setTenantUserActive(
       [principal.tenantId, userId, active ? 'active' : 'inactive'],
     )
     if (!membership.rowCount) throw new UserNotFoundError()
+    if (!active) {
+      await revokeInvalidEmployeeAuthorizerLinksInTransaction(
+        client,
+        principal.tenantId,
+        principal.user.id,
+      )
+    }
   })
   if (!active) {
     await revokeTenantUserSessions(principal.tenantId, userId, 'tenant_access_deactivated')
@@ -636,6 +697,17 @@ export class UserInvitationUnavailableError extends Error {}
 export class UserNotFoundError extends Error {
   constructor() {
     super('Usuario nao encontrado.')
+  }
+}
+
+async function translateEmployeeAuthorizerConflict(operation: () => Promise<void>): Promise<void> {
+  try {
+    await operation()
+  } catch (error) {
+    if (error instanceof EmployeeAuthorizerServiceError) {
+      throw new UserConflictError(error.message)
+    }
+    throw error
   }
 }
 
@@ -834,6 +906,28 @@ function uniqueStrings(values: string[]): string[] {
 
 function primaryCorporateProfile(input: CorporateAccessConfigurationInput | undefined) {
   return input?.groupGrants[0]?.profile || input?.companyGrants[0]?.profile
+}
+
+function corporateAccessWithoutEmployeeDecision(
+  input: CorporateAccessConfigurationInput,
+): CorporateAccessConfigurationInput {
+  return {
+    ...input,
+    groupGrants: input.groupGrants.map((grant) => ({
+      ...grant,
+      permissionOverrides: {
+        ...grant.permissionOverrides,
+        decidir_aprovacoes: false,
+      },
+    })),
+    companyGrants: input.companyGrants.map((grant) => ({
+      ...grant,
+      permissionOverrides: {
+        ...grant.permissionOverrides,
+        decidir_aprovacoes: false,
+      },
+    })),
+  }
 }
 
 async function revokeCorporateAccessInTransaction(

@@ -4,6 +4,12 @@ import type { User } from '@/types'
 
 export type ImpersonationMode = 'test' | 'operate'
 
+export interface ImpersonationCompanyScope {
+  companyId: string
+  label: string
+  allowedActions: string[]
+}
+
 export interface ImpersonationTarget {
   userId: string
   membershipId: string
@@ -14,7 +20,7 @@ export interface ImpersonationTarget {
   companyId: string | null
   companyIds: string[]
   groupIds: string[]
-  allowedActions: string[]
+  companyScopes: ImpersonationCompanyScope[]
 }
 
 export interface ImpersonationRepresentation {
@@ -63,6 +69,7 @@ export interface ImpersonationTargetResult {
 
 export interface StartImpersonationInput {
   targetMembershipId: string
+  companyId: string
   mode: ImpersonationMode
   reason: string
   reference?: string
@@ -119,6 +126,7 @@ export async function startImpersonation(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       targetMembershipId: input.targetMembershipId,
+      companyId: input.companyId.trim(),
       mode: input.mode,
       reason: input.reason.trim(),
       ...(input.reference?.trim() ? { reference: input.reference.trim() } : {}),
@@ -211,7 +219,17 @@ function parseTarget(value: unknown): ImpersonationTarget | null {
   const userId = string(record.userId)
   const membershipId = string(record.membershipId)
   const name = string(record.name)
-  if (!userId || !membershipId || !name) return null
+  const companyIds = uniqueStrings(record.companyIds)
+  const companyScopes = parseCompanyScopes(record.companyScopes)
+  const companyId = string(record.companyId)
+  if (
+    !userId
+    || !membershipId
+    || !name
+    || !companyScopes
+    || !sameIds(companyIds, companyScopes.map((scope) => scope.companyId))
+    || (companyId && !companyIds.includes(companyId))
+  ) return null
   return {
     userId,
     membershipId,
@@ -219,11 +237,27 @@ function parseTarget(value: unknown): ImpersonationTarget | null {
     email: string(record.email),
     roleKey: string(record.roleKey),
     ...(string(record.corporateProfile) ? { corporateProfile: string(record.corporateProfile) } : {}),
-    companyId: string(record.companyId) || null,
-    companyIds: strings(record.companyIds),
+    companyId: companyId || null,
+    companyIds,
     groupIds: strings(record.groupIds),
-    allowedActions: strings(record.allowedActions),
+    companyScopes,
   }
+}
+
+function parseCompanyScopes(value: unknown): ImpersonationCompanyScope[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const scopes: ImpersonationCompanyScope[] = []
+  const companyIds = new Set<string>()
+  for (const raw of value) {
+    const record = object(raw)
+    const companyId = string(record.companyId)
+    const label = string(record.label)
+    const allowedActions = strictStrings(record.allowedActions)
+    if (!companyId || !label || !allowedActions || companyIds.has(companyId)) return null
+    companyIds.add(companyId)
+    scopes.push({ companyId, label, allowedActions })
+  }
+  return scopes
 }
 
 async function impersonationRequest(path: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
@@ -253,6 +287,22 @@ function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
     : []
+}
+
+function strictStrings(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  if (value.some((item) => typeof item !== 'string' || !item.trim())) return null
+  return uniqueStrings(value)
+}
+
+function uniqueStrings(value: unknown): string[] {
+  return [...new Set(strings(value).map((item) => item.trim()))]
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false
+  const expected = new Set(left)
+  return right.every((value) => expected.has(value))
 }
 
 function isoDate(value: unknown): string {

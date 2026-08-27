@@ -11,6 +11,7 @@ export const dynamic = 'force-dynamic'
 
 const inputSchema = z.object({
   targetMembershipId: z.string().uuid(),
+  companyId: z.string().trim().min(1).max(200),
   mode: z.enum(['test', 'operate']),
   reason: z.string().trim().min(10).max(500),
   reference: z.string().trim().min(1).max(160).optional(),

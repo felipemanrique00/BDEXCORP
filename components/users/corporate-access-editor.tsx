@@ -30,12 +30,65 @@ import {
 export { corporateDraftToPayload, createCorporateAccessDraft } from '@/lib/corporate-access-draft'
 export type { CorporateAccessDraft } from '@/lib/corporate-access-draft'
 
-function currentPermissionOverrides(value: CorporateAccessDraft): Partial<Permissoes> {
-  if (!value.customPermissions) return {}
+const GENERIC_CORPORATE_PROFILES = CORPORATE_PROFILES.filter((profile) => profile !== 'approver')
+const GENERIC_CORPORATE_PERMISSION_KEYS = CORPORATE_PERMISSION_KEYS.filter(
+  (permission) => permission !== 'decidir_aprovacoes',
+)
+
+function genericCorporateProfile(profile: CorporateProfile): CorporateProfile {
+  return profile === 'approver' ? 'viewer' : profile
+}
+
+function permissionsWithoutApprovalDecision(permissions: Permissoes): Permissoes {
+  return {
+    ...permissions,
+    decidir_aprovacoes: false,
+  }
+}
+
+function currentPermissionOverrides(
+  value: CorporateAccessDraft,
+  profile: CorporateProfile,
+): Partial<Permissoes> {
+  const permissions = value.profile === profile
+    ? value.permissions
+    : CORPORATE_PROFILE_PERMISSIONS[profile]
   return permissionOverridesFromEffective(
-    CORPORATE_PROFILE_PERMISSIONS[value.profile],
-    value.permissions,
+    CORPORATE_PROFILE_PERMISSIONS[profile],
+    permissionsWithoutApprovalDecision(permissions),
   )
+}
+
+function enforceGenericApprovalBoundary(value: CorporateAccessDraft): CorporateAccessDraft {
+  return {
+    ...value,
+    permissions: permissionsWithoutApprovalDecision(value.permissions),
+    // Vínculos com o perfil legado de autorizador podem representar uma função
+    // ativa gerenciada pelo funcionário. Eles seguem intactos; o servidor também
+    // os protege em salvamentos não relacionados.
+    groupGrants: value.groupGrants.map((grant) => grant.profile === 'approver'
+      ? grant
+      : {
+          ...grant,
+          permissionOverrides: permissionOverridesFromEffective(
+            CORPORATE_PROFILE_PERMISSIONS[grant.profile],
+            permissionsWithoutApprovalDecision(
+              permissionsForCorporateProfile(grant.profile, grant.permissionOverrides),
+            ),
+          ),
+        }),
+    companyGrants: value.companyGrants.map((grant) => grant.profile === 'approver'
+      ? grant
+      : {
+          ...grant,
+          permissionOverrides: permissionOverridesFromEffective(
+            CORPORATE_PROFILE_PERMISSIONS[grant.profile],
+            permissionsWithoutApprovalDecision(
+              permissionsForCorporateProfile(grant.profile, grant.permissionOverrides),
+            ),
+          ),
+        }),
+  }
 }
 
 export function CorporateAccessEditor({
@@ -61,10 +114,24 @@ export function CorporateAccessEditor({
   const selectedDirectCompanies = new Set(value.companyGrants.map((grant) => grant.companyId))
   const contextOptions = buildContextOptions(value, companies, groups)
 
+  function commit(next: CorporateAccessDraft) {
+    onChange(clearInvalidDefault(
+      enforceGenericApprovalBoundary(next),
+      companies,
+      groups,
+    ))
+  }
+
   function setProfile(profile: CorporateProfile) {
-    if (profile === value.profile) return
+    if (profile === 'approver' || profile === value.profile) return
     const permissions = { ...CORPORATE_PROFILE_PERMISSIONS[profile] }
-    const permissionOverrides = {}
+    // A capacidade de decidir aprovações nasce exclusivamente do vínculo
+    // Funcionário > Autorizadores da empresa, nunca do cadastro genérico.
+    permissions.decidir_aprovacoes = false
+    const permissionOverrides = permissionOverridesFromEffective(
+      CORPORATE_PROFILE_PERMISSIONS[profile],
+      permissions,
+    )
     const next = {
       ...value,
       profile,
@@ -82,7 +149,7 @@ export function CorporateAccessEditor({
         permissionOverrides,
       })),
     }
-    onChange(clearInvalidDefault(next, companies, groups))
+    commit(next)
   }
 
   function toggleGroup(groupId: string) {
@@ -92,21 +159,25 @@ export function CorporateAccessEditor({
     const groupCompanyIds = companies
       .filter((company) => company.grupo_id === groupId || group?.empresa_ids.includes(company.id))
       .map((company) => company.id)
+    const profile = genericCorporateProfile(value.profile)
+    const permissions = permissionsWithoutApprovalDecision(
+      value.profile === profile ? value.permissions : CORPORATE_PROFILE_PERMISSIONS[profile],
+    )
     const groupGrants = exists
       ? value.groupGrants.filter((grant) => grant.groupId !== groupId)
       : [...value.groupGrants, {
           groupId,
-          profile: value.profile,
-          permissionOverrides: currentPermissionOverrides(value),
+          profile,
+          permissionOverrides: currentPermissionOverrides(value, profile),
           accessMode: canGrantAllCompanies ? 'all_companies' as const : 'selected_companies' as const,
           companyIds: canGrantAllCompanies ? [] : groupCompanyIds,
-          canViewConsolidated: value.permissions.ver_consolidado_grupo
+          canViewConsolidated: permissions.ver_consolidado_grupo
             && (!consolidatedGroupIds || consolidatedGroupIds.has(groupId)),
           status: 'active' as const,
           validFrom: '',
           validUntil: '',
         }]
-    onChange(clearInvalidDefault({ ...value, groupGrants }, companies, groups))
+    commit({ ...value, groupGrants })
   }
 
   function patchGroup(groupId: string, patch: Partial<GroupAccessDraft>) {
@@ -116,7 +187,7 @@ export function CorporateAccessEditor({
       if (next.accessMode === 'all_companies') next.companyIds = []
       return next
     })
-    onChange(clearInvalidDefault({ ...value, groupGrants }, companies, groups))
+    commit({ ...value, groupGrants })
   }
 
   function toggleSelectedCompany(groupId: string, companyId: string) {
@@ -130,24 +201,25 @@ export function CorporateAccessEditor({
 
   function toggleDirectCompany(companyId: string) {
     const exists = value.companyGrants.some((grant) => grant.companyId === companyId)
+    const profile = genericCorporateProfile(value.profile)
     const companyGrants = exists
       ? value.companyGrants.filter((grant) => grant.companyId !== companyId)
       : [...value.companyGrants, {
           companyId,
-          profile: value.profile,
-          permissionOverrides: currentPermissionOverrides(value),
+          profile,
+          permissionOverrides: currentPermissionOverrides(value, profile),
           status: 'active' as const,
           validFrom: '',
           validUntil: '',
         }]
-    onChange(clearInvalidDefault({ ...value, companyGrants }, companies, groups))
+    commit({ ...value, companyGrants })
   }
 
   function patchDirectCompany(companyId: string, patch: Partial<CompanyAccessDraft>) {
     const companyGrants = value.companyGrants.map((grant) => (
       grant.companyId === companyId ? { ...grant, ...patch } : grant
     ))
-    onChange(clearInvalidDefault({ ...value, companyGrants }, companies, groups))
+    commit({ ...value, companyGrants })
   }
 
   if (loading) {
@@ -161,7 +233,7 @@ export function CorporateAccessEditor({
           <ShieldCheck className="h-4 w-4 text-bbt-accent" /> Perfil corporativo
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {CORPORATE_PROFILES.map((profile) => (
+          {GENERIC_CORPORATE_PROFILES.map((profile) => (
             <button
               key={profile}
               type="button"
@@ -177,6 +249,10 @@ export function CorporateAccessEditor({
             </button>
           ))}
         </div>
+        <p className="mt-2 rounded-md border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900 dark:border-cyan-900/60 dark:bg-cyan-950/30 dark:text-cyan-100">
+          Para conceder ou remover a função de autorizador, use Empresa &gt; Pessoas e acessos &gt; Autorizadores.
+          Um vínculo de autorizador já ativo é preservado quando você salva outras alterações nesta tela.
+        </p>
       </section>
 
       <section className="border-t border-bbt-gray-100 pt-4 dark:border-slate-700">
@@ -371,7 +447,7 @@ export function CorporateAccessEditor({
           <select
             value={value.defaultContextKey}
             disabled={disabled}
-            onChange={(event) => onChange({ ...value, defaultContextKey: event.target.value })}
+            onChange={(event) => commit({ ...value, defaultContextKey: event.target.value })}
             className="bbt-input mt-1.5 text-sm"
           >
             <option value="">Selecionar automaticamente</option>
@@ -387,18 +463,14 @@ export function CorporateAccessEditor({
             disabled={disabled}
             checked={value.customPermissions}
             onChange={(event) => {
-              onChange(clearInvalidDefault(
-                setCorporateDraftCustomization(value, event.target.checked),
-                companies,
-                groups,
-              ))
+              commit(setCorporateDraftCustomization(value, event.target.checked))
             }}
           />
           Personalizar permissoes do perfil
         </label>
         {value.customPermissions && (
           <div className="mt-3 grid max-h-52 gap-1 overflow-y-auto sm:grid-cols-2">
-            {CORPORATE_PERMISSION_KEYS.map((permission) => (
+            {GENERIC_CORPORATE_PERMISSION_KEYS.map((permission) => (
               <label key={permission} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-bbt-gray-50 dark:hover:bg-slate-800">
                 <input
                   type="checkbox"
@@ -410,7 +482,7 @@ export function CorporateAccessEditor({
                       permission,
                       event.target.checked,
                     )
-                    onChange(clearInvalidDefault(next, companies, groups))
+                    commit(next)
                   }}
                 />
                 {permissionLabel(permission)}

@@ -37,6 +37,7 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
   const approverRoleId = randomUUID()
   const companyId = `company-${randomUUID()}`
   const employeeId = `employee-${randomUUID()}`
+  const approverEmployeeId = `approver-employee-${randomUUID()}`
   const requesterId = `requester-${randomUUID()}`
   const demandId = `demand-${randomUUID()}`
   const demandNumber = `OS-HOTEL-QUOTE-${randomUUID()}`
@@ -94,9 +95,10 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
     await tenantTransaction(pool, tenantId, async (client) => {
       await client.query(
         `insert into companies (
-           id, tenant_id, legal_name, trade_name, document_number, status
+           id, tenant_id, legal_name, trade_name, document_number,
+           company_portal_enabled, status
          ) values ($1, $2, 'Empresa Cotacao Offline SA', 'Empresa Cotacao Offline',
-                   '12.345.678/0001-90', 'active')`,
+                   '12.345.678/0001-90', true, 'active')`,
         [companyId, tenantId],
       )
       await client.query(
@@ -126,6 +128,8 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
       await seedApproverMembership(client, {
         tenantId,
         companyId,
+        employeeId: approverEmployeeId,
+        email: `offline-approver-${approverUserId}@test.invalid`,
         roleId: approverRoleId,
         membershipId: approverMembershipId,
         userId: approverUserId,
@@ -218,6 +222,42 @@ describeWithDatabase('PostgreSQL offline hotel quote and requester choice flow',
     await pool.query('delete from geo_subdivisions where id = $1', [subdivisionId])
     await pool.query('delete from geo_countries where id = $1', [countryId])
     await pool.end()
+  })
+
+  it('blocks disabled corporate portal quote reads and choices without blocking agency service', async () => {
+    const disabledRequester = withCompanyPortalEnabled(requesterPrincipal, false)
+    await expect(listOfflineHotelQuotes(disabledRequester, demandId)).rejects.toMatchObject({
+      code: 'COMPANY_PORTAL_COMPANY_SCOPE_DENIED',
+    })
+    await expect(selectOfflineQuoteOption(disabledRequester, {
+      demandId,
+      quoteId: randomUUID(),
+      optionId: randomUUID(),
+      expectedLifecycleVersion: 1,
+      confirmed: true,
+      idempotencyKey: `offline-disabled-portal-${randomUUID()}`,
+    })).rejects.toMatchObject({
+      code: 'COMPANY_PORTAL_COMPANY_SCOPE_DENIED',
+    })
+
+    const agencyRead = await listOfflineHotelQuotes(
+      withCompanyPortalEnabled(agentPrincipal, false),
+      demandId,
+    )
+    expect(agencyRead).toMatchObject({ demandId })
+
+    const assistedRequester: RequestPrincipal = {
+      ...disabledRequester,
+      actor: {
+        sessionId: agentPrincipal.sessionId,
+        membershipId: agentPrincipal.membershipId,
+        roleKey: agentPrincipal.roleKey,
+        platformAdmin: agentPrincipal.platformAdmin,
+        user: agentPrincipal.user,
+      },
+    }
+    const assistedRead = await listOfflineHotelQuotes(assistedRequester, demandId)
+    expect(assistedRead).toMatchObject({ demandId })
   })
 
   it('persists the chosen hotel through approval, reservation, issuance and a complete voucher', async () => {
@@ -930,8 +970,22 @@ async function seedIsolatedGeography(
 
 async function seedApproverMembership(
   client: PoolClient,
-  input: { tenantId: string; companyId: string; roleId: string; membershipId: string; userId: string },
+  input: {
+    tenantId: string
+    companyId: string
+    employeeId: string
+    email: string
+    roleId: string
+    membershipId: string
+    userId: string
+  },
 ): Promise<void> {
+  await client.query(
+    `insert into employees (
+       id, tenant_id, company_id, identification_code, full_name, email, status
+     ) values ($1, $2, $3, $4, 'Aprovador de custo', $5::citext, 'active')`,
+    [input.employeeId, input.tenantId, input.companyId, `HOTEL-APPROVER-${input.employeeId}`, input.email],
+  )
   await client.query(
     `insert into roles (id, tenant_id, role_key, name, system_role)
      values ($1, $2, 'company_admin', 'Aprovador corporativo da fixture', false)`,
@@ -954,6 +1008,15 @@ async function seedApproverMembership(
        tenant_id, membership_id, company_id, corporate_profile
      ) values ($1, $2, $3, 'approver')`,
     [input.tenantId, input.membershipId, input.companyId],
+  )
+  await client.query(
+    `insert into employee_portal_memberships (
+       tenant_id, company_id, employee_id, membership_id, email_snapshot,
+       status, approval_enabled, invitation_state,
+       activated_by_membership_id, activated_at
+     ) values ($1, $2, $3, $4, $5::citext,
+               'active', true, 'not_required', $4, now())`,
+    [input.tenantId, input.companyId, input.employeeId, input.membershipId, input.email],
   )
 }
 
@@ -1278,6 +1341,29 @@ function principalFor(
       corporate_profile: profile,
       permissoes: permissions,
       ativo: true,
+    },
+  }
+}
+
+function withCompanyPortalEnabled(
+  principal: RequestPrincipal,
+  companyPortalEnabled: boolean,
+): RequestPrincipal {
+  const corporateAccess = principal.corporateAccess
+    ? {
+        ...principal.corporateAccess,
+        companies: principal.corporateAccess.companies.map((company) => ({
+          ...company,
+          companyPortalEnabled,
+        })),
+      }
+    : undefined
+  return {
+    ...principal,
+    corporateAccess,
+    user: {
+      ...principal.user,
+      corporate_access: corporateAccess,
     },
   }
 }

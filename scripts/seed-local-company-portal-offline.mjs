@@ -22,6 +22,7 @@ const REQUIRED_MIGRATIONS = Object.freeze([
   '0078_company_portal_ground_offline_catalog.sql',
   '0081_hotel_catalog_media.sql',
   '0086_company_portal_company_enablement.sql',
+  '0087_employee_portal_memberships.sql',
 ])
 const LOCAL_DATABASE_NAME = 'bdex_gap_closure'
 const LOCAL_DATABASE_PORT = '55433'
@@ -636,7 +637,7 @@ async function main() {
 
     fixtureStage = 'validar pos-condicoes da fixture'
     await client.query('set constraints all immediate')
-    const validation = await validateFixture(client, tenant.id)
+    const validation = await validateFixture(client, tenant.id, access.approver)
     const directoryValidation = await validateFixtureCorporateDirectoryStorage(client, tenant.id)
     const approvalValidation = await validateGroundApprovalFixture(client, {
       tenant,
@@ -3523,7 +3524,147 @@ async function maybeGrantFixtureCompanyAccess(client, { tenant, actor }) {
       permissionOverrides: APPROVER_PERMISSION_OVERRIDES,
     })
     : { granted: false, reason: 'COMPANY_PORTAL_FIXTURE_APPROVER_EMAIL nao informado' }
+  if (approver.granted) {
+    approver.employeeId = await ensureFixtureApproverEmployeeLink(client, {
+      tenant,
+      actor,
+      approver,
+    })
+  }
   return { requester, approver }
+}
+
+async function ensureFixtureApproverEmployeeLink(client, { tenant, actor, approver }) {
+  if (['tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator'].includes(approver.roleKey)) {
+    throw new Error(`aprovador da fixture precisa usar identidade corporativa: ${approver.email}`)
+  }
+  const employeeId = stableUuid(`${FIXTURE_KEY}:approver-employee:${tenant.id}:${approver.membershipId}`)
+  const duplicate = await client.query(
+    `select id from employees
+      where tenant_id = $1 and company_id = $2 and email = $3::citext
+        and id <> $4 and status = 'active' and deleted_at is null
+      limit 1`,
+    [tenant.id, COMPANY.companyId, approver.email, employeeId],
+  )
+  if (duplicate.rowCount) {
+    throw new Error(`email do aprovador da fixture ja pertence a outro funcionario: ${approver.email}`)
+  }
+  const employee = await client.query(
+    `insert into employees (
+       id, tenant_id, company_id, identification_code, full_name, email,
+       job_title, department, cost_center, status, metadata, created_by, updated_by
+     ) values ($1, $2, $3, $4, '[TESTE] Aprovador Portal Offline', $5::citext,
+               'Aprovador de teste', 'Homologacao local', 'CC-PORTAL-TESTE',
+               'active', $6::jsonb, $7, $7)
+     on conflict (id) do update set
+       company_id = excluded.company_id,
+       email = excluded.email,
+       status = 'active',
+       metadata = employees.metadata || excluded.metadata,
+       deleted_at = null,
+       updated_by = excluded.updated_by,
+       updated_at = now()
+     where employees.tenant_id = excluded.tenant_id
+       and employees.metadata->>'fixture' = $8
+     returning id`,
+    [
+      employeeId,
+      tenant.id,
+      COMPANY.companyId,
+      `PORTAL-OFFLINE-APPROVER-${approver.membershipId.slice(0, 8)}`,
+      approver.email,
+      JSON.stringify({ fixture: FIXTURE_KEY, synthetic: true, localOnly: true, approver: true }),
+      actor.user_id,
+      FIXTURE_KEY,
+    ],
+  )
+  if (employee.rowCount !== 1) {
+    throw new Error(`nao foi possivel garantir funcionario aprovador da fixture: ${approver.email}`)
+  }
+  const currentLink = await client.query(
+    `select id, employee_id, membership_id, status
+       from employee_portal_memberships
+      where tenant_id = $1 and company_id = $2 and status <> 'revoked'
+        and (employee_id = $3 or membership_id = $4)
+      for update`,
+    [tenant.id, COMPANY.companyId, employeeId, approver.membershipId],
+  )
+  if (currentLink.rows.some((row) => (
+    row.employee_id !== employeeId || row.membership_id !== approver.membershipId
+  ))) {
+    throw new Error(`colisao no vinculo funcionario/aprovador da fixture: ${approver.email}`)
+  }
+  if (currentLink.rowCount) {
+    if (currentLink.rows[0].status !== 'active') {
+      throw new Error(`vinculo pendente do aprovador da fixture exige aceite ou remocao: ${approver.email}`)
+    }
+    const enabled = await client.query(
+      `update employee_portal_memberships
+          set approval_enabled = true
+        where tenant_id = $1 and id = $2 and status = 'active'`,
+      [tenant.id, currentLink.rows[0].id],
+    )
+    if (enabled.rowCount !== 1) {
+      throw new Error(`nao foi possivel reativar vinculo do aprovador da fixture: ${approver.email}`)
+    }
+  } else {
+    await client.query(
+      `insert into employee_portal_memberships (
+         tenant_id, company_id, employee_id, membership_id, email_snapshot,
+         status, approval_enabled, invitation_state,
+         created_by_membership_id, activated_by_membership_id, activated_at
+       ) values ($1, $2, $3, $4, $5::citext,
+                 'active', true, 'not_required', $6, $6, now())`,
+      [tenant.id, COMPANY.companyId, employeeId, approver.membershipId, approver.email, actor.membership_id],
+    )
+  }
+  await upsertFixtureApproverDirectoryEmployee(client, {
+    tenantId: tenant.id,
+    actorUserId: actor.user_id,
+    employeeId,
+    email: approver.email,
+  })
+  return employeeId
+}
+
+async function upsertFixtureApproverDirectoryEmployee(
+  client,
+  { tenantId, actorUserId, employeeId, email },
+) {
+  const current = await client.query(
+    `select value from app_kv where tenant_id = $1 and key = $2 for update`,
+    [tenantId, DIRECTORY_STORAGE_KEY],
+  )
+  if (current.rowCount !== 1) throw new Error(`diretorio ${DIRECTORY_STORAGE_KEY} ausente`)
+  const value = structuredClone(current.rows[0].value)
+  const state = Object.prototype.hasOwnProperty.call(value, 'state') ? value.state : value
+  if (!Array.isArray(state.funcionarios)) state.funcionarios = []
+  const entry = {
+    id: employeeId,
+    company_id: COMPANY.companyId,
+    codigo_identificacao: `PORTAL-OFFLINE-APPROVER-${employeeId.slice(0, 8)}`,
+    nome: '[TESTE] Aprovador Portal Offline',
+    email,
+    cargo_original: 'Aprovador de teste',
+    lotacao: 'Homologacao local',
+    centro_custo: 'CC-PORTAL-TESTE',
+    ativo: true,
+    fixture: FIXTURE_KEY,
+    synthetic: true,
+    localOnly: true,
+    created_at: DIRECTORY_FIXTURE_TIMESTAMP,
+    updated_at: DIRECTORY_FIXTURE_TIMESTAMP,
+  }
+  const index = state.funcionarios.findIndex((item) => item?.id === employeeId)
+  if (index >= 0) state.funcionarios[index] = { ...state.funcionarios[index], ...entry }
+  else state.funcionarios.push(entry)
+  await client.query(
+    `update app_kv
+        set value = $3::jsonb, version = version + 1,
+            updated_by = $4, updated_at = now()
+      where tenant_id = $1 and key = $2`,
+    [tenantId, DIRECTORY_STORAGE_KEY, JSON.stringify(value), actorUserId],
+  )
 }
 
 async function grantFixtureUser(client, {
@@ -3635,7 +3776,7 @@ async function grantFixtureUser(client, {
   }
 }
 
-async function validateFixture(client, tenantId) {
+async function validateFixture(client, tenantId, approver) {
   const expectedHotelMediaIds = HOTELS
     .filter((hotel) => hotel.photo)
     .map((hotel) => hotelFixtureMediaId(hotel))
@@ -3691,13 +3832,31 @@ async function validateFixture(client, tenantId) {
            and file.entity_type = 'hotel'
            and file.entity_id = media.hotel_id
            and file.mime_type = 'image/webp'
-           and file.size_bytes between 1 and 5242880) as hotel_media`,
+           and file.size_bytes between 1 and 5242880) as hotel_media,
+       (select count(*)::integer
+          from employee_portal_memberships link
+          join employees employee
+            on employee.tenant_id = link.tenant_id
+           and employee.id = link.employee_id
+           and employee.company_id = link.company_id
+         where $6::text is not null
+           and link.tenant_id = $1
+           and link.company_id = $2
+           and link.employee_id = $6::text
+           and link.membership_id = $7::uuid
+           and link.status = 'active'
+           and link.approval_enabled = true
+           and employee.status = 'active'
+           and employee.deleted_at is null
+           and employee.email = link.email_snapshot) as approver_links`,
     [
       tenantId,
       COMPANY.companyId,
       FIXTURE_KEY,
       HOTELS.map((hotel) => hotel.id),
       expectedHotelMediaIds,
+      approver?.granted ? approver.employeeId : null,
+      approver?.granted ? approver.membershipId : null,
     ],
   )
   const counts = result.rows[0]
@@ -3713,6 +3872,7 @@ async function validateFixture(client, tenantId) {
     suppliers: Object.keys(SUPPLIERS).length,
     hotel_rates: HOTELS.length * ROOM_TYPES.length,
     hotel_media: expectedHotelMediaIds.length,
+    approver_links: approver?.granted ? 1 : 0,
   }
   for (const [key, value] of Object.entries(expected)) {
     if (Number(counts[key]) !== value) {

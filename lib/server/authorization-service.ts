@@ -624,6 +624,7 @@ function inferApiResource(pathname: string): AuthorizationResource {
   if (path.startsWith('/api/company-portal/demands')) return 'demands'
   if (path.startsWith('/api/company-portal/approvals')) return 'approvals'
   if (path.startsWith('/api/company-portal/vouchers')) return 'vouchers'
+  if (path.startsWith('/api/companies/') && path.endsWith('/approvers')) return 'access_grants'
   if (path.startsWith('/api/users/directory')) return 'approvals'
   if (path.startsWith('/api/users/') && path.includes('/access')) return 'access_grants'
   if (path.startsWith('/api/users')) return 'users'

@@ -109,6 +109,7 @@ Arquitetura e dados:
 
 Governanca:
 
+- [Tutorial de autorizadores corporativos e atendimento da agencia](docs/TUTORIAL-AUTORIZADORES-CORPORATIVOS.md)
 - [POLICY-ENGINE.md](docs/POLICY-ENGINE.md)
 - [POLICY-DSL.md](docs/POLICY-DSL.md)
 - [POLICY-TEMPLATE-CATALOG.md](docs/POLICY-TEMPLATE-CATALOG.md)

@@ -1,8 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { parseImpersonationSessionPayload } from '@/lib/impersonation-client'
+import {
+  listImpersonationTargets,
+  parseImpersonationSessionPayload,
+  startImpersonation,
+} from '@/lib/impersonation-client'
 
 const sourcePaths = [
   'lib/impersonation-client.ts',
@@ -13,6 +17,8 @@ const sourcePaths = [
 const mojibakeMarker = String.fromCodePoint(0x00c3)
 
 describe('impersonation UI contract', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('parses the actor and represented subject from the authenticated session', () => {
     const state = parseImpersonationSessionPayload({
       canStartRepresentation: false,
@@ -61,7 +67,9 @@ describe('impersonation UI contract', () => {
     expect(dialog).toContain('Duração fixa: 15 minutos')
     expect(dialog).toContain("mode === 'operate'")
     expect(dialog).toContain('disabled={!operateAvailable}')
-    expect(dialog).toContain('selectedTarget.allowedActions')
+    expect(dialog).toContain('Empresa do atendimento *')
+    expect(dialog).toContain('selectedCompanyScope.allowedActions')
+    expect(dialog).toContain('companyId: selectedCompanyScope.companyId')
     expect(banner).toContain('Encerrar acesso')
     expect(provider).toMatch(/const stopRepresentation[\s\S]*?await stopImpersonation[\s\S]*?resetEffectiveSession/)
     expect(provider).toMatch(/const expireRepresentationLocally[\s\S]*?stopImpersonation[\s\S]*?resetEffectiveSession/)
@@ -71,6 +79,69 @@ describe('impersonation UI contract', () => {
     expect(context).not.toContain('localStorage')
     expect(context).not.toContain('safeSet')
     expect(shellRefresh).toContain('decideSessionUserRefresh(sessionUserRef.current, session, representation)')
+  })
+
+  it('keeps each target action list isolated by company and accepts textual legacy company ids', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      total: 1,
+      items: [{
+        userId: 'subject-user',
+        membershipId: 'subject-membership',
+        name: 'Solicitante',
+        email: 'solicitante@example.com',
+        roleKey: 'requester',
+        companyId: 'company-a',
+        companyIds: ['company-a', 'company-b'],
+        groupIds: [],
+        companyScopes: [
+          { companyId: 'company-a', label: 'Empresa A', allowedActions: ['demand.create'] },
+          { companyId: 'company-b', label: 'Empresa B', allowedActions: [] },
+        ],
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    const result = await listImpersonationTargets('Solicitante')
+
+    expect(result.items[0].companyScopes).toEqual([
+      { companyId: 'company-a', label: 'Empresa A', allowedActions: ['demand.create'] },
+      { companyId: 'company-b', label: 'Empresa B', allowedActions: [] },
+    ])
+  })
+
+  it('sends the selected non-UUID company id when starting the one-company session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      representation: {
+        id: 'representation-id',
+        mode: 'test',
+        actor: { id: 'actor-user' },
+        subject: { id: 'subject-user', membershipId: 'subject-membership' },
+        reason: 'Atendimento solicitado pelo cliente',
+        reference: null,
+        allowedActions: [],
+        companyIds: ['company-a'],
+        startedAt: '2026-08-12T12:00:00.000Z',
+        expiresAt: '2026-08-12T12:15:00.000Z',
+      },
+    }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startImpersonation({
+      targetMembershipId: 'subject-membership',
+      companyId: 'company-a',
+      mode: 'test',
+      reason: 'Atendimento solicitado pelo cliente',
+    })
+
+    const request = fetchMock.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(request.body))).toMatchObject({ companyId: 'company-a' })
+  })
+
+  it('uses the textual company schema at the route boundary and leaves tenant validation to the service', () => {
+    const route = read('app/api/auth/impersonation/start/route.ts')
+    expect(route).toContain('companyId: z.string().trim().min(1).max(200)')
+    expect(route).not.toContain('companyId: z.string().uuid()')
   })
 
   it('does not introduce UTF-8 mojibake in the new files', () => {

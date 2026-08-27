@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.0 - 2026-08-27
+
+### Destaques
+
+- Atribuição de autorizadores exclusivamente a partir do cadastro de funcionários da empresa, com vínculo explícito entre funcionário e conta corporativa.
+- Confirmação segura de identidade, convite, reenvio, cancelamento e reatribuição; a remoção da função de autorizador preserva login, perfil de solicitante e demais acessos.
+- Decisão de aprovação condicionada a vínculo ativo, empresa habilitada no Portal Empresa e permissão efetiva; identidades internas da agência não podem ser autorizadores corporativos.
+- Preset `Consultor — atendimento completo` para a equipe da agência, com escopo global ou por empresas/grupos e operação direta do pedido à emissão.
+- Escolha de cotação e autorização assistidas com empresa única por sessão, MFA, ator real, usuário representado, auditoria e segregação de funções.
+- Fronteira do Portal Empresa aplicada também às consultas, catálogos e seleções de cotações offline, sem restringir a operação interna da agência.
+- Tutorial e documentação de acessos, APIs e matriz de autorização atualizados para o fluxo por funcionário.
+
+### Segurança e ciclo de vida
+
+- Desligamento, mudança de empresa, expiração/revogação de delegação e alteração de acessos não deixam atribuições pendentes sem recuperação.
+- Grants decisórios genéricos são normalizados para escopos diretos vinculados ao funcionário; o cadastro genérico de usuários não concede mais `decidir_aprovacoes`.
+- Grupos empresariais exigem cobertura explícita em cada empresa habilitada, evitando expansão automática para empresas futuras sem autorizador.
+
+### Implantação
+
+- Versão do pacote: `1.3.0`.
+- A release adiciona `0087_employee_portal_memberships.sql` e exige que a role de migration tenha `SUPERUSER` ou `BYPASSRLS` para executar os preflights sob RLS forçado.
+- A migration falha de forma integral quando encontra atribuições ou configurações decisórias legadas sem vínculo verificável; o inventário deve ser revisado antes da aplicação.
+
 ## 1.2.0 - 2026-08-27
 
 ### Destaques

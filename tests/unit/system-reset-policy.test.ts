@@ -34,8 +34,9 @@ describe('tenant reset policy', () => {
       'approval_audience_group_members',
       'approval_audience_groups',
       'approval_matrices',
+      'employee_portal_memberships',
     ]))
-    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(200)
+    expect(TENANT_BUSINESS_RESET_TABLES).toHaveLength(201)
     expect(TENANT_RESET_PRESERVED_TABLES).toHaveLength(18)
   })
 

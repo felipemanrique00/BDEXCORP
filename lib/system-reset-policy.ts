@@ -126,6 +126,7 @@ export const TENANT_BUSINESS_RESET_TABLES = [
   'employee_aliases',
   'employee_identity_counters',
   'employee_match_decisions',
+  'employee_portal_memberships',
   'employees',
   'enterprise_workflow_change_audits',
   'enterprise_workflow_commands',

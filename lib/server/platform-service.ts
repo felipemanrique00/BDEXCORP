@@ -12,6 +12,10 @@ import {
   withTenantTransaction,
 } from '@/lib/server/database'
 import { emailConfigured, sendTransactionalEmail } from '@/lib/server/email'
+import {
+  activateEmployeeAuthorizerLinksForInvite,
+  EmployeeAuthorizerInviteValidationError,
+} from '@/lib/server/employee-authorizer-service'
 import { getServerEnvironment } from '@/lib/server/environment'
 import { logError } from '@/lib/server/logger'
 import { createOpaqueToken, hashSecureToken } from '@/lib/server/secure-token'
@@ -109,6 +113,12 @@ export async function acceptUserInvite(
       `update tenant_memberships set status = 'active' where id = $1 and tenant_id = $2`,
       [invite.membership_id, invite.tenant_id],
     )
+    try {
+      await activateEmployeeAuthorizerLinksForInvite(client, invite)
+    } catch (error) {
+      if (error instanceof EmployeeAuthorizerInviteValidationError) throw new InvalidInviteError()
+      throw error
+    }
     await client.query('update user_invites set accepted_at = now() where id = $1', [invite.id])
     return invite
   })

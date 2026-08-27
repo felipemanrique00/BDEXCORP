@@ -22,6 +22,7 @@ import {
 import { offlineGroundQuoteMaterialHash } from '@/lib/offline-ground/quote-idempotency'
 import { sha256 } from '@/lib/policy'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
+import { resolveCompanyPortalResourceCompanyId } from '@/lib/server/company-portal-scope-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import { loadOfflinePolicyTravelers } from '@/lib/server/offline-travel-service'
@@ -354,7 +355,7 @@ export async function listOfflineGroundQuotes(
   }
   return withTenantTransaction(principal.tenantId, async (client) => {
     const demand = await loadGroundDemand(client, principal.tenantId, normalizedDemandId)
-    await requireCompanyAccess(principal, demand.company_id, 'ver_reservas')
+    resolveCompanyPortalResourceCompanyId(principal, demand.company_id, 'ver_reservas')
     await assertRequesterOwnsDemand(client, principal, demand)
     const service = groundService(demand.service_type)
     if (expectedService && expectedService !== service) {

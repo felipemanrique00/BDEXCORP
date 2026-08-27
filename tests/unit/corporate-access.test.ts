@@ -744,6 +744,68 @@ describe('corporate access delegation', () => {
     expect(scoped.defaultContext).toBeNull()
   })
 
+  it('permite gerir acessos nao decisorios sem exigir que o administrador possa aprovar', () => {
+    const managementPermissions = {
+      ...permissionsForCorporateProfile('company_admin', {}),
+      decidir_aprovacoes: false,
+    }
+    const managementActor = {
+      ...actor,
+      corporateAccess: {
+        ...actor.corporateAccess,
+        companies: [{
+          ...actor.corporateAccess.companies[0],
+          permissions: managementPermissions,
+          delegationAuthorities: [{
+            ...actor.corporateAccess.companies[0].delegationAuthorities[0],
+            profile: 'company_admin',
+            permissions: managementPermissions,
+            source: 'company',
+            accessMode: null,
+            canViewConsolidated: false,
+          }],
+        }],
+      },
+    } as any
+    const current: CorporateAccessConfiguration = {
+      membershipId: 'membership-employee-authorizer',
+      groupGrants: [],
+      companyGrants: [{
+        id: 'grant-company-a',
+        companyId: 'company-a',
+        companyName: 'Empresa A',
+        profile: 'company_admin',
+        permissionOverrides: { decidir_aprovacoes: true },
+        status: 'active',
+        validFrom: '2026-01-01T00:00:00.000Z',
+        validUntil: null,
+      }],
+      defaultContext: { type: 'company', id: 'company-a' },
+    }
+
+    const scoped = scopeCorporateAccessConfigurationForActor(managementActor, current)
+    expect(scoped.companyGrants).toHaveLength(1)
+    expect(scoped.companyGrants[0].permissionOverrides.decidir_aprovacoes).toBe(true)
+
+    const prepared = prepareCorporateAccessReplacement(managementActor, current, {
+      groupGrants: [],
+      companyGrants: [{
+        companyId: 'company-a',
+        profile: 'company_admin',
+        permissionOverrides: { decidir_aprovacoes: true, ver_financeiro: false },
+        status: 'active',
+        validUntil: null,
+      }],
+      defaultContext: { type: 'company', id: 'company-a' },
+    })
+    expect(prepared.editableCurrent.companyGrants).toHaveLength(1)
+    expect(prepared.effectiveInput.companyGrants).toHaveLength(1)
+    expect(prepared.effectiveInput.companyGrants[0].permissionOverrides).toMatchObject({
+      decidir_aprovacoes: true,
+      ver_financeiro: false,
+    })
+  })
+
   it('substitui apenas o escopo editavel e preserva vinculos de outros grupos', () => {
     const current: CorporateAccessConfiguration = {
       membershipId: 'membership-target',

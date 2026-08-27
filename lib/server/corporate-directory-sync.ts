@@ -9,6 +9,10 @@ import {
   normalizarEmail,
   normalizarNomePessoa,
 } from '@/lib/funcionario-identidade'
+import {
+  assertCompanyEmployeeAuthorizerReductionAllowedInTransaction,
+  revokeInvalidEmployeeAuthorizerLinksInTransaction,
+} from '@/lib/server/employee-authorizer-service'
 
 type JsonRecord = Record<string, unknown>
 
@@ -115,6 +119,28 @@ export async function syncCorporateDirectoryFromStorage(
   for (const company of companies) {
     const groupId = company.groupId && knownGroups.has(company.groupId) ? company.groupId : null
     const documentNumber = await safeCompanyDocument(client, tenantId, company.id, company.documentNumber)
+    const existingCompany = await client.query<{
+      status: string
+      company_portal_enabled: boolean
+    }>(
+      `select status, company_portal_enabled
+       from companies
+       where tenant_id = $1 and id = $2 and deleted_at is null
+       for update`,
+      [tenantId, company.id],
+    )
+    const currentCompany = existingCompany.rows[0]
+    const disablesEmployeeApproval = Boolean(currentCompany)
+      && currentCompany.status === 'active'
+      && currentCompany.company_portal_enabled
+      && (!company.active || company.portalEnabled === false)
+    if (disablesEmployeeApproval) {
+      await assertCompanyEmployeeAuthorizerReductionAllowedInTransaction(
+        client,
+        tenantId,
+        company.id,
+      )
+    }
     const result = await client.query(
       `insert into companies (
          id, tenant_id, group_id, legal_name, trade_name, document_number,
@@ -189,6 +215,7 @@ export async function syncCorporateDirectoryFromStorage(
     companyIds: companyValues ? companies.map((company) => company.id) : null,
     employeeIds: employeeValues ? employees.map((employee) => employee.id) : null,
   })
+  await revokeInvalidEmployeeAuthorizerLinksInTransaction(client, tenantId, actorUserId)
 }
 
 async function syncEmployee(
@@ -363,6 +390,25 @@ async function reconcileRemovedDirectoryRecords(
   }
 
   if (directory.companyIds) {
+    const removedCompanies = await client.query<{ id: string }>(
+      `select id
+       from companies
+       where tenant_id = $1
+         and deleted_at is null
+         and status = 'active'
+         and company_portal_enabled = true
+         and not (id = any($2::text[]))
+       order by id
+       for update`,
+      [tenantId, directory.companyIds],
+    )
+    for (const company of removedCompanies.rows) {
+      await assertCompanyEmployeeAuthorizerReductionAllowedInTransaction(
+        client,
+        tenantId,
+        company.id,
+      )
+    }
     await client.query(
       `update companies
        set status = 'inactive',

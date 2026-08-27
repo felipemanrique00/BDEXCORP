@@ -55,6 +55,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
   const [query, setQuery] = useState('')
   const [targets, setTargets] = useState<ImpersonationTarget[]>([])
   const [selectedTarget, setSelectedTarget] = useState<ImpersonationTarget | null>(null)
+  const [selectedCompanyId, setSelectedCompanyId] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState('')
@@ -64,7 +65,8 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
   const [confirmed, setConfirmed] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
-  const operateAvailable = Boolean(selectedTarget?.allowedActions.length)
+  const selectedCompanyScope = selectedTarget?.companyScopes.find((scope) => scope.companyId === selectedCompanyId) || null
+  const operateAvailable = Boolean(selectedCompanyScope?.allowedActions.length)
 
   useEffect(() => setMounted(true), [])
 
@@ -73,6 +75,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
     returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setQuery(presetTarget?.name || '')
     setSelectedTarget(null)
+    setSelectedCompanyId('')
     setTargets([])
     setActiveIndex(0)
     setSearchError('')
@@ -121,7 +124,10 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
           const authoritativePreset = presetTarget
             ? result.items.find((target) => target.membershipId === presetTarget.membershipId) || null
             : null
-          if (presetTarget) setSelectedTarget(authoritativePreset)
+          if (presetTarget) {
+            setSelectedTarget(authoritativePreset)
+            setSelectedCompanyId(authoritativePreset ? defaultCompanyId(authoritativePreset) : '')
+          }
         })
         .catch((error) => {
           if (error instanceof DOMException && error.name === 'AbortError') return
@@ -174,8 +180,11 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
 
   function chooseTarget(target: ImpersonationTarget) {
     setSelectedTarget(target)
+    const companyId = defaultCompanyId(target)
+    setSelectedCompanyId(companyId)
     setQuery(target.name)
-    if (!target.allowedActions.length) setMode('test')
+    const companyScope = target.companyScopes.find((scope) => scope.companyId === companyId)
+    if (!companyScope?.allowedActions.length) setMode('test')
   }
 
   async function submit(event: FormEvent) {
@@ -188,6 +197,10 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
       searchRef.current?.focus()
       return
     }
+    if (!selectedCompanyScope) {
+      setSubmitError('Selecione a empresa deste atendimento.')
+      return
+    }
     if (cleanReason.length < 10) {
       setSubmitError('Informe um motivo com pelo menos 10 caracteres.')
       reasonRef.current?.focus()
@@ -197,8 +210,8 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
       setSubmitError('Informe o chamado ou a referência para o modo operação.')
       return
     }
-    if (mode === 'operate' && !selectedTarget.allowedActions.length) {
-      setSubmitError('Este usuário não possui ações operacionais disponíveis nas empresas compartilhadas.')
+    if (mode === 'operate' && !selectedCompanyScope.allowedActions.length) {
+      setSubmitError('Este usuário não possui ações operacionais disponíveis na empresa selecionada.')
       return
     }
     if (!confirmed) {
@@ -209,6 +222,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
     try {
       await onStart({
         targetMembershipId: selectedTarget.membershipId,
+        companyId: selectedCompanyScope.companyId,
         mode,
         reason: cleanReason,
         ...(cleanReference ? { reference: cleanReference } : {}),
@@ -277,6 +291,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
                 onChange={(event) => {
                   setQuery(event.target.value)
                   setSelectedTarget(null)
+                  setSelectedCompanyId('')
                   setMode('test')
                 }}
                 onKeyDown={handleSearchKeyDown}
@@ -322,6 +337,35 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
             </div>
           </section>
 
+          {selectedTarget && (
+            <div>
+              <label htmlFor={`${titleId}-company`} className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-300">
+                Empresa do atendimento *
+              </label>
+              <select
+                id={`${titleId}-company`}
+                value={selectedCompanyId}
+                onChange={(event) => {
+                  const companyId = event.target.value
+                  setSelectedCompanyId(companyId)
+                  const scope = selectedTarget.companyScopes.find((item) => item.companyId === companyId)
+                  if (!scope?.allowedActions.length) setMode('test')
+                  setSubmitError('')
+                }}
+                required
+                className="bbt-input mt-2 h-11"
+              >
+                <option value="">Selecione a empresa</option>
+                {selectedTarget.companyScopes.map((scope) => (
+                  <option key={scope.companyId} value={scope.companyId}>{scope.label}</option>
+                ))}
+              </select>
+              {selectedTarget.companyScopes.length > 1 && !selectedCompanyScope && (
+                <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">Escolha a empresa para limitar este acesso antes de continuar.</p>
+              )}
+            </div>
+          )}
+
           <fieldset>
             <legend className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-300">Modo de acesso</legend>
             <div className="mt-2 grid gap-3 sm:grid-cols-2">
@@ -335,9 +379,11 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
               <ModeOption
                 selected={mode === 'operate'}
                 title="Operação assistida"
-                description={operateAvailable
-                  ? 'Execute ações permitidas ao usuário, com auditoria reforçada.'
-                  : 'Este usuário não possui ações operacionais disponíveis neste escopo.'}
+                description={!selectedCompanyScope
+                  ? 'Selecione a empresa do atendimento para verificar as ações disponíveis.'
+                  : operateAvailable
+                    ? 'Execute ações permitidas ao usuário, com auditoria reforçada.'
+                    : 'Este usuário não possui ações operacionais disponíveis nesta empresa.'}
                 icon={<ShieldAlert className="h-5 w-5" />}
                 onSelect={() => setMode('operate')}
                 disabled={!operateAvailable}
@@ -345,9 +391,9 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
             </div>
           </fieldset>
 
-          {selectedTarget && operateAvailable && (
+          {selectedCompanyScope && operateAvailable && (
             <p className="text-xs text-slate-500" aria-live="polite">
-              Ações disponíveis: {selectedTarget.allowedActions.map(actionLabel).join(', ')}.
+              Ações disponíveis em {selectedCompanyScope.label}: {selectedCompanyScope.allowedActions.map(actionLabel).join(', ')}.
             </p>
           )}
 
@@ -395,7 +441,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
               onChange={(event) => setConfirmed(event.target.checked)}
               className="mt-0.5 h-4 w-4 accent-cyan-600"
             />
-            <span>Confirmo que tenho autorização para este atendimento e que todas as ações serão atribuídas ao agente e ao usuário representado.</span>
+            <span>Confirmo que tenho autorização para este atendimento na empresa selecionada e que todas as ações serão atribuídas ao agente e ao usuário representado.</span>
           </label>
 
           {submitError && (
@@ -406,7 +452,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
 
           <div className="flex flex-col-reverse gap-2 border-t border-slate-200 pt-4 dark:border-slate-700 sm:flex-row sm:justify-end">
             <button type="button" onClick={onClose} disabled={submitting} className="bbt-button-ghost min-h-11">Cancelar</button>
-            <button type="submit" disabled={submitting || !selectedTarget || (mode === 'operate' && !operateAvailable)} className="bbt-button-primary min-h-11">
+            <button type="submit" disabled={submitting || !selectedTarget || !selectedCompanyScope || (mode === 'operate' && !operateAvailable)} className="bbt-button-primary min-h-11">
               {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserRoundCog className="h-4 w-4" />}
               {submitting ? 'Iniciando...' : mode === 'test' ? 'Iniciar teste' : 'Iniciar operação'}
             </button>
@@ -443,6 +489,10 @@ function ModeOption({
       </span>
     </label>
   )
+}
+
+function defaultCompanyId(target: ImpersonationTarget): string {
+  return target.companyScopes.length === 1 ? target.companyScopes[0].companyId : ''
 }
 
 function initials(name: string): string {

@@ -2,6 +2,7 @@ import 'server-only'
 
 import type { QueryResultRow } from 'pg'
 
+import { resolveAnyEnabledCompanyPortalContextCompanyIds } from '@/lib/server/company-portal-scope-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 
@@ -39,6 +40,7 @@ export async function listVerifiedGroundCatalog(
   principal: RequestPrincipal,
   input: { service: 'car' | 'bus'; q?: string; cityId?: string; limit: number },
 ) {
+  resolveAnyEnabledCompanyPortalContextCompanyIds(principal, 'ver_demandas')
   return withTenantTransaction(principal.tenantId, async (client) => {
     if (input.service === 'car') {
       const values: unknown[] = [principal.tenantId]

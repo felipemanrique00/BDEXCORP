@@ -102,7 +102,6 @@ export async function replaceUserCorporateAccess(
   input: CorporateAccessConfigurationInput,
 ): Promise<CorporateAccessConfiguration> {
   assertActorCanChangeOwnCorporateAccess(actor, targetUserId)
-  assertCorporateAccessDelegation(actor, input)
 
   return withTenantTransaction(actor.tenantId, async (client) => {
     await client.query('select pg_advisory_xact_lock(hashtext($1), hashtext($2))', [actor.tenantId, targetUserId])
@@ -127,7 +126,6 @@ export async function mergeUserCorporateAccess(
   options: { preserveExistingDefault?: boolean } = {},
 ): Promise<CorporateAccessConfiguration> {
   assertActorCanChangeOwnCorporateAccess(actor, targetUserId)
-  assertCorporateAccessDelegation(actor, input)
 
   return withTenantTransaction(actor.tenantId, async (client) => {
     await client.query('select pg_advisory_xact_lock(hashtext($1), hashtext($2))', [actor.tenantId, targetUserId])
@@ -139,7 +137,6 @@ export async function mergeUserCorporateAccess(
     const current = await loadConfiguration(client, actor.tenantId, target.membership_id)
     const visibleCurrent = scopeCorporateAccessConfigurationForActor(actor, current)
     const merged = mergeCorporateAccessConfigurations(visibleCurrent, input, options)
-    assertCorporateAccessDelegation(actor, merged)
     return applyCorporateAccessConfigurationInTransaction(client, actor, target.membership_id, merged)
   })
 }
@@ -322,7 +319,13 @@ function actorCanManageGroupGrant(
 ): boolean {
   try {
     assertCorporateAccessDelegation(actor, {
-      groupGrants: [groupGrantToInput(grant)],
+      groupGrants: [{
+        ...groupGrantToInput(grant),
+        permissionOverrides: {
+          ...grant.permissionOverrides,
+          decidir_aprovacoes: false,
+        },
+      }],
       companyGrants: [],
       defaultContext: null,
     })
@@ -340,7 +343,13 @@ function actorCanManageCompanyGrant(
   try {
     assertCorporateAccessDelegation(actor, {
       groupGrants: [],
-      companyGrants: [companyGrantToInput(grant)],
+      companyGrants: [{
+        ...companyGrantToInput(grant),
+        permissionOverrides: {
+          ...grant.permissionOverrides,
+          decidir_aprovacoes: false,
+        },
+      }],
       defaultContext: null,
     })
     return true
@@ -446,11 +455,35 @@ export async function applyCorporateAccessConfigurationInTransaction(
   input: CorporateAccessConfigurationInput,
 ): Promise<CorporateAccessConfiguration> {
   const currentConfiguration = await loadConfiguration(client, actor.tenantId, targetMembershipId)
-  assertCorporateAccessDelegation(actor, input)
+  const normalizedInput = await normalizeGenericDecisionEntitlements(
+    client,
+    actor,
+    actor.tenantId,
+    targetMembershipId,
+    input,
+  )
+  assertCorporateAccessDelegation(actor, {
+    ...normalizedInput,
+    groupGrants: normalizedInput.groupGrants.map((grant) => ({
+      ...grant,
+      permissionOverrides: { ...grant.permissionOverrides, decidir_aprovacoes: false },
+    })),
+    companyGrants: normalizedInput.companyGrants.map((grant) => ({
+      ...grant,
+      permissionOverrides: { ...grant.permissionOverrides, decidir_aprovacoes: false },
+    })),
+  })
   const { editableCurrent, effectiveInput } = prepareCorporateAccessReplacement(
     actor,
     currentConfiguration,
-    input,
+    normalizedInput,
+  )
+  await assertEmployeeAuthorizerGrantMutation(
+    client,
+    actor,
+    targetMembershipId,
+    currentConfiguration,
+    effectiveInput,
   )
   await validateDirectoryReferences(client, actor.tenantId, effectiveInput)
 
@@ -488,7 +521,7 @@ export async function applyCorporateAccessConfigurationInTransaction(
     }
   }
 
-  for (const grant of input.groupGrants) {
+  for (const grant of normalizedInput.groupGrants) {
     const grantId = randomUUID()
     await client.query(
       `insert into corporate_group_access_grants (
@@ -515,7 +548,7 @@ export async function applyCorporateAccessConfigurationInTransaction(
     }
   }
 
-  for (const grant of input.companyGrants) {
+  for (const grant of normalizedInput.companyGrants) {
     await client.query(
       `insert into corporate_company_access_grants (
          id, tenant_id, membership_id, company_id, corporate_profile,
@@ -535,6 +568,368 @@ export async function applyCorporateAccessConfigurationInTransaction(
     actor,
     await loadConfiguration(client, actor.tenantId, targetMembershipId),
   )
+}
+
+async function normalizeGenericDecisionEntitlements(
+  client: PoolClient,
+  actor: RequestPrincipal,
+  tenantId: string,
+  membershipId: string,
+  input: CorporateAccessConfigurationInput,
+): Promise<CorporateAccessConfigurationInput> {
+  const linked = await client.query<{ company_id: string }>(
+    `select distinct link.company_id
+     from employee_portal_memberships link
+     join employees employee
+       on employee.tenant_id = link.tenant_id
+      and employee.id = link.employee_id
+      and employee.company_id = link.company_id
+     join companies company
+       on company.tenant_id = link.tenant_id
+      and company.id = link.company_id
+     join tenant_memberships membership
+       on membership.tenant_id = link.tenant_id
+      and membership.id = link.membership_id
+     join users user_row on user_row.id = membership.user_id
+     join roles role_row on role_row.id = membership.role_id
+     left join user_invites invite
+       on invite.tenant_id = link.tenant_id
+      and invite.id = link.invite_id
+      and invite.membership_id = link.membership_id
+     where link.tenant_id = $1
+       and link.membership_id = $2
+       and link.approval_enabled = true
+       and employee.status = 'active'
+       and employee.deleted_at is null
+       and employee.email = link.email_snapshot
+       and company.status = 'active'
+       and company.deleted_at is null
+       and company.company_portal_enabled = true
+       and user_row.deleted_at is null
+       and user_row.email = link.email_snapshot
+       and not user_row.platform_admin
+       and role_row.role_key not in ('tenant_admin', 'financial_manager', 'supervisor', 'agent', 'operator')
+       and (
+         (
+           link.status = 'active'
+           and membership.status = 'active'
+           and user_row.status = 'active'
+         ) or (
+           link.status = 'pending'
+           and membership.status = 'invited'
+           and user_row.status = 'invited'
+           and invite.accepted_at is null
+         )
+       )`,
+    [tenantId, membershipId],
+  )
+  const linkedCompanyIds = new Set(linked.rows.map((link) => link.company_id))
+  const groupIds = uniqueStrings(input.groupGrants.map((grant) => grant.groupId))
+  const groupCompanies = groupIds.length
+    ? await client.query<{
+        id: string
+        group_id: string
+        company_portal_enabled: boolean
+      }>(
+        `select id, group_id, company_portal_enabled
+         from companies
+         where tenant_id = $1
+           and group_id = any($2::text[])
+           and status = 'active'
+           and deleted_at is null`,
+        [tenantId, groupIds],
+      )
+    : { rows: [] as Array<{ id: string; group_id: string; company_portal_enabled: boolean }> }
+
+  const synthesizedCompanyGrants = new Map<
+    string,
+    CorporateAccessConfigurationInput['companyGrants'][number]
+  >()
+  const groupGrants = input.groupGrants.map((grant) => {
+    const requestsDecision = permissionsForCorporateProfile(
+      grant.profile,
+      grant.permissionOverrides,
+    ).decidir_aprovacoes
+    if (!requestsDecision) return grant
+    const coveredCompanyIds = grant.accessMode === 'selected_companies'
+      ? uniqueStrings(grant.companyIds)
+      : groupCompanies.rows
+          .filter((company) => company.group_id === grant.groupId)
+          .map((company) => company.id)
+    for (const companyId of coveredCompanyIds) {
+      if (
+        !linkedCompanyIds.has(companyId)
+        || !canManageEmployeeAuthorizerCompany(actor, companyId)
+        || input.companyGrants.some((companyGrant) => companyGrant.companyId === companyId)
+        || synthesizedCompanyGrants.has(companyId)
+      ) continue
+      synthesizedCompanyGrants.set(companyId, {
+        companyId,
+        profile: 'approver',
+        permissionOverrides: {
+          ver_aprovacoes: true,
+          decidir_aprovacoes: true,
+        },
+        status: grant.status,
+        validFrom: grant.validFrom,
+        validUntil: grant.validUntil,
+      })
+    }
+    return {
+      ...grant,
+      permissionOverrides: {
+        ...grant.permissionOverrides,
+        decidir_aprovacoes: false,
+      },
+    }
+  })
+  const companyGrants = [
+    ...input.companyGrants,
+    ...synthesizedCompanyGrants.values(),
+  ].map((grant) => {
+    if (linkedCompanyIds.has(grant.companyId)) {
+      return {
+        ...grant,
+        permissionOverrides: {
+          ...grant.permissionOverrides,
+          decidir_aprovacoes: true,
+        },
+      }
+    }
+    return {
+      ...grant,
+      permissionOverrides: {
+        ...grant.permissionOverrides,
+        decidir_aprovacoes: false,
+      },
+    }
+  })
+  for (const companyId of linkedCompanyIds) {
+    if (
+      !canManageEmployeeAuthorizerCompany(actor, companyId)
+      || companyGrants.some((grant) => grant.companyId === companyId)
+    ) continue
+    companyGrants.push({
+      companyId,
+      profile: 'approver',
+      permissionOverrides: {
+        ver_aprovacoes: true,
+        decidir_aprovacoes: true,
+      },
+      status: 'active',
+      validUntil: null,
+    })
+  }
+  return {
+    ...input,
+    groupGrants,
+    companyGrants,
+  }
+}
+
+function canManageEmployeeAuthorizerCompany(actor: RequestPrincipal, companyId: string): boolean {
+  if (isTenantAccessAdministrator(actor)) return true
+  const company = actor.corporateAccess?.companies.find((item) => item.companyId === companyId)
+  return Boolean(
+    company?.permissions.gerenciar_usuarios
+    && company.permissions.gerenciar_vinculos_acesso,
+  )
+}
+
+async function assertEmployeeAuthorizerGrantMutation(
+  client: PoolClient,
+  actor: RequestPrincipal,
+  membershipId: string,
+  current: CorporateAccessConfiguration,
+  input: CorporateAccessConfigurationInput,
+): Promise<void> {
+  const legacyDecisionCompanyIds = await resolveDecisionCompanyIds(
+    client,
+    actor.tenantId,
+    current,
+    grantCanActivateNowOrLater,
+  )
+  const requestedCompanyIds = await resolveDecisionCompanyIds(
+    client,
+    actor.tenantId,
+    input,
+    grantCanActivateNowOrLater,
+  )
+  const finiteDecisionCompanyIds = await resolveDecisionCompanyIds(
+    client,
+    actor.tenantId,
+    input,
+    (grant) => grant.status === 'active' && Boolean(grant.validUntil),
+  )
+  if (finiteDecisionCompanyIds.size) {
+    const finiteLinked = await client.query(
+      `select 1 from employee_portal_memberships
+       where tenant_id = $1
+         and membership_id = $2
+         and company_id = any($3::text[])
+         and status in ('pending', 'active')
+         and approval_enabled = true
+       limit 1`,
+      [actor.tenantId, membershipId, [...finiteDecisionCompanyIds]],
+    )
+    if (finiteLinked.rowCount) {
+      throw new CorporateAccessConflictError(
+        'Autorizadores vinculados a funcionarios nao podem ter acesso decisorio com expiracao agendada. Remova o papel pela tela da empresa apos reatribuir pendencias.',
+      )
+    }
+  }
+
+  const newlyGrantedCompanyIds = [...requestedCompanyIds]
+    .filter((companyId) => !legacyDecisionCompanyIds.has(companyId))
+  if (newlyGrantedCompanyIds.length) {
+    const linked = await client.query<{ company_id: string }>(
+      `select distinct company_id
+       from employee_portal_memberships
+       where tenant_id = $1
+         and membership_id = $2
+         and company_id = any($3::text[])
+         and status = 'active'
+         and approval_enabled = true`,
+      [actor.tenantId, membershipId, newlyGrantedCompanyIds],
+    )
+    const linkedCompanyIds = new Set(linked.rows.map((row) => row.company_id))
+    if (newlyGrantedCompanyIds.some((companyId) => !linkedCompanyIds.has(companyId))) {
+      throw new CorporateAccessDeniedError(
+        'EMPLOYEE_AUTHORIZER_LINK_REQUIRED',
+        'Novos autorizadores devem ser vinculados a um funcionario pela tela de acessos da empresa.',
+      )
+    }
+  }
+
+  const currentEffective = await resolveDecisionCompanyIds(
+    client,
+    actor.tenantId,
+    current,
+    grantIsEffectiveNow,
+  )
+  const requestedEffective = await resolveDecisionCompanyIds(
+    client,
+    actor.tenantId,
+    input,
+    grantIsEffectiveNow,
+  )
+  const removedCompanyIds = [...currentEffective]
+    .filter((companyId) => !requestedEffective.has(companyId))
+  if (!removedCompanyIds.length) return
+
+  const linkedReduction = await client.query<{ company_id: string; employee_id: string }>(
+    `select company_id, employee_id
+     from employee_portal_memberships
+     where tenant_id = $1
+       and membership_id = $2
+       and company_id = any($3::text[])
+       and status <> 'revoked'
+       and approval_enabled = true
+     order by company_id
+     for update`,
+    [actor.tenantId, membershipId, removedCompanyIds],
+  )
+  if (!linkedReduction.rowCount) return
+  const linkedCompanyIds = uniqueStrings(linkedReduction.rows.map((link) => link.company_id))
+  const pending = await client.query(
+    `select assignment.id
+     from tenant_memberships membership
+      join approval_assignments assignment
+        on assignment.tenant_id = membership.tenant_id
+       and (
+         assignment.assignee_user_id = membership.user_id
+         or assignment.delegated_from_user_id = membership.user_id
+       )
+       and assignment.status = 'pending'
+     join approval_steps step
+       on step.tenant_id = assignment.tenant_id
+      and step.id = assignment.approval_step_id
+     join approval_instances instance
+       on instance.tenant_id = step.tenant_id
+      and instance.id = step.approval_instance_id
+     where membership.tenant_id = $1
+       and membership.id = $2
+       and instance.company_id = any($3::text[])
+     limit 1
+     for update of assignment`,
+    [actor.tenantId, membershipId, linkedCompanyIds],
+  )
+  if (pending.rowCount) {
+    throw new CorporateAccessConflictError(
+      'Reatribua ou delegue as aprovacoes pendentes antes de reduzir o acesso deste autorizador.',
+    )
+  }
+  await client.query(
+    `update employee_portal_memberships
+     set approval_enabled = false
+     where tenant_id = $1
+       and membership_id = $2
+       and company_id = any($3::text[])
+       and status <> 'revoked'
+       and approval_enabled = true`,
+    [actor.tenantId, membershipId, linkedCompanyIds],
+  )
+  await client.query(
+    `update approval_authorities
+     set status = 'revoked', revoked_by_membership_id = $4, revoked_at = now(),
+         revocation_reason = 'Acesso decisorio removido do autorizador.'
+     where tenant_id = $1
+       and membership_id = $2
+       and company_id = any($3::text[])
+       and status in ('draft', 'approved', 'scheduled', 'active', 'suspended')`,
+    [actor.tenantId, membershipId, linkedCompanyIds, actor.membershipId],
+  )
+  await client.query(
+    `update approval_approver_group_members group_member
+     set status = 'inactive'
+     from approval_approver_groups approver_group
+     where group_member.tenant_id = $1
+       and group_member.membership_id = $2
+       and group_member.status = 'active'
+       and approver_group.tenant_id = group_member.tenant_id
+       and approver_group.id = group_member.approver_group_id
+       and approver_group.company_id = any($3::text[])`,
+    [actor.tenantId, membershipId, linkedCompanyIds],
+  )
+}
+
+async function resolveDecisionCompanyIds(
+  client: PoolClient,
+  tenantId: string,
+  configuration: CorporateAccessConfiguration | CorporateAccessConfigurationInput,
+  grantIncluded: (grant: { status: 'active' | 'suspended'; validFrom?: string | null; validUntil?: string | null }) => boolean,
+): Promise<Set<string>> {
+  const companyIds = new Set(configuration.companyGrants
+    .filter((grant) => (
+      grantIncluded(grant)
+      && permissionsForCorporateProfile(grant.profile, grant.permissionOverrides).decidir_aprovacoes
+    ))
+    .map((grant) => grant.companyId))
+  const groupGrants = configuration.groupGrants.filter((grant) => (
+    grantIncluded(grant)
+    && permissionsForCorporateProfile(grant.profile, grant.permissionOverrides).decidir_aprovacoes
+  ))
+  groupGrants.forEach((grant) => {
+    if (grant.accessMode === 'selected_companies') {
+      grant.companyIds.forEach((companyId) => companyIds.add(companyId))
+    }
+  })
+  const allGroupIds = uniqueStrings(groupGrants
+    .filter((grant) => grant.accessMode === 'all_companies')
+    .map((grant) => grant.groupId))
+  if (allGroupIds.length) {
+    const companies = await client.query<{ id: string }>(
+      `select id from companies
+       where tenant_id = $1
+         and group_id = any($2::text[])
+         and status = 'active'
+         and deleted_at is null
+         and company_portal_enabled = true`,
+      [tenantId, allGroupIds],
+    )
+    companies.rows.forEach((company) => companyIds.add(company.id))
+  }
+  return companyIds
 }
 
 export async function setOwnCorporateDefaultContext(
@@ -797,6 +1192,14 @@ function grantIsEffectiveNow(grant: {
   return !grant.validUntil || new Date(grant.validUntil).getTime() > now
 }
 
+function grantCanActivateNowOrLater(grant: {
+  status: 'active' | 'suspended'
+  validUntil?: string | null
+}): boolean {
+  if (grant.status !== 'active') return false
+  return !grant.validUntil || new Date(grant.validUntil).getTime() > Date.now()
+}
+
 function assertActorCanManageConfiguration(
   actor: RequestPrincipal,
   configuration: CorporateAccessConfiguration,
@@ -808,7 +1211,7 @@ function assertActorCanManageConfiguration(
       accessMode: grant.accessMode,
       companyIds: grant.companyIds,
       canViewConsolidated: grant.canViewConsolidated,
-      permissionOverrides: grant.permissionOverrides,
+      permissionOverrides: { ...grant.permissionOverrides, decidir_aprovacoes: false },
       status: grant.status,
       validFrom: grant.validFrom,
       validUntil: grant.validUntil,
@@ -816,7 +1219,7 @@ function assertActorCanManageConfiguration(
     companyGrants: configuration.companyGrants.map((grant) => ({
       companyId: grant.companyId,
       profile: grant.profile,
-      permissionOverrides: grant.permissionOverrides,
+      permissionOverrides: { ...grant.permissionOverrides, decidir_aprovacoes: false },
       status: grant.status,
       validFrom: grant.validFrom,
       validUntil: grant.validUntil,

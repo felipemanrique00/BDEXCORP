@@ -15,25 +15,111 @@ const ruleWizard = readFileSync(
   resolve(process.cwd(), 'components/empresas/company-approval-rule-wizard.tsx'),
   'utf8',
 )
+const assignApproverModal = peopleAccess.slice(
+  peopleAccess.indexOf('function AssignApproverModal('),
+  peopleAccess.indexOf('function ApproverGroupManagerModal('),
+)
 
 describe('company approval access UI contract', () => {
-  it('keeps corporate people inside the company and never offers an agency identity as approver', () => {
+  it('assigns authorization from the company employee directory instead of a free-form user invite', () => {
     expect(companyPage).toContain('label: \'Pessoas e acessos\'')
     expect(companyPage).toContain('funcionarios={funcs}')
     expect(peopleAccess).toContain('Autorizadores corporativos')
     expect(peopleAccess).toContain('A equipe interna da agência não é oferecida como autorizador da empresa')
-    expect(peopleAccess).toContain("profile: 'approver'")
-    expect(peopleAccess).toContain("role: 'colaborador'")
+    expect(peopleAccess).toContain('/api/companies/${encodeURIComponent(companyId)}/approvers')
+    expect(peopleAccess).toContain('Array.isArray(payload?.employees)')
+    expect(assignApproverModal).toContain('Buscar funcionário')
+    expect(assignApproverModal).not.toContain("fetch('/api/users'")
+    expect(assignApproverModal).not.toContain('Convidar nova pessoa')
+    expect(assignApproverModal).not.toContain('Também pode solicitar viagens')
+    expect(assignApproverModal).not.toContain('E-mail corporativo')
   })
 
-  it('loads effective candidates in company context and preserves an existing direct profile when adding approval rights', () => {
+  it('searches the minimum employee projection by name, registration, department and cost center', () => {
+    expect(assignApproverModal).toContain('Nome, matrícula, departamento ou centro de custo')
+    expect(peopleAccess).toContain('employee.registrationCode')
+    expect(peopleAccess).toContain('employee.department')
+    expect(peopleAccess).toContain('employee.costCenter')
+    expect(peopleAccess).toContain('normalizeEmployeeSearch')
+    expect(assignApproverModal).not.toContain('documentNumber')
+    expect(assignApproverModal).not.toContain('telefone')
+    expect(assignApproverModal).not.toContain('cpf')
+  })
+
+  it('requires an explicit second action before sending the identity membership', () => {
+    expect(assignApproverModal).toContain("employeeId: selectedEmployee.employeeId")
+    expect(assignApproverModal).toContain('const confirmedMembershipId = expectedMembershipId')
+    expect(assignApproverModal).toContain('...(confirmedMembershipId ? { expectedMembershipId: confirmedMembershipId } : {})')
+    expect(assignApproverModal).toContain("payload?.code === 'EMPLOYEE_AUTHORIZER_IDENTITY_CONFIRMATION_REQUIRED'")
+    expect(assignApproverModal).toContain('payload?.candidate?.membershipId')
+    expect(assignApproverModal).toContain('Confirme a identidade antes de vincular')
+    expect(assignApproverModal).toContain('assignEmployee(identityCandidate.membershipId)')
+    expect(assignApproverModal).toContain('disabled={saving || !selectedEmployee || Boolean(identityCandidate)}')
+    expect(assignApproverModal).not.toContain('companyId: empresa.id')
+  })
+
+  it('shows every employee access state and keeps pending invitations out of rule candidates', () => {
+    expect(peopleAccess).toContain("label: 'Sem login'")
+    expect(peopleAccess).toContain("label: 'Identidade a confirmar'")
+    expect(peopleAccess).toContain("label: 'Convite pendente'")
+    expect(peopleAccess).toContain("label: 'Convite expirado'")
+    expect(peopleAccess).toContain("label: 'Envio do convite pendente'")
+    expect(peopleAccess).toContain("label: 'Ativo'")
+    expect(peopleAccess).toContain("label: 'Bloqueado'")
+    expect(peopleAccess).toContain("label: 'Sem e-mail'")
+    expect(peopleAccess).toContain("'pending_activation'")
+    expect(peopleAccess).toContain('employee.canEnterRules')
+    expect(peopleAccess).toContain('hasManagedLink: item.hasManagedLink === true')
+    expect(peopleAccess).toContain('return employee.hasManagedLink || employee.canEnterRules')
+    expect(peopleAccess).toContain('Aguarda ativação')
+  })
+
+  it('removes or cancels only an established authorizer lifecycle while preserving the remaining employee access', () => {
+    expect(peopleAccess).toContain("method: 'DELETE'")
+    expect(peopleAccess).toContain('body: JSON.stringify({ employeeId: employee.employeeId })')
+    expect(peopleAccess).toContain("approvalStatus === 'active' && employee.canEnterRules")
+    expect(peopleAccess).toContain("approvalStatus === 'pending_activation'")
+    expect(peopleAccess).toContain("approvalStatus === 'blocked' && employee.blockedReason === 'effective_access_missing'")
+    expect(peopleAccess).toContain('Remover função de autorizador')
+    expect(peopleAccess).toContain('Cancelar atribuição de autorizador')
+    expect(peopleAccess).toContain('O login, o perfil de solicitante e todos os demais acessos corporativos serão preservados')
+    expect(peopleAccess).toContain('if (response.status === 409)')
+    expect(peopleAccess).toContain("toast.error(payload?.error")
+    expect(peopleAccess).toContain('await reloadApproverAccess()')
+    expect(peopleAccess).toContain("identity === 'invited') return 'invited_login'")
+    expect(peopleAccess).toContain("'invited_login', 'confirmation_required'")
+    expect(peopleAccess).toContain('Não atribuído · pode atribuir novamente')
+    expect(peopleAccess).toContain("if (state === 'revoked') return 'O vínculo deste funcionário foi revogado")
+  })
+
+  it('persists a failed invitation delivery state and resends through the dedicated employee action', () => {
+    expect(peopleAccess).toContain("invitationState: 'not_required' | 'sent' | 'delivery_pending'")
+    expect(peopleAccess).toContain("invitationState: parseEmployeeInvitationState(item.invitationState)")
+    expect(peopleAccess).toContain('inviteExpiresAt: nullableDirectoryString(item.inviteExpiresAt)')
+    expect(peopleAccess).toContain('resendable: item.resendable === true')
+    expect(peopleAccess).toContain('reassignable: item.reassignable === true')
+    expect(peopleAccess).toContain("state === 'revoked' && employee.reassignable")
+    expect(peopleAccess).toContain('selectedEmployee.reassignable ? selectedEmployee.membershipId : null')
+    expect(peopleAccess).toContain("employee.invitationState === 'delivery_pending'")
+    expect(peopleAccess).toContain('O convite não foi entregue. Verifique o serviço de e-mail e tente reenviar.')
+    expect(peopleAccess).toContain("employee.approvalStatus.trim().toLowerCase() === 'pending_activation'")
+    expect(peopleAccess).toContain("employee.identityStatus.trim().toLowerCase() === 'invited'")
+    expect(peopleAccess).toContain('&& employee.resendable')
+    expect(peopleAccess).toContain('Date.parse(employee.inviteExpiresAt)')
+    expect(peopleAccess).toContain('expiresAt <= Date.now()')
+    expect(peopleAccess).toContain('Convite ainda não aceito. Você pode reenviá-lo se necessário.')
+    expect(peopleAccess).not.toContain("employee.invitationState === 'sent' && employee.resendable")
+    expect(peopleAccess).toContain("body: JSON.stringify({ employeeId: employee.employeeId, action: 'resend_invite' })")
+    expect(peopleAccess).toContain('Reenviar convite')
+    expect(peopleAccess).toContain("payload?.invitation?.state === 'delivery_pending'")
+  })
+
+  it('keeps active rule candidates separate from the employee assignment directory', () => {
     expect(peopleAccess).toContain('/api/approvals/candidates?companyId=')
     expect(peopleAccess).toContain('offset=${offset}')
     expect(peopleAccess).toContain('candidate.effectivePermissions')
-    expect(peopleAccess).toContain('/access`, { cache: \'no-store\' })')
-    expect(peopleAccess).toContain('profile: currentGrant.profile as CorporateProfile')
-    expect(peopleAccess).toContain('...(currentGrant.permissionOverrides as Partial<Permissoes> || {})')
-    expect(peopleAccess).toContain('decidir_aprovacoes: true')
+    expect(peopleAccess).toContain('users.filter(isCorporateApprover)')
+    expect(peopleAccess).toContain('canEnterRules: item.canEnterRules === true')
     expect(peopleAccess).not.toContain('user.corporate_profile')
   })
 

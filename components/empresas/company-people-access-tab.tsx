@@ -11,7 +11,9 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
+  UserMinus,
   UserRound,
   UsersRound,
 } from 'lucide-react'
@@ -24,8 +26,8 @@ import {
   type ApprovalAudienceGroupOption,
   type ApprovalMatrixCreated,
 } from '@/components/empresas/company-approval-rule-wizard'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Modal } from '@/components/ui/modal'
-import { CORPORATE_PROFILE_LABELS } from '@/lib/corporate-access'
 import type { CorporateProfile, Empresa, Funcionario, Permissoes, SolicitanteEmpresa, User } from '@/types'
 
 type AccessSection = 'people' | 'approvers' | 'rules'
@@ -117,6 +119,31 @@ interface ApprovalCandidateItem {
   effectiveProfiles: CorporateProfile[]
   effectivePermissions: Permissoes
   active: boolean
+}
+
+interface EmployeeApproverDirectoryItem {
+  employeeId: string
+  name: string
+  registrationCode: string | null
+  department: string | null
+  costCenter: string | null
+  identityStatus: string
+  approvalStatus: string
+  membershipId: string | null
+  canEnterRules: boolean
+  hasManagedLink: boolean
+  blockedReason: string | null
+  requiresIdentityConfirmation: boolean
+  invitationState: 'not_required' | 'sent' | 'delivery_pending'
+  inviteExpiresAt: string | null
+  resendable: boolean
+  reassignable: boolean
+}
+
+interface EmployeeApproverIdentityCandidate {
+  employeeId: string
+  membershipId: string
+  name: string
 }
 
 export function CompanyPeopleAccessTab({
@@ -254,7 +281,88 @@ function CompanyApproversPanel({
 }) {
   const [modalOpen, setModalOpen] = useState(false)
   const [groupModalOpen, setGroupModalOpen] = useState(false)
+  const [employees, setEmployees] = useState<EmployeeApproverDirectoryItem[]>([])
+  const [employeesLoading, setEmployeesLoading] = useState(true)
+  const [employeesError, setEmployeesError] = useState<string | null>(null)
+  const [employeeToRemove, setEmployeeToRemove] = useState<EmployeeApproverDirectoryItem | null>(null)
+  const [removingEmployeeId, setRemovingEmployeeId] = useState<string | null>(null)
+  const [resendingEmployeeId, setResendingEmployeeId] = useState<string | null>(null)
   const approvers = users.filter(isCorporateApprover)
+  const assignedEmployees = employees.filter(isAssignedEmployeeApprover)
+
+  const loadEmployees = useCallback(async () => {
+    setEmployeesLoading(true)
+    setEmployeesError(null)
+    try {
+      setEmployees(await loadEmployeeApproverDirectory(empresa.id))
+    } catch (loadError) {
+      setEmployeesError(loadError instanceof Error ? loadError.message : 'Não foi possível carregar os funcionários da empresa.')
+    } finally {
+      setEmployeesLoading(false)
+    }
+  }, [empresa.id])
+
+  useEffect(() => {
+    void loadEmployees()
+  }, [loadEmployees])
+
+  async function reloadApproverAccess() {
+    await Promise.all([onReload(), loadEmployees()])
+  }
+
+  async function removeEmployeeAuthorizer(employee: EmployeeApproverDirectoryItem) {
+    if (removingEmployeeId || resendingEmployeeId || !canRemoveEmployeeApprover(employee)) return
+    setRemovingEmployeeId(employee.employeeId)
+    try {
+      const response = await fetch(`/api/companies/${encodeURIComponent(empresa.id)}/approvers`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employeeId: employee.employeeId }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (response.status === 409) {
+        toast.error(payload?.error || 'A função não pode ser removida enquanto houver uma aprovação pendente.')
+        await reloadApproverAccess()
+        return
+      }
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(payload?.error || 'Não foi possível remover a função de autorizador.')
+      }
+      toast.success('Função de autorizador removida. O login e os demais acessos foram preservados.')
+      await reloadApproverAccess()
+    } catch (removeError) {
+      toast.error(removeError instanceof Error ? removeError.message : 'Não foi possível remover a função de autorizador.')
+    } finally {
+      setRemovingEmployeeId(null)
+    }
+  }
+
+  async function resendEmployeeAuthorizerInvite(employee: EmployeeApproverDirectoryItem) {
+    if (removingEmployeeId || resendingEmployeeId || !canResendEmployeeApproverInvite(employee)) return
+    setResendingEmployeeId(employee.employeeId)
+    try {
+      const response = await fetch(`/api/companies/${encodeURIComponent(empresa.id)}/approvers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employeeId: employee.employeeId, action: 'resend_invite' }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(payload?.error || 'Não foi possível reenviar o convite do autorizador.')
+      }
+      if (payload?.invitation?.state === 'delivery_pending') {
+        toast.error('O convite ainda não foi entregue. Verifique o serviço de e-mail e tente novamente.')
+      } else {
+        toast.success('Convite do autorizador reenviado.')
+      }
+      await loadEmployees()
+    } catch (resendError) {
+      toast.error(resendError instanceof Error ? resendError.message : 'Não foi possível reenviar o convite do autorizador.')
+      await loadEmployees()
+    } finally {
+      setResendingEmployeeId(null)
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -269,8 +377,8 @@ function CompanyApproversPanel({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" onClick={() => void onReload()} className="bbt-button-ghost" disabled={loading}>
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          <button type="button" onClick={() => void reloadApproverAccess()} className="bbt-button-ghost" disabled={loading || employeesLoading}>
+            <RefreshCw className={`h-4 w-4 ${loading || employeesLoading ? 'animate-spin' : ''}`} />
             Atualizar
           </button>
           {canManage && (
@@ -292,12 +400,18 @@ function CompanyApproversPanel({
         <strong>Limite de identidade:</strong> esta lista contém somente usuários corporativos vinculados a {empresa.nome}. A equipe interna da agência não é oferecida como autorizador da empresa.
       </div>
 
-      {loading && approvers.length === 0 ? (
+      {error && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+          Os funcionários continuam visíveis, mas a lista de autorizadores disponíveis para regras não pôde ser atualizada: {error}
+        </div>
+      )}
+
+      {employeesLoading && assignedEmployees.length === 0 ? (
         <PanelMessage icon={Loader2} label="Carregando autorizadores" spin />
-      ) : error ? (
-        <PanelMessage icon={AlertCircle} label={error} tone="red" />
-      ) : approvers.length === 0 ? (
-        <PanelMessage icon={ShieldCheck} label="Nenhum autorizador corporativo atribuído a esta empresa." />
+      ) : employeesError ? (
+        <PanelMessage icon={AlertCircle} label={employeesError} tone="red" />
+      ) : assignedEmployees.length === 0 ? (
+        <PanelMessage icon={ShieldCheck} label="Nenhum funcionário foi atribuído como autorizador desta empresa." />
       ) : (
         <div className="overflow-hidden rounded-md border border-bbt-gray-100 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="overflow-x-auto">
@@ -305,37 +419,83 @@ function CompanyApproversPanel({
               <thead className="bg-bbt-gray-50 text-left text-[11px] uppercase tracking-wide text-slate-500 dark:bg-slate-950/60">
                 <tr>
                   <th className="px-4 py-3">Pessoa</th>
-                  <th className="px-4 py-3">Atribuição</th>
-                  <th className="px-4 py-3">Outros acessos</th>
+                  <th className="px-4 py-3">Organização</th>
                   <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Uso nas regras</th>
                   <th className="px-4 py-3 text-right">Ações</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-bbt-gray-100 dark:divide-slate-800">
-                {approvers.map((user) => (
-                  <tr key={user.id} className="hover:bg-bbt-gray-50/70 dark:hover:bg-slate-800/40">
+                {assignedEmployees.map((employee) => (
+                  <tr key={employee.employeeId} className="hover:bg-bbt-gray-50/70 dark:hover:bg-slate-800/40">
                     <td className="px-4 py-3">
-                      <div className="font-semibold text-bbt-primary dark:text-white">{user.name}</div>
-                      <div className="text-xs text-slate-500">{user.email}</div>
+                      <div className="font-semibold text-bbt-primary dark:text-white">{employee.name}</div>
+                      <div className="text-xs text-slate-500">{employee.registrationCode ? `Matrícula ${employee.registrationCode}` : 'Sem matrícula informada'}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="bbt-badge bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-200">
-                        <ShieldCheck className="h-3 w-3" />
-                        {profileLabel(user)}
-                      </span>
+                      <div className="text-xs font-medium text-slate-700 dark:text-slate-200">{employee.department || 'Departamento não informado'}</div>
+                      <div className="text-xs text-slate-500">{employee.costCenter || 'Centro de custo não informado'}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1">
-                        {user.companyPermissions.criar_demandas && <AccessPill label="Solicitante" />}
-                        {user.companyPermissions.ver_financeiro && <AccessPill label="Financeiro" />}
-                        {!user.companyPermissions.criar_demandas && !user.companyPermissions.ver_financeiro && <span className="text-xs text-slate-400">Somente aprovação</span>}
-                      </div>
+                      <EmployeeApproverStatus employee={employee} />
+                      {employee.invitationState === 'delivery_pending' && (
+                        <p className="mt-1 max-w-56 text-[11px] leading-relaxed text-red-600 dark:text-red-300">
+                          O convite não foi entregue. Verifique o serviço de e-mail e tente reenviar.
+                        </p>
+                      )}
+                      {isEmployeeApproverInviteExpired(employee) && (
+                        <p className="mt-1 max-w-56 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                          O convite expirou{formatEmployeeApproverInviteExpiry(employee.inviteExpiresAt)}. Reenvie para gerar um novo acesso.
+                        </p>
+                      )}
+                      {canResendEmployeeApproverInvite(employee)
+                        && !isEmployeeApproverInviteExpired(employee)
+                        && employee.invitationState !== 'delivery_pending' && (
+                        <p className="mt-1 max-w-56 text-[11px] leading-relaxed text-slate-500">
+                          Convite ainda não aceito. Você pode reenviá-lo se necessário.
+                        </p>
+                      )}
                     </td>
-                    <td className="px-4 py-3"><UserStatus user={user} /></td>
+                    <td className="px-4 py-3">
+                      {employee.canEnterRules ? (
+                        <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">Disponível</span>
+                      ) : isEmployeeApproverUnassigned(employee) ? (
+                        <span className="text-xs font-semibold text-cyan-700 dark:text-cyan-300">Não atribuído · pode atribuir novamente</span>
+                      ) : (
+                        <span className="text-xs text-amber-700 dark:text-amber-300">Aguarda ativação</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right">
-                      <Link href="/dashboard/usuarios" className="text-xs font-semibold text-bbt-accent hover:underline">
-                        Ajustar acesso
-                      </Link>
+                      {canManage && (canRemoveEmployeeApprover(employee) || canResendEmployeeApproverInvite(employee)) ? (
+                        <div className="flex flex-col items-end gap-2">
+                          {canResendEmployeeApproverInvite(employee) && (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1.5 text-xs font-semibold text-bbt-accent hover:underline disabled:cursor-wait disabled:opacity-60"
+                              disabled={Boolean(removingEmployeeId) || Boolean(resendingEmployeeId)}
+                              onClick={() => void resendEmployeeAuthorizerInvite(employee)}
+                            >
+                              <RefreshCw className={`h-3.5 w-3.5 ${resendingEmployeeId === employee.employeeId ? 'animate-spin' : ''}`} />
+                              Reenviar convite
+                            </button>
+                          )}
+                          {canRemoveEmployeeApprover(employee) && (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-600 hover:text-red-700 hover:underline disabled:cursor-wait disabled:opacity-60 dark:text-red-300 dark:hover:text-red-200"
+                              disabled={Boolean(removingEmployeeId) || Boolean(resendingEmployeeId)}
+                              onClick={() => setEmployeeToRemove(employee)}
+                            >
+                              {removingEmployeeId === employee.employeeId
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                : <UserMinus className="h-3.5 w-3.5" />}
+                              {employeeApproverRemovalLabel(employee)}
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-slate-400">—</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -349,10 +509,13 @@ function CompanyApproversPanel({
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         empresa={empresa}
-        companyUsers={users}
+        employees={employees}
+        loading={employeesLoading}
+        error={employeesError}
+        onReload={loadEmployees}
         onSaved={async () => {
           setModalOpen(false)
-          await onReload()
+          await reloadApproverAccess()
         }}
       />
 
@@ -364,6 +527,20 @@ function CompanyApproversPanel({
         canManageBusinessGroup={canManageBusinessGroup}
         approvers={approvers}
       />
+
+      <ConfirmDialog
+        open={Boolean(employeeToRemove)}
+        onClose={() => setEmployeeToRemove(null)}
+        onConfirm={() => {
+          if (employeeToRemove) void removeEmployeeAuthorizer(employeeToRemove)
+        }}
+        title={employeeToRemove ? employeeApproverRemovalLabel(employeeToRemove) : 'Remover função de autorizador'}
+        message={employeeToRemove
+          ? employeeApproverRemovalConfirmation(employeeToRemove)
+          : 'O login e todos os demais acessos corporativos serão preservados.'}
+        confirmLabel={employeeToRemove?.approvalStatus === 'pending_activation' ? 'Cancelar atribuição' : 'Remover função'}
+        danger
+      />
     </div>
   )
 }
@@ -372,118 +549,84 @@ function AssignApproverModal({
   open,
   onClose,
   empresa,
-  companyUsers,
+  employees,
+  loading,
+  error,
+  onReload,
   onSaved,
 }: {
   open: boolean
   onClose: () => void
   empresa: Empresa
-  companyUsers: CompanyScopedUser[]
+  employees: EmployeeApproverDirectoryItem[]
+  loading: boolean
+  error: string | null
+  onReload: () => Promise<void>
   onSaved: () => Promise<void>
 }) {
-  const candidates = companyUsers.filter((user) => !isCorporateApprover(user) && !user.platform_admin)
-  const [mode, setMode] = useState<'existing' | 'invite'>(candidates.length ? 'existing' : 'invite')
-  const [selectedUserId, setSelectedUserId] = useState('')
-  const [name, setName] = useState('')
-  const [email, setEmail] = useState('')
-  const [alsoRequester, setAlsoRequester] = useState(false)
+  const [search, setSearch] = useState('')
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
+  const [identityCandidate, setIdentityCandidate] = useState<EmployeeApproverIdentityCandidate | null>(null)
   const [saving, setSaving] = useState(false)
+  const normalizedSearch = normalizeEmployeeSearch(search)
+  const filteredEmployees = useMemo(() => employees.filter((employee) => (
+    !normalizedSearch || employeeSearchText(employee).includes(normalizedSearch)
+  )), [employees, normalizedSearch])
+  const selectedEmployee = employees.find((employee) => employee.employeeId === selectedEmployeeId) || null
 
   useEffect(() => {
     if (!open) return
-    const first = candidates[0]
-    setMode(first ? 'existing' : 'invite')
-    setSelectedUserId(first?.id || '')
-    setName(first?.name || '')
-    setEmail(first?.email || '')
-    setAlsoRequester(Boolean(first?.companyPermissions.criar_demandas))
+    setSearch('')
+    setSelectedEmployeeId('')
+    setIdentityCandidate(null)
     setSaving(false)
-    // A lista é recarregada ao fechar o modal; este reset depende apenas da abertura.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  function selectExisting(userId: string) {
-    const user = candidates.find((item) => item.id === userId)
-    setSelectedUserId(userId)
-    setName(user?.name || '')
-    setEmail(user?.email || '')
-    setAlsoRequester(Boolean(user?.companyPermissions.criar_demandas))
+  function selectEmployee(employeeId: string) {
+    setSelectedEmployeeId(employeeId)
+    setIdentityCandidate(null)
   }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
+    await assignEmployee()
+  }
+
+  async function assignEmployee(expectedMembershipId?: string) {
     if (saving) return
-    if (mode === 'existing' && !selectedUserId) return toast.error('Selecione uma pessoa da empresa.')
-    if (name.trim().length < 2) return toast.error('Informe o nome do autorizador.')
-    if (!/.+@.+\..+/.test(email.trim())) return toast.error('Informe um e-mail válido.')
+    if (!selectedEmployee) return toast.error('Selecione um funcionário da empresa.')
+    if (!canAssignEmployeeApprover(selectedEmployee)) return toast.error(employeeApproverUnavailableReason(selectedEmployee))
 
     setSaving(true)
     try {
-      const existing = mode === 'existing'
-      let companyGrant: {
-        companyId: string
-        profile: CorporateProfile
-        permissionOverrides: Partial<Permissoes>
-        status: 'active' | 'scheduled'
-        validFrom: string | null
-        validUntil: string | null
-      } = {
-        companyId: empresa.id,
-        profile: 'approver',
-        permissionOverrides: alsoRequester ? { criar_demandas: true } : {},
-        status: 'active',
-        validFrom: null,
-        validUntil: null,
-      }
-      if (existing) {
-        const accessResponse = await fetch(`/api/users/${encodeURIComponent(selectedUserId)}/access`, { cache: 'no-store' })
-        const accessPayload = await accessResponse.json().catch(() => null)
-        if (!accessResponse.ok) {
-          throw new Error(accessPayload?.error || 'Não foi possível conferir o acesso atual da pessoa.')
-        }
-        const currentGrant = Array.isArray(accessPayload?.access?.companyGrants)
-          ? accessPayload.access.companyGrants.find((grant: Record<string, unknown>) => (
-              grant.companyId === empresa.id && ['active', 'scheduled'].includes(String(grant.status))
-            ))
-          : null
-        if (currentGrant) {
-          companyGrant = {
-            companyId: empresa.id,
-            profile: currentGrant.profile as CorporateProfile,
-            permissionOverrides: {
-              ...(currentGrant.permissionOverrides as Partial<Permissoes> || {}),
-              ver_aprovacoes: true,
-              decidir_aprovacoes: true,
-              ...(alsoRequester ? { criar_demandas: true } : {}),
-            },
-            status: currentGrant.status as 'active' | 'scheduled',
-            validFrom: typeof currentGrant.validFrom === 'string' ? currentGrant.validFrom : null,
-            validUntil: typeof currentGrant.validUntil === 'string' ? currentGrant.validUntil : null,
-          }
-        }
-      }
-      const response = await fetch('/api/users', {
+      const confirmedMembershipId = expectedMembershipId
+        || (selectedEmployee.reassignable ? selectedEmployee.membershipId : null)
+      const response = await fetch(`/api/companies/${encodeURIComponent(empresa.id)}/approvers`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: name.trim(),
-          email: email.trim().toLowerCase(),
-          role: 'colaborador',
-          corporateAccess: {
-            groupGrants: [],
-            companyGrants: [companyGrant],
-            defaultContext: existing ? null : { type: 'company', id: empresa.id },
-          },
-          active: true,
+          employeeId: selectedEmployee.employeeId,
+          ...(confirmedMembershipId ? { expectedMembershipId: confirmedMembershipId } : {}),
         }),
       })
       const payload = await response.json().catch(() => null)
+      if (response.status === 409 && payload?.code === 'EMPLOYEE_AUTHORIZER_IDENTITY_CONFIRMATION_REQUIRED') {
+        const membershipId = typeof payload?.candidate?.membershipId === 'string' ? payload.candidate.membershipId : ''
+        if (!membershipId) throw new Error(payload?.error || 'Não foi possível confirmar a identidade encontrada.')
+        setIdentityCandidate({
+          employeeId: selectedEmployee.employeeId,
+          membershipId,
+          name: typeof payload?.candidate?.name === 'string' ? payload.candidate.name : selectedEmployee.name,
+        })
+        return
+      }
       if (!response.ok) throw new Error(payload?.error || 'Não foi possível atribuir o autorizador.')
-      toast.success(payload?.existing
-        ? 'Atribuição de autorizador atualizada.'
-        : payload?.invited
-          ? `Convite enviado para ${email.trim().toLowerCase()}.`
-          : 'Autorizador cadastrado.')
+      const invitationState = payload?.invitation?.state
+      toast.success(invitationState === 'sent'
+        ? 'Autorizador atribuído e convite enviado.'
+        : invitationState === 'delivery_pending'
+          ? 'Autorizador atribuído. O convite aguarda envio.'
+          : 'Autorizador atribuído.')
       await onSaved()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Não foi possível atribuir o autorizador.')
@@ -499,49 +642,80 @@ function AssignApproverModal({
           O autorizador será vinculado somente a <strong>{empresa.nome}</strong>. A alçada e os níveis serão configurados separadamente.
         </div>
 
-        {candidates.length > 0 && (
-          <div className="grid grid-cols-2 rounded-md border border-bbt-gray-100 p-1 dark:border-slate-700">
-            <button type="button" onClick={() => { setMode('existing'); selectExisting(candidates[0]?.id || '') }} className={`rounded px-3 py-2 text-sm font-semibold ${mode === 'existing' ? 'bg-bbt-primary text-white' : 'text-slate-600 dark:text-slate-300'}`}>
-              Pessoa existente
-            </button>
-            <button type="button" onClick={() => { setMode('invite'); setSelectedUserId(''); setName(''); setEmail(''); setAlsoRequester(false) }} className={`rounded px-3 py-2 text-sm font-semibold ${mode === 'invite' ? 'bg-bbt-primary text-white' : 'text-slate-600 dark:text-slate-300'}`}>
-              Convidar nova pessoa
-            </button>
-          </div>
-        )}
-
-        {mode === 'existing' && candidates.length > 0 ? (
-          <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">
-            Pessoa da empresa
-            <select value={selectedUserId} onChange={(event) => selectExisting(event.target.value)} className="bbt-input mt-1.5" required>
-              <option value="">Selecione</option>
-              {candidates.map((user) => <option key={user.id} value={user.id}>{user.name} · {user.email}</option>)}
-            </select>
-          </label>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">
-              Nome
-              <input value={name} onChange={(event) => setName(event.target.value)} className="bbt-input mt-1.5" required />
-            </label>
-            <label className="text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">
-              E-mail corporativo
-              <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="bbt-input mt-1.5" required />
-            </label>
-          </div>
-        )}
-
-        <label className="flex cursor-pointer items-start gap-2 rounded-md border border-bbt-gray-100 p-3 text-sm dark:border-slate-700">
-          <input type="checkbox" checked={alsoRequester} onChange={(event) => setAlsoRequester(event.target.checked)} className="mt-0.5" />
-          <span>
-            <strong className="block text-bbt-primary dark:text-white">Também pode solicitar viagens</strong>
-            <span className="text-xs text-slate-500">Mantém as funções separadas por padrão; marque apenas se a mesma pessoa também for solicitante.</span>
+        <label className="block text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">
+          Buscar funcionário
+          <span className="relative mt-1.5 block">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              className="bbt-input pl-9"
+              placeholder="Nome, matrícula, departamento ou centro de custo"
+              autoComplete="off"
+            />
           </span>
         </label>
 
+        <div className="max-h-[24rem] overflow-y-auto rounded-md border border-bbt-gray-100 dark:border-slate-700">
+          {loading ? (
+            <PanelMessage icon={Loader2} label="Carregando funcionários" spin />
+          ) : error ? (
+            <div className="space-y-3 p-4 text-center">
+              <PanelMessage icon={AlertCircle} label={error} tone="red" />
+              <button type="button" className="bbt-button-ghost" onClick={() => void onReload()}>Tentar novamente</button>
+            </div>
+          ) : filteredEmployees.length === 0 ? (
+            <p className="p-6 text-center text-sm text-slate-500">Nenhum funcionário encontrado.</p>
+          ) : (
+            <div className="divide-y divide-bbt-gray-100 dark:divide-slate-700">
+              {filteredEmployees.map((employee) => {
+                const selectable = canAssignEmployeeApprover(employee)
+                const selected = employee.employeeId === selectedEmployeeId
+                return (
+                  <button
+                    key={employee.employeeId}
+                    type="button"
+                    onClick={() => selectable && selectEmployee(employee.employeeId)}
+                    disabled={!selectable || saving}
+                    title={selectable ? `Selecionar ${employee.name}` : employeeApproverUnavailableReason(employee)}
+                    className={`flex w-full items-start justify-between gap-3 p-3 text-left transition ${selected ? 'bg-cyan-50 ring-1 ring-inset ring-cyan-300 dark:bg-cyan-950/30' : 'hover:bg-bbt-gray-50 dark:hover:bg-slate-800/50'} disabled:cursor-not-allowed disabled:opacity-65`}
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-bbt-primary dark:text-white">{employee.name}</span>
+                      <span className="mt-0.5 block text-xs text-slate-500">
+                        {[employee.registrationCode ? `Matrícula ${employee.registrationCode}` : null, employee.department, employee.costCenter].filter(Boolean).join(' · ') || 'Dados organizacionais não informados'}
+                      </span>
+                    </span>
+                    <EmployeeApproverStatus employee={employee} />
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {identityCandidate?.employeeId === selectedEmployeeId && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+            <strong className="block">Confirme a identidade antes de vincular</strong>
+            <p className="mt-1 text-xs">
+              Já existe uma conta corporativa em nome de <strong>{identityCandidate.name}</strong>. Confirme somente se ela pertence ao funcionário <strong>{selectedEmployee?.name}</strong>.
+            </p>
+            <button
+              type="button"
+              className="bbt-button-primary mt-3"
+              disabled={saving}
+              onClick={() => void assignEmployee(identityCandidate.membershipId)}
+            >
+              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+              Confirmar identidade e atribuir
+            </button>
+          </div>
+        )}
+
         <div className="flex justify-end gap-2">
           <button type="button" onClick={onClose} className="bbt-button-ghost" disabled={saving}>Cancelar</button>
-          <button type="submit" className="bbt-button-primary" disabled={saving}>
+          <button type="submit" className="bbt-button-primary" disabled={saving || !selectedEmployee || Boolean(identityCandidate)}>
             {saving && <Loader2 className="h-4 w-4 animate-spin" />}
             Atribuir autorizador
           </button>
@@ -1355,14 +1529,28 @@ function PanelMessage({
   )
 }
 
-function AccessPill({ label }: { label: string }) {
-  return <span className="bbt-badge bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200">{label}</span>
-}
+function EmployeeApproverStatus({ employee }: { employee: EmployeeApproverDirectoryItem }) {
+  const state = employeeApproverState(employee)
+  const presentation = {
+    active: { label: 'Ativo', style: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-200' },
+    login_active: { label: 'Login ativo', style: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-200' },
+    invited_login: { label: 'Acesso convidado', style: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-200' },
+    pending: { label: 'Convite pendente', style: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200' },
+    invite_expired: { label: 'Convite expirado', style: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-100' },
+    delivery_pending: { label: 'Envio do convite pendente', style: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-200' },
+    confirmation_required: { label: 'Identidade a confirmar', style: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200' },
+    missing_email: { label: 'Sem e-mail', style: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-200' },
+    blocked: { label: 'Bloqueado', style: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-200' },
+    revoked: { label: 'Acesso revogado', style: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200' },
+    no_login: { label: 'Sem login', style: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200' },
+  }[state]
 
-function UserStatus({ user }: { user: User }) {
-  if (user.status === 'invited') return <span className="bbt-badge bg-amber-100 text-amber-700">Convite pendente</span>
-  if (user.ativo === false || user.status === 'blocked' || user.status === 'inactive') return <span className="bbt-badge bg-red-100 text-red-700">Inativo</span>
-  return <span className="bbt-badge bg-emerald-100 text-emerald-700"><CheckCircle2 className="h-3 w-3" />Ativo</span>
+  return (
+    <span className={`bbt-badge shrink-0 ${presentation.style}`}>
+      {state === 'active' && <CheckCircle2 className="h-3 w-3" />}
+      {presentation.label}
+    </span>
+  )
 }
 
 function AuthorityStatus({ status }: { status: string }) {
@@ -1446,9 +1634,157 @@ function isCorporateApprover(user: CompanyScopedUser): boolean {
     && user.companyPermissions.decidir_aprovacoes
 }
 
-function profileLabel(user: CompanyScopedUser): string {
-  if (user.companyProfiles.includes('approver')) return 'Autorizador'
-  return user.companyProfiles.map((profile) => CORPORATE_PROFILE_LABELS[profile]).join(' + ') || 'Autorizador'
+type EmployeeApproverState = 'active' | 'login_active' | 'invited_login' | 'pending' | 'invite_expired' | 'delivery_pending' | 'confirmation_required' | 'missing_email' | 'blocked' | 'revoked' | 'no_login'
+
+function employeeApproverState(employee: EmployeeApproverDirectoryItem): EmployeeApproverState {
+  const identity = employee.identityStatus.trim().toLowerCase()
+  const approval = employee.approvalStatus.trim().toLowerCase()
+  const blockedReason = (employee.blockedReason || '').trim().toLowerCase()
+  const combined = `${identity} ${approval} ${blockedReason}`
+
+  if (employee.canEnterRules || ['active', 'approved', 'enabled'].includes(approval)) return 'active'
+  if (employee.requiresIdentityConfirmation || /confirmation_required|confirmacao|confirmação|confirm/.test(combined)) return 'confirmation_required'
+  // Uma atribuição pendente cancelada preserva a identidade convidada, mas
+  // volta a ficar disponível para uma nova atribuição/convite.
+  if (['none', 'not_assigned'].includes(approval) && identity === 'invited') return 'invited_login'
+  if (approval === 'pending_activation' && isEmployeeApproverInviteExpired(employee)) return 'invite_expired'
+  if (approval === 'pending_activation' && employee.invitationState === 'delivery_pending') return 'delivery_pending'
+  if (['pending', 'pending_activation', 'invited', 'invitation_pending', 'delivery_pending'].includes(approval) || /pending|pendente|invited|convite/.test(combined)) return 'pending'
+  if (/email/.test(combined) && /missing|required|ausente|obrigatorio|obrigatório|sem/.test(combined)) return 'missing_email'
+  if (['revoked', 'expired'].includes(approval)) return 'revoked'
+  if (['blocked', 'inactive', 'disabled'].includes(identity) || ['blocked', 'inactive', 'disabled'].includes(approval) || Boolean(blockedReason)) return 'blocked'
+  if (['active', 'linked', 'enabled'].includes(identity)) return 'login_active'
+  return 'no_login'
+}
+
+function isAssignedEmployeeApprover(employee: EmployeeApproverDirectoryItem): boolean {
+  return employee.hasManagedLink || employee.canEnterRules
+}
+
+function isEmployeeApproverUnassigned(employee: EmployeeApproverDirectoryItem): boolean {
+  return ['none', 'not_assigned'].includes(employee.approvalStatus.trim().toLowerCase())
+}
+
+function canAssignEmployeeApprover(employee: EmployeeApproverDirectoryItem): boolean {
+  const state = employeeApproverState(employee)
+  return ['no_login', 'login_active', 'invited_login', 'confirmation_required'].includes(state)
+    || (state === 'revoked' && employee.reassignable)
+}
+
+function canRemoveEmployeeApprover(employee: EmployeeApproverDirectoryItem): boolean {
+  const approvalStatus = employee.approvalStatus.trim().toLowerCase()
+  return (approvalStatus === 'active' && employee.canEnterRules)
+    || approvalStatus === 'pending_activation'
+    || (approvalStatus === 'blocked' && employee.blockedReason === 'effective_access_missing')
+}
+
+function canResendEmployeeApproverInvite(employee: EmployeeApproverDirectoryItem): boolean {
+  return employee.approvalStatus.trim().toLowerCase() === 'pending_activation'
+    && employee.identityStatus.trim().toLowerCase() === 'invited'
+    && employee.resendable
+}
+
+function isEmployeeApproverInviteExpired(employee: EmployeeApproverDirectoryItem): boolean {
+  if (employee.approvalStatus.trim().toLowerCase() !== 'pending_activation') return false
+  if (employee.identityStatus.trim().toLowerCase() !== 'invited') return false
+  if (!employee.inviteExpiresAt) return false
+  const expiresAt = Date.parse(employee.inviteExpiresAt)
+  return Number.isFinite(expiresAt) && expiresAt <= Date.now()
+}
+
+function formatEmployeeApproverInviteExpiry(value: string | null): string {
+  if (!value) return ''
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return ''
+  return ` em ${new Intl.DateTimeFormat('pt-BR', {
+    dateStyle: 'short',
+    timeStyle: 'short',
+  }).format(new Date(timestamp))}`
+}
+
+function employeeApproverRemovalLabel(employee: EmployeeApproverDirectoryItem): string {
+  return employee.approvalStatus.trim().toLowerCase() === 'pending_activation'
+    ? 'Cancelar atribuição de autorizador'
+    : 'Remover função de autorizador'
+}
+
+function employeeApproverRemovalConfirmation(employee: EmployeeApproverDirectoryItem): string {
+  const action = employee.approvalStatus.trim().toLowerCase() === 'pending_activation'
+    ? 'Cancelar a atribuição de autorizador'
+    : 'Remover somente a função de autorizador'
+  return `${action} de "${employee.name}"? O login, o perfil de solicitante e todos os demais acessos corporativos serão preservados.`
+}
+
+function employeeApproverUnavailableReason(employee: EmployeeApproverDirectoryItem): string {
+  const state = employeeApproverState(employee)
+  if (state === 'active') return 'Este funcionário já é um autorizador ativo.'
+  if (state === 'pending') return 'O convite deste funcionário ainda está pendente.'
+  if (state === 'invite_expired') return 'O convite expirou. Use a ação de reenvio.'
+  if (state === 'delivery_pending') return 'O convite ainda não foi entregue. Use a ação de reenvio.'
+  if (state === 'revoked') return 'O vínculo deste funcionário foi revogado e precisa ser regularizado antes de uma nova atribuição.'
+  if (state === 'missing_email') return 'Cadastre o e-mail corporativo do funcionário antes de atribuir o acesso.'
+  if (state === 'blocked') return {
+    employee_inactive: 'O funcionário está inativo no cadastro da empresa.',
+    internal_identity: 'Esta identidade pertence à equipe interna da agência e não pode ser vinculada ao funcionário.',
+    identity_inactive: 'A conta corporativa vinculada está inativa.',
+    effective_access_missing: 'A conta não possui acesso corporativo efetivo a esta empresa.',
+  }[employee.blockedReason || ''] || 'A identidade deste funcionário está bloqueada.'
+  return 'Este funcionário não pode ser atribuído como autorizador agora.'
+}
+
+function normalizeEmployeeSearch(value: string): string {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('pt-BR')
+}
+
+function employeeSearchText(employee: EmployeeApproverDirectoryItem): string {
+  return normalizeEmployeeSearch([
+    employee.name,
+    employee.registrationCode,
+    employee.department,
+    employee.costCenter,
+  ].filter(Boolean).join(' '))
+}
+
+async function loadEmployeeApproverDirectory(companyId: string): Promise<EmployeeApproverDirectoryItem[]> {
+  const response = await fetch(`/api/companies/${encodeURIComponent(companyId)}/approvers`, { cache: 'no-store' })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok || payload?.ok === false || !Array.isArray(payload?.employees)) {
+    throw new Error(payload?.error || 'Não foi possível carregar os funcionários elegíveis para autorização.')
+  }
+
+  return payload.employees.flatMap((raw: unknown): EmployeeApproverDirectoryItem[] => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+    const item = raw as Record<string, unknown>
+    const employeeId = typeof item.employeeId === 'string' ? item.employeeId : ''
+    const name = typeof item.name === 'string' ? item.name.trim() : ''
+    if (!employeeId || !name) return []
+    return [{
+      employeeId,
+      name,
+      registrationCode: nullableDirectoryString(item.registrationCode),
+      department: nullableDirectoryString(item.department),
+      costCenter: nullableDirectoryString(item.costCenter),
+      identityStatus: typeof item.identityStatus === 'string' ? item.identityStatus : 'none',
+      approvalStatus: typeof item.approvalStatus === 'string' ? item.approvalStatus : 'not_assigned',
+      membershipId: nullableDirectoryString(item.membershipId),
+      canEnterRules: item.canEnterRules === true,
+      hasManagedLink: item.hasManagedLink === true,
+      blockedReason: nullableDirectoryString(item.blockedReason),
+      requiresIdentityConfirmation: item.requiresIdentityConfirmation === true,
+      invitationState: parseEmployeeInvitationState(item.invitationState),
+      inviteExpiresAt: nullableDirectoryString(item.inviteExpiresAt),
+      resendable: item.resendable === true,
+      reassignable: item.reassignable === true,
+    }]
+  })
+}
+
+function parseEmployeeInvitationState(value: unknown): EmployeeApproverDirectoryItem['invitationState'] {
+  return value === 'sent' || value === 'delivery_pending' ? value : 'not_required'
+}
+
+function nullableDirectoryString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
 async function loadApprovalCandidates(companyId: string): Promise<ApprovalCandidateItem[]> {

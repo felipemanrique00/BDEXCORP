@@ -26,6 +26,7 @@ import {
 import { offlinePolicyCoverageFingerprint } from '@/lib/offline-travel/policy-coverage'
 import { createTrustedApprovalInstance } from '@/lib/server/approval-service'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
+import { resolveCompanyPortalResourceCompanyId } from '@/lib/server/company-portal-scope-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import { evaluateAndPersistPoliciesInTransaction } from '@/lib/server/policy-service'
 import { resolvePolicyApprovalWorkflowCode } from '@/lib/server/policy-approval-workflow'
@@ -454,7 +455,7 @@ export async function listOfflineHotelQuotes(
     )
     const demand = demandResult.rows[0]
     if (!demand) throw new TravelGovernanceError('TRAVEL_DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
-    await requireCompanyAccess(principal, demand.company_id, 'ver_reservas')
+    resolveCompanyPortalResourceCompanyId(principal, demand.company_id, 'ver_reservas')
     await assertRequesterOwnsDemand(client, principal, demand)
     const rows = await loadOfflineHotelQuoteRows(client, principal.tenantId, normalizedDemandId)
     return {
@@ -1104,7 +1105,7 @@ async function prepareSelection(
 ): Promise<SelectionPreparation | { replay: OfflineQuoteSelectionResult }> {
   return withTenantTransaction(principal.tenantId, async (client) => {
     const demand = await loadQuoteDemand(client, principal.tenantId, input.demandId, true)
-    await requireCompanyAccess(principal, demand.company_id, 'criar_demandas')
+    resolveCompanyPortalResourceCompanyId(principal, demand.company_id, 'criar_demandas')
     const actor = await authorizeSelectionActor(client, principal, demand)
     const existingByKey = await client.query<ExistingSelectionRow>(
       `select id, demand_id, quote_id, option_id, status, snapshot_hash,

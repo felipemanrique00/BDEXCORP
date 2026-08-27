@@ -21,6 +21,7 @@ import {
 } from '@/lib/offline-travel/services/air/schema'
 import { sha256 } from '@/lib/policy'
 import { requireCompanyAccess } from '@/lib/server/corporate-access-service'
+import { resolveCompanyPortalResourceCompanyId } from '@/lib/server/company-portal-scope-service'
 import { withTenantTransaction } from '@/lib/server/database'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import {
@@ -281,7 +282,7 @@ export async function listOfflineAirQuotes(
     if (!demand) {
       throw new TravelGovernanceError('TRAVEL_DEMAND_NOT_FOUND', 'Demanda nao encontrada.', 404)
     }
-    await requireCompanyAccess(principal, demand.company_id, 'ver_reservas')
+    resolveCompanyPortalResourceCompanyId(principal, demand.company_id, 'ver_reservas')
     await assertRequesterOwnsDemand(client, principal, demand)
     const [rows, passengers] = await Promise.all([
       loadAirQuoteRows(client, principal.tenantId, normalizedDemandId),

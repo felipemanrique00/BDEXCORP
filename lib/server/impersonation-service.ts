@@ -2,6 +2,7 @@ import 'server-only'
 
 import { loadPrincipalForAuthenticatedUser } from '@/lib/server/auth-service'
 import { mergePermissions } from '@/lib/corporate-access'
+import { allowedImpersonationActions } from '@/lib/impersonation-action-policy'
 import { writeAuditEvent, writeAuditEventInTransaction } from '@/lib/server/audit-log'
 import { withTenantTransaction } from '@/lib/server/database'
 import { isLocalMfaBypassEnabled } from '@/lib/server/environment'
@@ -24,6 +25,7 @@ export interface ImpersonationSecurityMetadata {
 
 export interface StartImpersonationInput {
   targetMembershipId: string
+  companyId: string
   mode: SupportImpersonationMode
   reason: string
   reference?: string | null
@@ -39,7 +41,11 @@ export interface ImpersonationTarget {
   companyId: string | null
   companyIds: string[]
   groupIds: string[]
-  allowedActions: string[]
+  companyScopes: Array<{
+    companyId: string
+    label: string
+    allowedActions: string[]
+  }>
 }
 
 interface TargetIdentityRow {
@@ -129,11 +135,11 @@ export async function resolveActiveImpersonation(
     return actor
   }
   const currentCompanyIds = new Set(representationCompanyScope(actor, target))
-  if (!row.company_ids.length || row.company_ids.some((companyId) => !currentCompanyIds.has(companyId))) {
+  if (row.company_ids.length !== 1 || row.company_ids.some((companyId) => !currentCompanyIds.has(companyId))) {
     await expireImpersonation(actor, row, 'company_scope_changed')
     return actor
   }
-  const currentActions = new Set(actionsForTarget(target, row.company_ids))
+  const currentActions = new Set<string>(allowedImpersonationActions(actor, target, row.company_ids))
   if (row.allowed_actions.some((action) => !currentActions.has(action))) {
     await expireImpersonation(actor, row, 'action_scope_changed')
     return actor
@@ -261,7 +267,7 @@ export async function listImpersonationTargets(
     const target = await loadPrincipalForAuthenticatedUser(row.user_id, principal.tenantId, row.membership_id)
     if (!target) return null
     const companyIds = representationCompanyScope(principal, target)
-    return companyIds.length ? toTarget(target, companyIds) : null
+    return companyIds.length ? toTarget(principal, target, companyIds) : null
   }))
   return hydrated.filter((target): target is ImpersonationTarget => Boolean(target)).slice(0, safeLimit)
 }
@@ -298,12 +304,24 @@ export async function startImpersonation(
     await auditDenied(principal, metadata, 'target_invalid')
     throw new ImpersonationError('Usuario corporativo alvo indisponivel.', 'IMPERSONATION_TARGET_INVALID', 404)
   }
-  const companyIds = representationCompanyScope(principal, target)
-  if (!companyIds.length) {
+  const sharedCompanyIds = representationCompanyScope(principal, target)
+  if (!sharedCompanyIds.length) {
     await auditDenied(principal, metadata, 'target_company_scope_empty')
     throw new ImpersonationError('O alvo nao compartilha empresas autorizadas com o operador.', 'IMPERSONATION_COMPANY_SCOPE_DENIED', 403)
   }
-  const allowedActions = input.mode === 'operate' ? actionsForTarget(target, companyIds) : []
+  const selectedCompanyId = typeof input.companyId === 'string' ? input.companyId.trim() : ''
+  if (!selectedCompanyId || !sharedCompanyIds.includes(selectedCompanyId)) {
+    await auditDenied(principal, metadata, 'selected_company_scope_denied')
+    throw new ImpersonationError(
+      'A empresa selecionada nao pertence ao escopo compartilhado com o usuario alvo.',
+      'IMPERSONATION_COMPANY_SCOPE_DENIED',
+      403,
+    )
+  }
+  const companyIds = [selectedCompanyId]
+  const allowedActions = input.mode === 'operate'
+    ? allowedImpersonationActions(principal, target, companyIds)
+    : []
   if (input.mode === 'operate' && !allowedActions.length) {
     await auditDenied(principal, metadata, 'target_has_no_operational_actions')
     throw new ImpersonationError(
@@ -340,7 +358,7 @@ export async function startImpersonation(
       action: 'auth.impersonation.start', result: 'success', tenantId: principal.tenantId,
       actorUserId: principal.user.id, requestId: metadata.requestId, entityType: 'support_impersonation', entityId: id,
       ipAddress: metadata.ipAddress, userAgent: metadata.userAgent,
-      metadata: { targetUserId: target.user.id, targetMembershipId: target.membershipId, mode: input.mode, reference, reason },
+      metadata: { targetUserId: target.user.id, targetMembershipId: target.membershipId, companyId: selectedCompanyId, mode: input.mode, reference, reason },
     })
     return id
   })
@@ -453,31 +471,24 @@ async function loadTargetIdentity(principal: RequestPrincipal, membershipId: str
   })
 }
 
-function actionsForTarget(target: RequestPrincipal, companyIds: string[]): string[] {
-  const allowedCompanies = new Set(companyIds)
-  const permissionSets = target.corporateAccess?.companies
-    .filter((company) => allowedCompanies.has(company.companyId))
-    .map((company) => company.permissions) || []
-  const hasPermission = (permission: 'criar_demandas' | 'decidir_aprovacoes') => permissionSets.length
-    ? permissionSets.some((permissions) => permissions[permission] === true)
-    : target.user.permissoes?.[permission] === true
-  return [
-    hasPermission('criar_demandas') ? 'demand.create' : null,
-    hasPermission('criar_demandas') ? 'demand.correct' : null,
-    hasPermission('criar_demandas') ? 'quote.select' : null,
-    hasPermission('decidir_aprovacoes') ? 'approval.decide' : null,
-  ].filter((action): action is string => Boolean(action))
-}
-
-function toTarget(target: RequestPrincipal, companyIds: string[]): ImpersonationTarget {
+function toTarget(actor: RequestPrincipal, target: RequestPrincipal, companyIds: string[]): ImpersonationTarget {
   return {
     userId: target.user.id, membershipId: target.membershipId, name: target.user.name, email: target.user.email,
     roleKey: target.roleKey, corporateProfile: target.user.corporate_profile,
     companyId: companyIds.includes(target.user.company_id || '') ? target.user.company_id : companyIds[0] || null,
     companyIds,
     groupIds: target.corporateAccess?.groupIds || target.user.grupo_ids || [],
-    allowedActions: actionsForTarget(target, companyIds),
+    companyScopes: companyIds.map((companyId) => ({
+      companyId,
+      label: companyScopeLabel(target, companyId),
+      allowedActions: allowedImpersonationActions(actor, target, [companyId]),
+    })),
   }
+}
+
+function companyScopeLabel(target: RequestPrincipal, companyId: string): string {
+  return target.corporateAccess?.companies.find((company) => company.companyId === companyId)?.companyName
+    || `Empresa ${companyId}`
 }
 
 function representationCompanyScope(actor: RequestPrincipal, target: RequestPrincipal): string[] {

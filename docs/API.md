@@ -7,8 +7,8 @@ incluindo metodo, protecao e arquivo, e gerado em:
 
 `docs/FEATURE-INVENTORY.generated.md`
 
-Na ultima geracao existem 132 rotas de API. Este documento descreve contratos
-transversais e grupos funcionais; nao substitui o inventario.
+Este documento descreve contratos transversais e grupos funcionais; nao
+substitui o inventario gerado, que e a fonte para a contagem corrente de rotas.
 
 ## Autenticacao
 
@@ -81,7 +81,9 @@ contexto solicitado. O conjunto oficial vem da sessao e do PostgreSQL.
 | Prefixo | Responsabilidade |
 | --- | --- |
 | `/api/users` | Usuarios, convite e acesso corporativo |
+| `/api/companies/:companyId/approvers` | Diretorio de funcionarios, vinculo de autorizador, convite e remocao da funcao |
 | `/api/me/corporate-contexts` | Contextos efetivos da sessao |
+| `/api/auth/impersonation` | Representacao assistida temporaria e auditada |
 | `/api/demands` | Demandas, OS, importacao, atribuicao e transferencia |
 | `/api/approvals` | Workflows, instancias, decisoes, delegacoes e SLA |
 | `/api/policies` | Politicas, versoes, publicacao, simulacao e templates |
@@ -105,6 +107,186 @@ nao amplia esse conjunto.
 APIs administrativas de usuario permitem consultar e atualizar grants. A
 atualizacao usa transacao, preserva grants fora do escopo administrativo do ator
 e impede elevacao de privilegio.
+
+## Autorizadores do diretorio de funcionarios
+
+`/api/companies/:companyId/approvers` usa sempre o tenant da sessao e o escopo
+da empresa recalculado no servidor. As respostas possuem
+`Cache-Control: no-store, private`.
+
+### Listar
+
+`GET /api/companies/:companyId/approvers` exige `ver_funcionarios` na empresa e
+retorna `employees`. A lista contem somente os campos necessarios para a tela:
+
+```json
+{
+  "ok": true,
+  "employees": [
+    {
+      "employeeId": "employee-id",
+      "name": "Nome da pessoa",
+      "registrationCode": "M-123",
+      "department": "Financeiro",
+      "costCenter": "CC-100",
+      "identityStatus": "active",
+      "approvalStatus": "active",
+      "membershipId": "membership-uuid",
+      "hasManagedLink": true,
+      "reassignable": false,
+      "canEnterRules": true,
+      "blockedReason": null,
+      "requiresIdentityConfirmation": false,
+      "invitationState": "not_required",
+      "inviteExpiresAt": null,
+      "resendable": false
+    }
+  ]
+}
+```
+
+O contrato nao devolve e-mail, documento ou telefone do funcionario nessa
+listagem. `canEnterRules=true` e a condicao autoritativa para oferecer a pessoa
+na matriz.
+
+### Atribuir
+
+`POST /api/companies/:companyId/approvers` exige simultaneamente
+`gerenciar_usuarios` e `gerenciar_vinculos_acesso` na empresa.
+
+```json
+{
+  "employeeId": "employee-id"
+}
+```
+
+O corpo e estrito. Nao aceita nome, e-mail, senha, perfil ou permissoes livres.
+Como esta e uma operacao administrativa dedicada, o ator precisa possuir
+simultaneamente `gerenciar_usuarios` e `gerenciar_vinculos_acesso` na empresa.
+Ele nao precisa ser autorizador nem possuir `decidir_aprovacoes`; a capacidade
+de decisao continua vinculada exclusivamente ao funcionario escolhido e e
+auditada separadamente.
+Se uma conta corporativa preexistente precisar ser associada, a primeira chamada
+retorna `409 EMPLOYEE_AUTHORIZER_IDENTITY_CONFIRMATION_REQUIRED` com apenas:
+
+```json
+{
+  "ok": false,
+  "code": "EMPLOYEE_AUTHORIZER_IDENTITY_CONFIRMATION_REQUIRED",
+  "candidate": {
+    "membershipId": "membership-uuid",
+    "name": "Nome da conta"
+  }
+}
+```
+
+Depois da confirmacao visual, repita com `expectedMembershipId`. O servidor
+revalida empresa, funcionario, e-mail, identidade, autoatribuicao e escopo; o ID
+confirmado nao ignora essas verificacoes.
+
+Sucesso retorna `201` quando cria a atribuicao ou `200` quando reutiliza/reativa:
+
+```json
+{
+  "ok": true,
+  "authorizer": {
+    "employeeId": "employee-id",
+    "name": "Nome da pessoa",
+    "identityStatus": "invited",
+    "approvalStatus": "pending_activation",
+    "canEnterRules": false,
+    "hasManagedLink": true,
+    "invitationState": "sent",
+    "inviteExpiresAt": "2026-08-30T12:00:00.000Z",
+    "resendable": true,
+    "reassignable": false
+  },
+  "invitation": { "state": "sent" }
+}
+```
+
+`invitation.state` pode ser `not_required`, `sent` ou `delivery_pending`.
+`delivery_pending` em uma resposta `2xx` confirma a atribuicao local, nao a
+entrega do e-mail; o autorizador continua indisponivel para regras ate aceitar o
+convite.
+
+### Reenviar convite
+
+Use o mesmo `POST` para uma atribuicao pendente:
+
+```json
+{
+  "employeeId": "employee-id",
+  "action": "resend_invite"
+}
+```
+
+O reenvio expira convites nao aceitos anteriores, cria um token de 72 horas e
+reatribui o novo convite ao vinculo pendente. A resposta informa novamente
+`sent` ou `delivery_pending`.
+
+Um vinculo historico revogado que volte a satisfazer todos os requisitos pode
+ser retornado com `reassignable: true`. Nesse caso, uma nova atribuicao envia o
+`membershipId` ja confirmado em `expectedMembershipId`; identidades inativas,
+internas, ambiguas ou com e-mail divergente nunca sao reativadas implicitamente.
+
+### Remover a funcao
+
+`DELETE /api/companies/:companyId/approvers`, com corpo estrito
+`{"employeeId":"employee-id"}`, remove somente a funcao de autorizador. Login,
+perfil de solicitante e demais acessos corporativos sao preservados. O endpoint
+retorna `409 EMPLOYEE_AUTHORIZER_PENDING_ASSIGNMENTS` se houver aprovacoes
+pendentes que precisam ser reatribuidas ou delegadas.
+
+## Representacao assistida da agencia
+
+Os endpoints `/api/auth/impersonation/**` aceitam como ator somente papeis
+internos elegiveis (`tenant_admin`, `supervisor`, `agent` ou `operator`) com
+`gerenciar_personificacoes` e MFA confirmado nos ultimos 15 minutos.
+
+- `GET /api/auth/impersonation/targets?q=...&limit=20`: lista usuarios
+  corporativos compartilhados. Cada item contem `companyScopes` com
+  `companyId`, rotulo e `allowedActions` calculadas para aquela empresa.
+- `POST /api/auth/impersonation/start`: inicia uma representacao.
+- `GET /api/auth/impersonation/current`: retorna ator, representacao atual e
+  `canStartRepresentation`.
+- `POST /api/auth/impersonation/stop`: encerra a representacao; e permitido
+  mesmo durante o contexto representado.
+
+Corpo estrito de inicio:
+
+```json
+{
+  "targetMembershipId": "membership-uuid",
+  "companyId": "company-id",
+  "mode": "operate",
+  "reason": "Atendimento solicitado pelo canal corporativo",
+  "reference": "chamado-8452"
+}
+```
+
+`companyId` e obrigatorio e precisa pertencer a intersecao de empresas do ator e
+do alvo. A representacao persistida contem exatamente uma empresa. `reason`
+possui de 10 a 500 caracteres. `reference` possui ate 160 caracteres e e
+obrigatoria no modo `operate`.
+
+Modos:
+
+- `test`: somente leitura; mutacoes sao negadas;
+- `operate`: permite apenas rotas que declaram uma `representationAction`
+  presente em `allowedActions`.
+
+As acoes controladas sao `demand.create`, `demand.correct`, `quote.select` e
+`approval.decide`. Elas sao calculadas pela intersecao de permissoes do ator real
+e do alvo na empresa selecionada. A decisao ainda exige que o alvo seja o
+autorizador atribuido, com vinculo de funcionario e alcada validos. A
+representacao expira em 15 minutos ou antes se escopo/permissoes mudarem.
+
+O registro da representacao guarda ator real, usuario representado, empresa,
+modo, motivo e referencia. As mutacoes assistidas registram o ator real, o alvo e
+o ID da representacao, permitindo correlacionar todo esse contexto na auditoria.
+Uma rota mutavel que nao optou explicitamente pelo acesso assistido permanece
+bloqueada.
 
 ## Concorrencia e idempotencia
 
