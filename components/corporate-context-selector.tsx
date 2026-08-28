@@ -25,6 +25,7 @@ export function CorporateContextSelector({ placement = 'header' }: { placement?:
     selectedCompanyIds,
     selectionLabel,
     canSelectAll,
+    allowArbitrarySelection,
     isChanging,
     selectCompanyIds,
   } = useCorporateContext()
@@ -96,7 +97,10 @@ export function CorporateContextSelector({ placement = 'header' }: { placement?:
     const next = draftSet.has(companyId)
       ? draftCompanyIds.filter((id) => id !== companyId)
       : [...draftCompanyIds, companyId]
-    if (next.length <= 1 || resolvedAccess.tenantWide || isCorporateCompanySelectionAllowed(resolvedAccess, next)) {
+    if (
+      next.length === 0
+      || isCorporateCompanySelectionAllowed(resolvedAccess, next, { allowArbitrarySelection })
+    ) {
       setDraftCompanyIds(next)
       return
     }
@@ -104,7 +108,7 @@ export function CorporateContextSelector({ placement = 'header' }: { placement?:
   }
 
   function toggleGroup(group: CorporateGroupAccessSummary) {
-    const canCombine = resolvedAccess.tenantWide || group.canViewConsolidated
+    const canCombine = allowArbitrarySelection || group.canViewConsolidated
     if (!canCombine) return
     const groupIds = group.companyIds.filter((companyId) => resolvedAccess.companyIds.includes(companyId))
     const allSelected = groupIds.every((companyId) => draftSet.has(companyId))
@@ -113,7 +117,11 @@ export function CorporateContextSelector({ placement = 'header' }: { placement?:
       return
     }
     const combined = [...new Set([...draftCompanyIds, ...groupIds])]
-    setDraftCompanyIds(resolvedAccess.tenantWide || isCorporateCompanySelectionAllowed(resolvedAccess, combined)
+    setDraftCompanyIds(isCorporateCompanySelectionAllowed(
+      resolvedAccess,
+      combined,
+      { allowArbitrarySelection },
+    )
       ? combined
       : groupIds)
   }
@@ -219,7 +227,7 @@ export function CorporateContextSelector({ placement = 'header' }: { placement?:
                 <GroupSelectionRow
                   group={group}
                   selected={draftSet}
-                  canCombine={access.tenantWide || group.canViewConsolidated}
+                  canCombine={allowArbitrarySelection || group.canViewConsolidated}
                   onToggle={() => toggleGroup(group)}
                 />
                 <div className="divide-y divide-bbt-gray-100 dark:divide-slate-800">

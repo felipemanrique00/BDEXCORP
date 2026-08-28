@@ -116,7 +116,7 @@ import {
 } from '@/lib/portal-relational-sync'
 
 type Aba = 'home' | 'empresa' | 'viagens' | 'pedidos' | 'vouchers' | 'financeiro' | 'carteira' | 'relatorios' | 'pegada'
-type EscopoPortal = 'empresa' | 'grupo'
+type EscopoPortal = 'empresa' | 'grupo' | 'global'
 
 const heroBgImage =
   'https://images.unsplash.com/photo-1436491865332-7a61a109cc05?auto=format&fit=crop&w=2000&q=85'
@@ -158,8 +158,8 @@ function montarResumoCarteiraEscopo(empresas: Array<Pick<Empresa, 'id'>>) {
 }
 
 export default function PortalEmpresaPage() {
-  const { context: corporateContext, selectContext, user } = useCorporateContext()
-  const { includesCompany } = useCorporateCompanyScope()
+  const { context: corporateContext, isAllCompaniesSelected, selectAllCompanies, selectContext, user } = useCorporateContext()
+  const { companyIdsList, includesCompany } = useCorporateCompanyScope()
   const isGlobalMaster = canEditGlobal(user)
   const isInternalUser = Boolean(user && userAccessKind(user) === 'internal')
   const canCreateForClient = Boolean(user && canCreateAgencyAssistedDemand({
@@ -183,6 +183,13 @@ export default function PortalEmpresaPage() {
     () => getEmpresasPermitidas(user, empresas, gruposEmpresariais),
     [empresas, gruposEmpresariais, user],
   )
+  const empresaIdsSelecionadas = useMemo(() => new Set(companyIdsList), [companyIdsList])
+  const empresasSelecionadas = useMemo(
+    () => empresasVisiveis.filter((empresa) => (
+      empresaIdsSelecionadas.has(empresa.id) && includesCompany(empresa.id)
+    )),
+    [empresaIdsSelecionadas, empresasVisiveis, includesCompany],
+  )
   const gruposVisiveis = useMemo(
     () => gruposEmpresariais.filter((grupo) => {
       const corporateGroup = user?.corporate_access?.groups.find((access) => access.groupId === grupo.id)
@@ -193,23 +200,32 @@ export default function PortalEmpresaPage() {
   )
 
   useEffect(() => {
-    if (!corporateContext) return
-    if (corporateContext.type === 'group') {
+    if (isInternalUser && isAllCompaniesSelected && companyIdsList.length > 1) {
+      setEscopo('global')
+      setEmpresaId('')
+      setGrupoId('')
+    } else if (corporateContext?.type === 'group') {
       setEscopo('grupo')
       setGrupoId(corporateContext.id)
-    } else {
+      setEmpresaId('')
+    } else if (corporateContext?.type === 'company') {
       setEscopo('empresa')
       setEmpresaId(corporateContext.id)
+      setGrupoId('')
+    } else if (isInternalUser && companyIdsList.length > 1) {
+      setEscopo('global')
+      setEmpresaId('')
+      setGrupoId('')
     }
-  }, [corporateContext])
+  }, [companyIdsList, corporateContext, isAllCompaniesSelected, isInternalUser])
 
   useEffect(() => {
-    if (!empresaId && empresasVisiveis[0]) setEmpresaId(empresasVisiveis[0].id)
-  }, [empresasVisiveis, empresaId])
+    if (escopo === 'empresa' && !empresaId && empresasVisiveis[0]) setEmpresaId(empresasVisiveis[0].id)
+  }, [empresasVisiveis, empresaId, escopo])
 
   useEffect(() => {
-    if (!grupoId && gruposVisiveis[0]) setGrupoId(gruposVisiveis[0].id)
-  }, [gruposVisiveis, grupoId])
+    if (escopo === 'grupo' && !grupoId && gruposVisiveis[0]) setGrupoId(gruposVisiveis[0].id)
+  }, [escopo, gruposVisiveis, grupoId])
 
   useEffect(() => {
     if (escopo === 'grupo' && gruposVisiveis.length === 0) setEscopo('empresa')
@@ -217,43 +233,56 @@ export default function PortalEmpresaPage() {
   }, [empresasVisiveis.length, escopo, gruposVisiveis.length])
 
   useEffect(() => {
-    if (empresaId && !empresasVisiveis.some((empresa) => empresa.id === empresaId)) {
+    if (escopo === 'empresa' && empresaId && !empresasVisiveis.some((empresa) => empresa.id === empresaId)) {
       setEmpresaId(empresasVisiveis[0]?.id || '')
     }
-  }, [empresaId, empresasVisiveis])
+  }, [empresaId, empresasVisiveis, escopo])
 
   useEffect(() => {
-    if (grupoId && !gruposVisiveis.some((grupo) => grupo.id === grupoId)) {
+    if (escopo === 'grupo' && grupoId && !gruposVisiveis.some((grupo) => grupo.id === grupoId)) {
       setGrupoId(gruposVisiveis[0]?.id || '')
     }
-  }, [grupoId, gruposVisiveis])
+  }, [escopo, grupoId, gruposVisiveis])
 
   const grupoSel = gruposEmpresariais.find((grupo) => grupo.id === grupoId)
   const empresasEscopo = useMemo(() => {
-    if (escopo === 'grupo' && grupoId) return getEmpresasDoGrupo(grupoId, empresasVisiveis, gruposEmpresariais)
-    return empresasVisiveis.filter((empresa) => empresa.id === empresaId)
-  }, [empresaId, empresasVisiveis, escopo, grupoId, gruposEmpresariais])
+    if (escopo === 'global') return empresasSelecionadas
+    if (escopo === 'grupo' && grupoId) return getEmpresasDoGrupo(grupoId, empresasSelecionadas, gruposEmpresariais)
+    return empresasSelecionadas.filter((empresa) => empresa.id === empresaId)
+  }, [empresaId, empresasSelecionadas, escopo, grupoId, gruposEmpresariais])
   const empresaIdsEscopo = useMemo(() => new Set(empresasEscopo.map((empresa) => empresa.id)), [empresasEscopo])
   const empresaSel = escopo === 'empresa'
-    ? empresasVisiveis.find((e) => e.id === empresaId)
-    : empresasEscopo[0]
-  const escopoNome = escopo === 'grupo'
-    ? (grupoSel?.nome || 'Grupo empresarial')
-    : (empresaSel?.nome || 'Empresa')
+    ? empresasSelecionadas.find((e) => e.id === empresaId)
+    : undefined
+  const escopoNome = escopo === 'global'
+    ? 'Visão global'
+    : escopo === 'grupo'
+      ? (grupoSel?.nome || 'Grupo empresarial')
+      : (empresaSel?.nome || 'Empresa')
+  const escopoTipoLabel = escopo === 'global'
+    ? 'Visão global'
+    : escopo === 'grupo'
+      ? 'Grupo empresarial'
+      : 'Empresa'
   const funcionariosEmpresa = useMemo(
-    () => funcionarios.filter((funcionario) => empresaIdsEscopo.has(funcionario.company_id)),
-    [empresaIdsEscopo, funcionarios],
+    () => funcionarios.filter((funcionario) => (
+      empresaIdsEscopo.has(funcionario.company_id) && includesCompany(funcionario.company_id, 'ver_funcionarios')
+    )),
+    [empresaIdsEscopo, funcionarios, includesCompany],
   )
   const politicasEmpresa = useMemo(
-    () => politicas.filter((politica) => empresaIdsEscopo.has(politica.company_id)),
-    [empresaIdsEscopo, politicas],
+    () => politicas.filter((politica) => (
+      empresaIdsEscopo.has(politica.company_id) && includesCompany(politica.company_id, 'ver_politicas')
+    )),
+    [empresaIdsEscopo, includesCompany, politicas],
   )
   const solicitantesEmpresa = useMemo(
-    () => empresasEscopo.flatMap((empresa) =>
-      getSolicitantesPorEmpresa(empresa.id).map((solicitante) => ({ ...solicitante, empresa_nome: empresa.nome })),
-    ),
+    () => empresasEscopo
+      .filter((empresa) => includesCompany(empresa.id, 'ver_solicitantes'))
+      .flatMap((empresa) => getSolicitantesPorEmpresa(empresa.id)
+        .map((solicitante) => ({ ...solicitante, empresa_nome: empresa.nome }))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [empresasEscopo, reload],
+    [empresasEscopo, includesCompany, reload],
   )
 
   const solicitanteAtual =
@@ -282,7 +311,8 @@ export default function PortalEmpresaPage() {
   )
   const podeVerPedidos = empresaIdsDemandas.size > 0
   const podeCriarPedido = hasPermission(user, 'criar_demandas') && includesCompany(empresaId, 'criar_demandas') &&
-    (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_criar_demanda) && escopo === 'empresa'
+    (isInternalUser || !solicitanteAtual || solicitanteAtual.pode_criar_demanda) &&
+    escopo === 'empresa' && empresasEscopo.length === 1
   const podeVerVouchers = empresaIdsVouchers.size > 0
   const podeVerFinanceiro = hasPermission(user, 'ver_financeiro') && empresasEscopo.some((empresa) => (
     includesCompany(empresa.id, 'ver_financeiro')
@@ -294,6 +324,10 @@ export default function PortalEmpresaPage() {
       .map((empresa) => empresa.id)),
     [empresasEscopo, includesCompany],
   )
+  useEffect(() => {
+    if (escopo === 'empresa' || aba !== 'carteira') return
+    setAba(podeVerFinanceiro ? 'financeiro' : 'home')
+  }, [aba, escopo, podeVerFinanceiro])
   const empresaIdsFinanceiroKey = [...empresaIdsFinanceiro].sort().join('|')
   const empresaIdsDemandasKey = [...empresaIdsDemandas].sort().join('|')
   const empresaIdsVouchersKey = [...empresaIdsVouchers].sort().join('|')
@@ -564,7 +598,7 @@ export default function PortalEmpresaPage() {
       <AIAssistantFab
         pageContext={`Portal corporativo - ${escopoNome}`}
         dataContext={[
-          `Escopo: ${escopo === 'grupo' ? 'Grupo empresarial' : 'Empresa'} - ${escopoNome}`,
+          `Escopo: ${escopoTipoLabel} - ${escopoNome}`,
           `Empresas no escopo: ${empresasEscopo.length}`,
           `Demandas: ${atendimentos.length}`,
           `Vouchers: ${vouchers.length}`,
@@ -615,6 +649,14 @@ export default function PortalEmpresaPage() {
                     value={escopo}
                     onChange={(e) => {
                       const next = e.target.value as EscopoPortal
+                      if (next === 'global') {
+                        if (selectAllCompanies()) {
+                          setEscopo('global')
+                          setEmpresaId('')
+                          setGrupoId('')
+                        }
+                        return
+                      }
                       setEscopo(next)
                       if (next === 'grupo' && gruposVisiveis[0]) selectContext('group', gruposVisiveis[0].id)
                       if (next === 'empresa' && empresasVisiveis[0]) selectContext('company', empresasVisiveis[0].id)
@@ -623,13 +665,22 @@ export default function PortalEmpresaPage() {
                   >
                     <option value="empresa" className="bg-[#071747]">Empresa</option>
                     {gruposVisiveis.length > 0 && <option value="grupo" className="bg-[#071747]">Grupo</option>}
+                    {isInternalUser && empresasVisiveis.length > 1 && <option value="global" className="bg-[#071747]">Global</option>}
                   </select>
                 </div>
                 <div>
                   <label htmlFor="portal-entity" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-blue-100/60">
                     Visualizando
                   </label>
-                  {escopo === 'grupo' ? (
+                  {escopo === 'global' ? (
+                    <div
+                      id="portal-entity"
+                      role="status"
+                      className="mt-1 flex h-10 w-full items-center rounded-lg border border-white/15 bg-white/10 px-3 text-sm text-white"
+                    >
+                      {empresasEscopo.length} empresa{empresasEscopo.length === 1 ? '' : 's'} selecionada{empresasEscopo.length === 1 ? '' : 's'}
+                    </div>
+                  ) : escopo === 'grupo' ? (
                     <select
                       id="portal-entity"
                       value={grupoId}
@@ -701,7 +752,7 @@ export default function PortalEmpresaPage() {
             )}
             {podeVerFinanceiro && carteira && (
               <button
-                onClick={() => setAba(escopo === 'grupo' ? 'financeiro' : 'carteira')}
+                onClick={() => setAba(escopo === 'empresa' ? 'carteira' : 'financeiro')}
                 className="w-full flex items-center justify-between gap-3 rounded-xl bg-white/8 px-4 py-3 text-white text-sm hover:bg-white/12 transition border border-white/10"
               >
                 <span className="flex items-center gap-2"><Wallet className="w-4 h-4 text-cyan-200" /> Carteira e cartões ({carteira.cartoes?.length || 0})</span>
@@ -711,6 +762,13 @@ export default function PortalEmpresaPage() {
           </div>
         </div>
       </section>
+
+      {escopo === 'global' && (
+        <div role="status" className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-900 dark:border-cyan-900/60 dark:bg-cyan-950/25 dark:text-cyan-100">
+          <span className="font-semibold">Visão global consolidada.</span>{' '}
+          Os indicadores consideram somente as empresas selecionadas e autorizadas. Para criar um pedido ou alterar configurações sem recurso definido, selecione uma empresa específica.
+        </div>
+      )}
 
       {solicitanteBloqueado && (
         <div className="rounded-xl border border-red-300 bg-red-50 dark:bg-red-950/30 dark:border-red-800/50 p-4 flex items-start gap-3">
@@ -733,12 +791,12 @@ export default function PortalEmpresaPage() {
       <div className="flex flex-wrap items-center gap-2 border-b border-bbt-gray-100 dark:border-slate-700 -mt-1">
         {([
           { id: 'home', label: 'Home', icon: Activity, count: undefined as any, hidden: false },
-          { id: 'empresa', label: 'Empresa', icon: Building2, count: undefined as any, hidden: false },
+          { id: 'empresa', label: escopo === 'global' ? 'Visão global' : escopo === 'grupo' ? 'Grupo' : 'Empresa', icon: Building2, count: undefined as any, hidden: false },
           { id: 'viagens', label: 'Minhas viagens', icon: Plane, count: stats.em_campo + stats.proximas7d, hidden: false },
           { id: 'pedidos', label: 'Pedidos', icon: Briefcase, count: stats.pendentes, hidden: !podeVerPedidos },
           { id: 'vouchers', label: 'Vouchers', icon: FileText, count: stats.vouchers_emitidos, hidden: !podeVerVouchers },
           { id: 'financeiro', label: 'Financeiro', icon: Wallet, count: undefined as any, hidden: !podeVerFinanceiro },
-          { id: 'carteira', label: 'Carteira digital', icon: CreditCard, count: carteira?.cartoes?.length || undefined, hidden: !podeVerFinanceiro || escopo === 'grupo' },
+          { id: 'carteira', label: 'Carteira digital', icon: CreditCard, count: carteira?.cartoes?.length || undefined, hidden: !podeVerFinanceiro || escopo !== 'empresa' },
           { id: 'relatorios', label: 'Relatórios', icon: BarChart3, count: undefined as any, hidden: !podeVerFinanceiro },
           { id: 'pegada', label: 'Pegada ESG', icon: Leaf, count: undefined as any, hidden: false },
         ])
@@ -785,14 +843,16 @@ export default function PortalEmpresaPage() {
           empresasNoEscopo={empresasEscopo.length}
           podeCriarPedido={podeCriarPedido}
           podeVerFinanceiro={podeVerFinanceiro}
-          onOpenCarteira={() => setAba(escopo === 'grupo' ? 'financeiro' : 'carteira')}
+          onOpenCarteira={() => setAba(escopo === 'empresa' ? 'carteira' : 'financeiro')}
           onOpenPedidos={() => setAba('pedidos')}
         />
       )}
       {aba === 'empresa' && (
-        escopo === 'grupo' ? (
+        escopo !== 'empresa' ? (
           <GrupoTab
             grupo={grupoSel}
+            isGlobalScope={escopo === 'global'}
+            canViewCompanyDetails={(companyId: string) => includesCompany(companyId, 'ver_empresas')}
             empresas={empresasEscopo}
             solicitantes={solicitantesEmpresa}
             funcionarios={funcionariosEmpresa}
@@ -832,7 +892,7 @@ export default function PortalEmpresaPage() {
         />
       )}
       {aba === 'vouchers' && podeVerVouchers && <VouchersTab vouchers={vouchers} />}
-      {aba === 'financeiro' && podeVerFinanceiro && <FinanceiroTab carteira={carteira} lancamentos={lancamentos} isGroupScope={escopo === 'grupo'} onOpenCarteira={() => setAba('carteira')} />}
+      {aba === 'financeiro' && podeVerFinanceiro && <FinanceiroTab carteira={carteira} lancamentos={lancamentos} isGroupScope={escopo !== 'empresa'} onOpenCarteira={() => setAba('carteira')} />}
       {aba === 'carteira' && podeVerFinanceiro && escopo === 'empresa' && (
         <CarteiraTab
           empresaId={empresaId}
@@ -891,23 +951,33 @@ function HomeTab({
       <div className="grid gap-3 lg:grid-cols-3">
         <button
           type="button"
+          disabled={!podeCriarPedido}
           onClick={podeCriarPedido ? onOpenPedidos : undefined}
-          className="bbt-card p-4 text-left hover:border-bbt-accent hover:shadow-md transition"
+          className="bbt-card p-4 text-left transition enabled:hover:border-bbt-accent enabled:hover:shadow-md disabled:cursor-not-allowed disabled:opacity-75"
         >
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-xl bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 flex items-center justify-center">
               {podeCriarPedido ? <Plus className="w-5 h-5" /> : <Building2 className="w-5 h-5" />}
             </div>
             <div>
-              <div className="font-semibold text-bbt-primary dark:text-white">{podeCriarPedido ? 'Abrir pedido' : 'Escopo consolidado'}</div>
-              <div className="text-xs text-slate-500">Solicite viagem, hotel, aéreo, locação ou pacote.</div>
+              <div className="font-semibold text-bbt-primary dark:text-white">
+                {podeCriarPedido ? 'Abrir pedido' : escopo === 'empresa' ? 'Pedidos indisponíveis' : 'Escopo consolidado'}
+              </div>
+              <div className="text-xs text-slate-500">
+                {podeCriarPedido
+                  ? 'Solicite viagem, hotel, aéreo, locação ou pacote.'
+                  : escopo === 'empresa'
+                    ? 'A criação de pedidos não está disponível para este acesso.'
+                    : 'Selecione uma empresa específica para criar um pedido.'}
+              </div>
             </div>
           </div>
         </button>
         <button
           type="button"
-          onClick={onOpenCarteira}
-          className="bbt-card p-4 text-left hover:border-bbt-accent hover:shadow-md transition"
+          disabled={!podeVerFinanceiro}
+          onClick={podeVerFinanceiro ? onOpenCarteira : undefined}
+          className="bbt-card p-4 text-left transition enabled:hover:border-bbt-accent enabled:hover:shadow-md disabled:cursor-not-allowed disabled:opacity-75"
         >
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-xl bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 flex items-center justify-center">
@@ -947,7 +1017,7 @@ function HomeTab({
                 <BarChart3 className="h-4 w-4 text-bbt-accent" />
                 Gastos por categoria
               </h3>
-              <span className="text-xs text-slate-500">{escopo === 'grupo' ? `${empresasNoEscopo} empresas` : escopoNome}</span>
+              <span className="text-xs text-slate-500">{escopo !== 'empresa' ? `${empresasNoEscopo} empresas` : escopoNome}</span>
             </div>
             {categoriaData.length === 0 ? (
               <div className="py-12 text-center text-xs text-slate-400">Sem gastos classificados neste escopo.</div>
@@ -1252,7 +1322,7 @@ function EmpresaTab({ empresa, solicitanteAtual, solicitantes, funcionarios, pol
   )
 }
 
-function GrupoTab({ grupo, empresas, solicitantes, funcionarios, politicas, carteira, operacional, podeVerFinanceiro, onOpenFinanceiro }: any) {
+function GrupoTab({ grupo, isGlobalScope, canViewCompanyDetails, empresas, solicitantes, funcionarios, politicas, carteira, operacional, podeVerFinanceiro, onOpenFinanceiro }: any) {
   const centros = Array.from(new Set(funcionarios.map((f: any) => f.centro_custo).filter(Boolean)))
   const solicitantesAtivos = solicitantes.filter((s: any) => s.status === 'ativo')
   const topEmpresas = (operacional?.porEmpresa || []).slice(0, 6)
@@ -1263,28 +1333,43 @@ function GrupoTab({ grupo, empresas, solicitantes, funcionarios, politicas, cart
         <div className="bbt-card p-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <p className="bbt-section-label">Grupo empresarial</p>
-              <h2 className="mt-1 text-xl font-bold text-bbt-primary dark:text-white">{grupo?.nome || 'Grupo consolidado'}</h2>
+              <p className="bbt-section-label">{isGlobalScope ? 'Visão global' : 'Grupo empresarial'}</p>
+              <h2 className="mt-1 text-xl font-bold text-bbt-primary dark:text-white">
+                {isGlobalScope ? 'Empresas selecionadas' : (grupo?.nome || 'Grupo consolidado')}
+              </h2>
               <p className="mt-1 text-sm text-slate-500">
-                Consolidação de unidades, viajantes, solicitantes, políticas, financeiro e uso operacional.
+                {isGlobalScope
+                  ? 'Consolidação neutra das empresas efetivamente selecionadas e autorizadas para este usuário.'
+                  : 'Consolidação de unidades, viajantes, solicitantes, políticas, financeiro e uso operacional.'}
               </p>
             </div>
             <span className="bbt-badge bg-blue-100 text-blue-700">{empresas.length} empresa(s)</span>
           </div>
 
           <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <Info label="Código do grupo" value={grupo?.codigo || 'Não informado'} />
-            <Info label="Responsável" value={grupo?.responsavel_nome || 'Não informado'} />
-            <Info label="E-mail" value={grupo?.responsavel_email || 'Não informado'} />
-            <Info label="Escopo" value="Consolidado por empresas vinculadas" />
+            {isGlobalScope ? (
+              <>
+                <Info label="Identidade visual" value="Neutra (sem empresa principal)" />
+                <Info label="Modo" value="Consolidação multiempresa" />
+                <Info label="Empresas" value={String(empresas.length)} />
+                <Info label="Escopo" value="Seleção autorizada atual" />
+              </>
+            ) : (
+              <>
+                <Info label="Código do grupo" value={grupo?.codigo || 'Não informado'} />
+                <Info label="Responsável" value={grupo?.responsavel_nome || 'Não informado'} />
+                <Info label="E-mail" value={grupo?.responsavel_email || 'Não informado'} />
+                <Info label="Escopo" value="Consolidado por empresas vinculadas" />
+              </>
+            )}
           </div>
         </div>
 
         <div className="bbt-card p-5">
-          <p className="bbt-section-label">Governança do grupo</p>
+          <p className="bbt-section-label">{isGlobalScope ? 'Governança do escopo' : 'Governança do grupo'}</p>
           <h3 className="mt-1 font-semibold text-bbt-primary dark:text-white">Indicadores de cadastro</h3>
           <div className="mt-4 space-y-2 text-sm">
-            <PermissionLine label="Empresas vinculadas" enabled={empresas.length > 0} text={String(empresas.length)} />
+            <PermissionLine label={isGlobalScope ? 'Empresas selecionadas' : 'Empresas vinculadas'} enabled={empresas.length > 0} text={String(empresas.length)} />
             <PermissionLine label="Solicitantes ativos" enabled={solicitantesAtivos.length > 0} text={String(solicitantesAtivos.length)} />
             <PermissionLine label="Centros de custo" enabled={centros.length > 0} text={String(centros.length)} />
             <PermissionLine label="Políticas cadastradas" enabled={politicas.length > 0} text={String(politicas.length)} />
@@ -1293,7 +1378,7 @@ function GrupoTab({ grupo, empresas, solicitantes, funcionarios, politicas, cart
       </div>
 
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
-        <KpiCard icon={Building2} label="Empresas" value={String(empresas.length)} sub="No grupo" tone="blue" />
+        <KpiCard icon={Building2} label="Empresas" value={String(empresas.length)} sub={isGlobalScope ? 'Selecionadas' : 'No grupo'} tone="blue" />
         <KpiCard icon={Users} label="Viajantes" value={String(funcionarios.length)} sub={`${centros.length} centro${centros.length === 1 ? '' : 's'} de custo`} tone="green" />
         <KpiCard icon={ShieldCheck} label="Solicitantes" value={String(solicitantesAtivos.length)} sub={`${solicitantes.length} cadastrados`} tone="amber" />
         <KpiCard icon={CreditCard} label="Cartões" value={String(carteira?.cartoes?.length || 0)} sub="Consolidado" tone="blue" hidden={!podeVerFinanceiro} />
@@ -1302,20 +1387,34 @@ function GrupoTab({ grupo, empresas, solicitantes, funcionarios, politicas, cart
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="bbt-card overflow-hidden">
           <div className="border-b border-bbt-gray-100 p-4 dark:border-slate-700">
-            <h3 className="font-bold text-sm text-bbt-primary dark:text-white">Empresas do grupo</h3>
+            <h3 className="font-bold text-sm text-bbt-primary dark:text-white">{isGlobalScope ? 'Empresas selecionadas' : 'Empresas do grupo'}</h3>
           </div>
           <div className="divide-y divide-bbt-gray-100 dark:divide-slate-700">
             {empresas.map((empresa: any) => (
               <div key={empresa.id} className="grid gap-3 p-4 md:grid-cols-[1fr_auto_auto] md:items-center">
                 <div>
                   <div className="font-semibold text-sm text-bbt-primary dark:text-white">{empresa.nome}</div>
-                  <div className="text-xs text-slate-500">{empresa.cnpj || 'CNPJ não informado'} · {empresa.codigo_cliente || 'sem código'}</div>
+                  <div className="text-xs text-slate-500">
+                    {canViewCompanyDetails(empresa.id)
+                      ? `${empresa.cnpj || 'CNPJ não informado'} · ${empresa.codigo_cliente || 'sem código'}`
+                      : 'Dados cadastrais restritos'}
+                  </div>
                 </div>
-                <div className="text-xs text-slate-500">{empresa.responsavel || 'Responsável não informado'}</div>
-                <Link href={`/dashboard/empresas/${empresa.id}`} className="bbt-button-outline py-2 text-xs">Abrir cadastro</Link>
+                {canViewCompanyDetails(empresa.id) ? (
+                  <>
+                    <div className="text-xs text-slate-500">{empresa.responsavel || 'Responsável não informado'}</div>
+                    {isGlobalScope ? (
+                      <div className="text-xs text-slate-400">Selecione a empresa para abrir o cadastro.</div>
+                    ) : (
+                      <Link href={`/dashboard/empresas/${empresa.id}`} className="bbt-button-outline py-2 text-xs">Abrir cadastro</Link>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-xs text-slate-400 md:col-span-2">Cadastro não disponível para este acesso.</div>
+                )}
               </div>
             ))}
-            {empresas.length === 0 && <div className="p-8 text-center text-sm text-slate-400">Nenhuma empresa vinculada.</div>}
+            {empresas.length === 0 && <div className="p-8 text-center text-sm text-slate-400">Nenhuma empresa selecionada.</div>}
           </div>
         </div>
 
@@ -2225,6 +2324,7 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
   const [funcionarioId, setFuncionarioId] = useState('')
   const [funcionarioCodigoRelatorio, setFuncionarioCodigoRelatorio] = useState('')
   const [centroCusto, setCentroCusto] = useState('')
+  const exigeEscopoEspecifico = escopo === 'global'
 
   const atendimentosPeriodo = useMemo(
     () => filtrarPeriodo(atendimentos, inicio, fim),
@@ -2265,12 +2365,14 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
   }, [atendimentosPeriodo, funcionariosEmpresa])
 
   function abrirRelatorioEmpresa() {
+    if (exigeEscopoEspecifico) return toast.error('Selecione uma empresa ou um grupo para gerar este relatório.')
     const url = escopo === 'grupo'
       ? `/relatorios/grupo?grupo=${grupoId}&inicio=${inicio}&fim=${fim}&visao=cliente`
       : `/relatorios/empresa?empresa=${empresaId}&inicio=${inicio}&fim=${fim}&visao=cliente`
     window.open(url, '_blank')
   }
   function abrirRelatorioFuncionario() {
+    if (exigeEscopoEspecifico) return toast.error('Selecione uma empresa para gerar este relatório.')
     const funcionario = funcionarioId
       ? funcionariosEmpresa.find((item) => item.id === funcionarioId)
       : encontrarFuncionarioPorCodigo(
@@ -2280,6 +2382,7 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
         )
     if (!funcionario) return toast.error('Informe um ID válido ou selecione um funcionário.')
     const empresaDoFuncionario = funcionario?.company_id || empresaId
+    if (!empresaDoFuncionario) return toast.error('O funcionário selecionado não possui uma empresa vinculada.')
     window.open(`/relatorios/funcionario?empresa=${empresaDoFuncionario}&funcionario=${funcionario.id}&inicio=${inicio}&fim=${fim}&visao=cliente`, '_blank')
   }
   function selecionarFuncionarioRelatorioPorCodigo(codigo: string) {
@@ -2297,15 +2400,18 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
     setFuncionarioCodigoRelatorio(funcionario?.codigo_identificacao || '')
   }
   function abrirRelatorioCentroCusto() {
+    if (exigeEscopoEspecifico) return toast.error('Selecione uma empresa ou um grupo para gerar este relatório.')
     if (!centroCusto) return toast.error('Selecione um centro de custo.')
     const escopoParam = escopo === 'grupo' ? `grupo=${grupoId}` : `empresa=${empresaId}`
     window.open(`/relatorios/centro-custo?${escopoParam}&centro=${encodeURIComponent(centroCusto)}&inicio=${inicio}&fim=${fim}&visao=cliente`, '_blank')
   }
   function abrirRelatorioAereo() {
+    if (exigeEscopoEspecifico) return toast.error('Selecione uma empresa ou um grupo para gerar este relatório.')
     const escopoParam = escopo === 'grupo' ? `grupo=${grupoId}` : `empresa=${empresaId}`
     window.open(`/relatorios/aereo?${escopoParam}&inicio=${inicio}&fim=${fim}&visao=cliente`, '_blank')
   }
   function abrirDashboardExecutivo() {
+    if (exigeEscopoEspecifico) return toast.error('Selecione uma empresa ou um grupo para gerar este relatório.')
     const escopoParam = escopo === 'grupo' ? `grupo=${grupoId}` : `empresa=${empresaId}`
     window.open(`/relatorios/dashboard?${escopoParam}&inicio=${inicio}&fim=${fim}&visao=cliente`, '_blank')
   }
@@ -2318,7 +2424,9 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
             <p className="bbt-section-label">Relatórios corporativos</p>
             <h3 className="mt-1 font-bold text-bbt-primary dark:text-white">{empresaNome}</h3>
             <p className="mt-1 text-sm text-slate-500">
-              Relatórios de cliente mostram somente valor final, composição de gastos e economia registrada.
+              {exigeEscopoEspecifico
+                ? `Indicadores consolidados de ${empresasEscopo.length} empresas. Selecione uma empresa ou grupo para gerar arquivos externos.`
+                : 'Relatórios de cliente mostram somente valor final, composição de gastos e economia registrada.'}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -2340,10 +2448,12 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
         <div className="bbt-card p-5">
           <div className="flex h-full flex-col">
             <div className="flex-1">
-              <h4 className="font-bold text-bbt-primary dark:text-white">{escopo === 'grupo' ? 'Relatório consolidado do grupo' : 'Relatório geral da empresa'}</h4>
+              <h4 className="font-bold text-bbt-primary dark:text-white">
+                {escopo === 'global' ? 'Relatório consolidado global' : escopo === 'grupo' ? 'Relatório consolidado do grupo' : 'Relatório geral da empresa'}
+              </h4>
               <p className="mt-1 text-xs text-slate-500">Resumo por categoria, status, base detalhada e economia.</p>
             </div>
-            <button onClick={abrirRelatorioEmpresa} className="bbt-button-primary mt-4 w-full">
+            <button disabled={exigeEscopoEspecifico} onClick={abrirRelatorioEmpresa} className="bbt-button-primary mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50">
               <Download className="w-4 h-4" /> Gerar relatório
             </button>
           </div>
@@ -2355,7 +2465,7 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
               <h4 className="font-bold text-bbt-primary dark:text-white">Dashboard executivo</h4>
               <p className="mt-1 text-xs text-slate-500">Evolução mensal, mapa, rankings, filtros e detalhes em formato interativo.</p>
             </div>
-            <button onClick={abrirDashboardExecutivo} className="bbt-button-primary mt-4 w-full">
+            <button disabled={exigeEscopoEspecifico} onClick={abrirDashboardExecutivo} className="bbt-button-primary mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50">
               <LayoutDashboard className="w-4 h-4" /> Gerar dashboard
             </button>
           </div>
@@ -2367,7 +2477,7 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
               <h4 className="font-bold text-bbt-primary dark:text-white">Relatório aéreo executivo</h4>
               <p className="mt-1 text-xs text-slate-500">Mapa, top rotas, companhias, tipo de trecho e base detalhada de passagens.</p>
             </div>
-            <button onClick={abrirRelatorioAereo} className="bbt-button-primary mt-4 w-full">
+            <button disabled={exigeEscopoEspecifico} onClick={abrirRelatorioAereo} className="bbt-button-primary mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50">
               <Plane className="w-4 h-4" /> Gerar aéreo
             </button>
           </div>
@@ -2395,7 +2505,7 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
                 ))}
               </select>
             </div>
-            <button onClick={abrirRelatorioFuncionario} className="bbt-button-primary mt-4 w-full">
+            <button disabled={exigeEscopoEspecifico} onClick={abrirRelatorioFuncionario} className="bbt-button-primary mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50">
               <Download className="w-4 h-4" /> Gerar por funcionário
             </button>
           </div>
@@ -2413,7 +2523,7 @@ function RelatoriosTab({ empresaId, empresaNome, grupoId, escopo, empresasEscopo
                 {centros.map((centro) => <option key={centro} value={centro}>{centro}</option>)}
               </select>
             </div>
-            <button onClick={abrirRelatorioCentroCusto} className="bbt-button-primary mt-4 w-full">
+            <button disabled={exigeEscopoEspecifico} onClick={abrirRelatorioCentroCusto} className="bbt-button-primary mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50">
               <Download className="w-4 h-4" /> Gerar por centro
             </button>
           </div>

@@ -28,7 +28,8 @@ const demandModal = readFileSync(
 
 describe('requester demand governance UI', () => {
   it('derives company visibility from the authoritative dashboard session', () => {
-    expect(requesterPortal).toContain('const { context: corporateContext, selectContext, user } = useCorporateContext()')
+    expect(requesterPortal).toContain('const { context: corporateContext, isAllCompaniesSelected, selectAllCompanies, selectContext, user } = useCorporateContext()')
+    expect(requesterPortal).toContain('const { companyIdsList, includesCompany } = useCorporateCompanyScope()')
     expect(requesterPortal).not.toContain("export default function PortalEmpresaPage() {\n  const user = typeof window !== 'undefined' ? getCurrentUser() : null")
   })
 

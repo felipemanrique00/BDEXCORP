@@ -24,6 +24,7 @@ import {
   flushPendingRemoteStorage,
 } from '@/lib/storage-quota'
 import { clearCachedUserDirectory, hydrateUserDirectory } from '@/lib/user-directory-client'
+import { userAccessKind } from '@/lib/user-access-kind'
 import type { User } from '@/types'
 
 export function DashboardShell({ children, user }: { children: React.ReactNode; user: User }) {
@@ -40,6 +41,10 @@ function DashboardShellContent({ children, user }: { children: React.ReactNode; 
     || pathname.startsWith('/dashboard/portal-empresa-lab/')
   const { representation, loading: loadingRepresentation } = useImpersonation()
   const [sessionUser, setSessionUser] = useState(user)
+  const portalGlobalSelectionEnabled = pathname === '/dashboard/portal-empresa'
+    && !loadingRepresentation
+    && !representation
+    && userAccessKind(sessionUser) === 'internal'
   const sessionUserRef = useRef(user)
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false)
   const [hydratedPath, setHydratedPath] = useState<string | null>(null)
@@ -122,8 +127,10 @@ function DashboardShellContent({ children, user }: { children: React.ReactNode; 
 
   return (
     <CorporateContextProvider
+      key={portalGlobalSelectionEnabled ? 'portal-global' : 'standard'}
       user={sessionUser}
       persistContextSelection={!loadingRepresentation && !representation}
+      allowArbitrarySelection={portalGlobalSelectionEnabled}
     >
       <EffectiveBrandingProvider>
         <div

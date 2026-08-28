@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useStore } from '@/lib/store'
 import { AI_NAME, AI_SHORT_NAME } from '@/lib/branding'
@@ -38,6 +38,7 @@ import { getAssistantSettingsClient } from '@/lib/assistant-settings-client'
 import { prepareAiActionProposalClient } from '@/lib/ai-action-client'
 import type { AiActionProposal } from '@/lib/ai-actions'
 import { AiActionProposalCard } from '@/components/ai/ai-action-proposal-card'
+import { useCorporateCompanyScope } from '@/components/corporate-context-provider'
 
 interface QuickMsg {
   id: string
@@ -57,6 +58,39 @@ const SUGESTOES = [
 
 export function QuickAIPopup() {
   const { empresas, funcionarios, hoteis, politicas } = useStore()
+  const { companyIdsList, includesCompany } = useCorporateCompanyScope()
+  const companyIdsEscopoIA = useMemo(
+    () => companyIdsList.filter((companyId) => includesCompany(companyId, 'usar_ia')),
+    [companyIdsList, includesCompany],
+  )
+  const demandCompanyIdsEscopoIA = useMemo(
+    () => companyIdsEscopoIA.filter((companyId) => includesCompany(companyId, 'ver_demandas')),
+    [companyIdsEscopoIA, includesCompany],
+  )
+  const voucherCompanyIdsEscopoIA = useMemo(
+    () => companyIdsEscopoIA.filter((companyId) => includesCompany(companyId, 'ver_vouchers')),
+    [companyIdsEscopoIA, includesCompany],
+  )
+  const empresasEscopoIA = useMemo(
+    () => empresas.filter((empresa) => (
+      includesCompany(empresa.id, 'usar_ia') && includesCompany(empresa.id, 'ver_empresas')
+    )),
+    [empresas, includesCompany],
+  )
+  const funcionariosEscopoIA = useMemo(
+    () => funcionarios.filter((funcionario) => (
+      includesCompany(funcionario.company_id, 'usar_ia')
+      && includesCompany(funcionario.company_id, 'ver_funcionarios')
+    )),
+    [funcionarios, includesCompany],
+  )
+  const politicasEscopoIA = useMemo(
+    () => politicas.filter((politica) => (
+      includesCompany(politica.company_id, 'usar_ia')
+      && includesCompany(politica.company_id, 'ver_politicas')
+    )),
+    [includesCompany, politicas],
+  )
   const user = typeof window !== 'undefined' ? getCurrentUser() : null
   const [open, setOpen] = useState(false)
   const [input, setInput] = useState('')
@@ -162,14 +196,22 @@ export function QuickAIPopup() {
         return
       }
 
-      const ctx = buildSystemContext({ empresas, funcionarios, hoteis, politicas })
+      const ctx = buildSystemContext({
+        empresas: empresasEscopoIA,
+        funcionarios: funcionariosEscopoIA,
+        hoteis,
+        politicas: politicasEscopoIA,
+        companyIds: companyIdsEscopoIA,
+        demandCompanyIds: demandCompanyIdsEscopoIA,
+        voucherCompanyIds: voucherCompanyIdsEscopoIA,
+      })
       const acao = await responderComIASistema(textoParaAcao, ctx, {
         prepareAction:
           iaConfig.permitirCadastrarHoteis || iaConfig.permitirCriarDemandas
             ? prepareAiActionProposalClient
             : undefined,
         currentUser: user ? { id: user.id, name: user.name } : undefined,
-        politicas,
+        politicas: politicasEscopoIA,
         allowInternet: iaConfig.permitirInternet,
       })
       const resposta = acao.handled

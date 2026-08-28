@@ -71,13 +71,23 @@ export function buildSystemContext(params: {
   funcionarios: Funcionario[]
   hoteis: Hotel[]
   politicas?: PoliticaCargo[]
+  /** Fallback compartilhado preservado para chamadores que ainda usam um unico escopo. */
+  companyIds?: string[]
+  demandCompanyIds?: string[]
+  voucherCompanyIds?: string[]
 }): SystemAIContext {
+  const demandCompanyIds = createOptionalCompanyIdSet(params.demandCompanyIds ?? params.companyIds)
+  const voucherCompanyIds = createOptionalCompanyIdSet(params.voucherCompanyIds ?? params.companyIds)
   const base = {
     empresas: params.empresas,
     funcionarios: params.funcionarios,
     hoteis: params.hoteis,
-    atendimentos: typeof window === 'undefined' ? [] : getAllAtendimentos(),
-    vouchers: typeof window === 'undefined' ? [] : getAllVouchersEmitidos(),
+    atendimentos: typeof window === 'undefined'
+      ? []
+      : getAllAtendimentos().filter((atendimento) => includesOptionalCompanyId(demandCompanyIds, atendimento.empresa_id)),
+    vouchers: typeof window === 'undefined'
+      ? []
+      : getAllVouchersEmitidos().filter((voucher) => includesOptionalCompanyId(voucherCompanyIds, voucher.empresa_id)),
     fornecedores: typeof window === 'undefined' ? [] : supplierSummaryForAI(),
     politicas: params.politicas || [],
   }
@@ -85,6 +95,14 @@ export function buildSystemContext(params: {
     ...base,
     unifiedIndex: buildUnifiedIndex(base),
   }
+}
+
+function createOptionalCompanyIdSet(companyIds: string[] | undefined): ReadonlySet<string> | null {
+  return companyIds === undefined ? null : new Set(companyIds)
+}
+
+function includesOptionalCompanyId(companyIds: ReadonlySet<string> | null, companyId: string): boolean {
+  return companyIds === null || companyIds.has(companyId)
 }
 
 export async function responderComIASistema(

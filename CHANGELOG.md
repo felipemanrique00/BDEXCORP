@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.1 - 2026-08-28
+
+### Correções
+
+- Restaurada a seleção `Global` no Portal empresas/Grupos para usuários internos da agência, incluindo empresas de grupos diferentes dentro do escopo efetivamente autorizado.
+- Preservados os contextos explícitos de empresa e grupo, sem ampliar a seleção dos usuários corporativos nem a representação assistida.
+- A visão global usa identidade visual neutra, respeita permissões por empresa e não infere uma empresa para criação de pedidos, carteira ou geração de relatórios externos.
+- A IA rápida passa a usar somente empresas, funcionários, políticas, demandas e vouchers pertencentes à seleção corporativa atual.
+- A seleção global fica restrita à rota do Portal empresas/Grupos e é descartada ao sair dela, evitando que outras telas criem registros em uma empresa ou escopo implícito.
+
+### Implantação
+
+- Versão do pacote: `1.3.1`.
+- Release somente de aplicação; não adiciona migration e mantém o schema em `0087_employee_portal_memberships.sql`.
+
 ## 1.3.0 - 2026-08-27
 
 ### Destaques

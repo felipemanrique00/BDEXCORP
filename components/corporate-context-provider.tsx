@@ -15,12 +15,14 @@ import {
   canSelectAllCompanies,
   contextForCompanySelection,
   corporateSelectionLabel,
+  createCorporateContextViewSelection,
   createCorporateViewSelection,
   defaultCorporateViewSelection,
   reconcileCorporateViewSelection,
   selectedCompanyIdsForSelection,
   type CorporateViewSelection,
 } from '@/lib/corporate-context-selection'
+import { userAccessKind } from '@/lib/user-access-kind'
 import type { CorporateAccessSummary, CorporateContextOption, Permissoes, User } from '@/types'
 
 interface CorporateContextState {
@@ -31,6 +33,7 @@ interface CorporateContextState {
   selectionLabel: string
   isAllCompaniesSelected: boolean
   canSelectAll: boolean
+  allowArbitrarySelection: boolean
   isChanging: boolean
   selectCompanyIds: (companyIds: string[]) => boolean
   selectAllCompanies: () => boolean
@@ -53,17 +56,25 @@ export function CorporateContextProvider({
   children,
   user,
   persistContextSelection = true,
+  allowArbitrarySelection: allowArbitrarySelectionRequested = false,
 }: {
   children: React.ReactNode
   user: User
   persistContextSelection?: boolean
+  allowArbitrarySelection?: boolean
 }) {
+  const allowArbitrarySelection = allowArbitrarySelectionRequested
+    && userAccessKind(user) === 'internal'
+  const selectionOptions = useMemo(
+    () => ({ allowArbitrarySelection }),
+    [allowArbitrarySelection],
+  )
   const [access, setAccess] = useState<CorporateAccessSummary | null>(user.corporate_access || null)
   const [selection, setSelection] = useState<CorporateViewSelection>(
     () => defaultCorporateViewSelection(user.corporate_access),
   )
   const [isChanging, setIsChanging] = useState(false)
-  const ownerKey = `${user.tenant_id || 'tenant'}:${user.id}`
+  const ownerKey = `${user.tenant_id || 'tenant'}:${user.id}:${allowArbitrarySelection ? 'internal' : 'corporate'}`
   const [selectionOwnerKey, setSelectionOwnerKey] = useState(ownerKey)
 
   useEffect(() => {
@@ -71,58 +82,65 @@ export function CorporateContextProvider({
     setAccess(nextAccess)
     setSelection((current) => (
       selectionOwnerKey === ownerKey
-        ? reconcileCorporateViewSelection(nextAccess, current)
+        ? reconcileCorporateViewSelection(nextAccess, current, selectionOptions)
         : defaultCorporateViewSelection(nextAccess)
     ))
     if (selectionOwnerKey !== ownerKey) setSelectionOwnerKey(ownerKey)
-  }, [ownerKey, selectionOwnerKey, user.corporate_access])
+  }, [ownerKey, selectionOptions, selectionOwnerKey, user.corporate_access])
 
   const selectedCompanyIds = useMemo(
-    () => selectedCompanyIdsForSelection(access, selection),
-    [access, selection],
+    () => selectedCompanyIdsForSelection(access, selection, selectionOptions),
+    [access, selection, selectionOptions],
   )
 
   const context = useMemo(
-    () => contextForCompanySelection(access, selectedCompanyIds),
-    [access, selectedCompanyIds],
+    () => (
+      allowArbitrarySelection && selection.mode === 'all' && selectedCompanyIds.length > 1
+        ? null
+        : contextForCompanySelection(access, selectedCompanyIds)
+    ),
+    [access, allowArbitrarySelection, selectedCompanyIds, selection.mode],
   )
   const selectionLabel = useMemo(
-    () => corporateSelectionLabel(access, selectedCompanyIds),
-    [access, selectedCompanyIds],
+    () => corporateSelectionLabel(access, selectedCompanyIds, {
+      selectionMode: selection.mode,
+      context,
+    }),
+    [access, context, selectedCompanyIds, selection.mode],
   )
-  const isAllCompaniesSelected = Boolean(
-    access
-    && selectedCompanyIds.length === access.companyIds.length
-    && access.companyIds.every((companyId) => selectedCompanyIds.includes(companyId)),
-  )
-  const canSelectAll = canSelectAllCompanies(access)
+  const canSelectAll = canSelectAllCompanies(access, selectionOptions)
+  const isAllCompaniesSelected = selection.mode === 'all' && canSelectAll
 
   const notifySelectionChange = useCallback((nextAccess: CorporateAccessSummary | null, nextSelection: CorporateViewSelection) => {
     if (typeof window === 'undefined') return
-    const companyIds = selectedCompanyIdsForSelection(nextAccess, nextSelection)
+    const companyIds = selectedCompanyIdsForSelection(nextAccess, nextSelection, selectionOptions)
     window.dispatchEvent(new CustomEvent(CORPORATE_CONTEXT_CHANGED_EVENT, {
       detail: {
-        context: contextForCompanySelection(nextAccess, companyIds),
+        context: allowArbitrarySelection && nextSelection.mode === 'all' && companyIds.length > 1
+          ? null
+          : contextForCompanySelection(nextAccess, companyIds),
         companyIds,
       },
     }))
-  }, [])
+  }, [allowArbitrarySelection, selectionOptions])
 
   const selectCompanyIds = useCallback((companyIds: string[]): boolean => {
-    const next = createCorporateViewSelection(access, companyIds)
+    const next = createCorporateViewSelection(access, companyIds, selectionOptions)
     if (!next) {
       toast.error(companyIds.length === 0
         ? 'Selecione pelo menos uma empresa.'
-        : 'Esta combinacao de empresas nao possui visao consolidada autorizada.')
+        : allowArbitrarySelection
+          ? 'A selecao contem empresas fora do seu escopo de acesso.'
+          : 'Esta combinacao de empresas nao possui visao consolidada autorizada.')
       return false
     }
     setSelection(next)
     notifySelectionChange(access, next)
     return true
-  }, [access, notifySelectionChange])
+  }, [access, allowArbitrarySelection, notifySelectionChange, selectionOptions])
 
   const selectAllCompanies = useCallback((): boolean => {
-    if (!access || !canSelectAllCompanies(access)) {
+    if (!access || !canSelectAllCompanies(access, selectionOptions)) {
       toast.error('A visao consolidada de todas as empresas nao esta autorizada.')
       return false
     }
@@ -130,7 +148,7 @@ export function CorporateContextProvider({
     setSelection(next)
     notifySelectionChange(access, next)
     return true
-  }, [access, notifySelectionChange])
+  }, [access, notifySelectionChange, selectionOptions])
 
   const refreshAccess = useCallback(async () => {
     const response = await fetch('/api/me/corporate-contexts', { cache: 'no-store' })
@@ -139,18 +157,18 @@ export function CorporateContextProvider({
     const next = payload.access as CorporateAccessSummary
     setAccess(next)
     setSelection((current) => {
-      const reconciled = reconcileCorporateViewSelection(next, current)
+      const reconciled = reconcileCorporateViewSelection(next, current, selectionOptions)
       notifySelectionChange(next, reconciled)
       return reconciled
     })
-  }, [notifySelectionChange])
+  }, [notifySelectionChange, selectionOptions])
 
   const selectContext = useCallback(async (type: 'company' | 'group', id: string) => {
     const next = access?.contexts.find((item) => item.type === type && item.id === id)
     if (!next || isChanging) return
 
     const previousSelection = selection
-    const nextSelection = createCorporateViewSelection(access, next.companyIds)
+    const nextSelection = createCorporateContextViewSelection(access, type, id)
     if (!nextSelection) return
     setIsChanging(true)
     setSelection(nextSelection)
@@ -203,6 +221,7 @@ export function CorporateContextProvider({
       selectionLabel,
       isAllCompaniesSelected,
       canSelectAll,
+      allowArbitrarySelection,
       isChanging,
       selectCompanyIds,
       selectAllCompanies,
