@@ -3,10 +3,12 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { closeDatabasePool } from '@/lib/server/database'
+import { createSession } from '@/lib/server/auth-service'
 import {
   beginMfaLogin,
   MfaError,
   startMfaEnrollment,
+  stepUpMfaSession,
   verifyMfaChallenge,
 } from '@/lib/server/mfa-service'
 import { hashPassword } from '@/lib/security/password'
@@ -29,6 +31,8 @@ describeWithDatabase('PostgreSQL administrative MFA', () => {
   const planKey = `mfa-${randomUUID()}`
   const principal = principalFor(tenantId, userId, membershipId)
   let firstRecoveryCode = ''
+  let secondRecoveryCode = ''
+  let enrollmentSecret = ''
   let enrollmentTotpCode = ''
   let methodId = ''
 
@@ -103,12 +107,14 @@ describeWithDatabase('PostgreSQL administrative MFA', () => {
     expect(enrollment.secret).toMatch(/^[A-Z2-7]{32}$/)
     expect(enrollment.provisioningUri).toContain('otpauth://totp/')
 
+    enrollmentSecret = enrollment.secret
     enrollmentTotpCode = generateTotp(enrollment.secret)
     const verification = await verifyMfaChallenge(requirement.challengeToken, enrollmentTotpCode)
     expect(verification.principal.user.id).toBe(userId)
     expect(verification.method).toBe('totp')
     expect(verification.recoveryCodes).toHaveLength(10)
     firstRecoveryCode = verification.recoveryCodes![0]
+    secondRecoveryCode = verification.recoveryCodes![1]
 
     const method = await tenantTransaction(pool, tenantId, (client) => client.query(
       `select id, status, secret_ciphertext, last_used_step
@@ -145,6 +151,67 @@ describeWithDatabase('PostgreSQL administrative MFA', () => {
       [tenantId, methodId],
     ))
     expect(remaining.rows[0].count).toBe(9)
+  })
+
+  it('steps up only the authenticated session and rejects TOTP and recovery-code replay', async () => {
+    const totpSession = await createSession(principal, { userAgent: 'mfa-step-up-totp' })
+    const untouchedSession = await createSession(principal, { userAgent: 'mfa-step-up-untouched' })
+    const recoverySession = await createSession(principal, { userAgent: 'mfa-step-up-recovery' })
+    const nextTotpCode = generateTotp(enrollmentSecret, { timestampMs: Date.now() + 30_000 })
+
+    const totpResult = await stepUpMfaSession(totpSession.principal, nextTotpCode)
+    expect(totpResult.method).toBe('totp')
+    expect(totpResult.verifiedAt).toBeInstanceOf(Date)
+
+    await expect(stepUpMfaSession(untouchedSession.principal, nextTotpCode))
+      .rejects.toMatchObject({ code: 'MFA_CODE_INVALID' } satisfies Partial<MfaError>)
+
+    const recoveryResult = await stepUpMfaSession(recoverySession.principal, secondRecoveryCode)
+    expect(recoveryResult.method).toBe('recovery_code')
+
+    await expect(stepUpMfaSession(untouchedSession.principal, secondRecoveryCode))
+      .rejects.toMatchObject({ code: 'MFA_CODE_INVALID' } satisfies Partial<MfaError>)
+
+    const sessions = await tenantTransaction(pool, tenantId, (client) => client.query<{
+      id: string
+      authentication_level: string
+      mfa_verified_at: Date | null
+      mfa_method: string | null
+    }>(
+      `select id, authentication_level, mfa_verified_at, mfa_method
+       from user_sessions
+       where tenant_id = $1 and id = any($2::uuid[])`,
+      [tenantId, [totpSession.principal.sessionId, untouchedSession.principal.sessionId, recoverySession.principal.sessionId]],
+    ))
+    const sessionsById = new Map(sessions.rows.map((row) => [row.id, row]))
+    expect(sessionsById.get(totpSession.principal.sessionId)).toMatchObject({
+      authentication_level: 'mfa',
+      mfa_method: 'totp',
+    })
+    expect(sessionsById.get(totpSession.principal.sessionId)?.mfa_verified_at).toBeInstanceOf(Date)
+    expect(sessionsById.get(recoverySession.principal.sessionId)).toMatchObject({
+      authentication_level: 'mfa',
+      mfa_method: 'recovery_code',
+    })
+    expect(sessionsById.get(recoverySession.principal.sessionId)?.mfa_verified_at).toBeInstanceOf(Date)
+    expect(sessionsById.get(untouchedSession.principal.sessionId)).toMatchObject({
+      authentication_level: 'password',
+      mfa_verified_at: null,
+      mfa_method: null,
+    })
+
+    const audits = await tenantTransaction(pool, tenantId, (client) => client.query<{
+      result: string
+      entity_id: string | null
+    }>(
+      `select result, entity_id
+       from audit_logs
+       where tenant_id = $1 and action = 'auth.mfa.step_up'`,
+      [tenantId],
+    ))
+    expect(audits.rows.filter((row) => row.result === 'success').map((row) => row.entity_id))
+      .toEqual(expect.arrayContaining([totpSession.principal.sessionId, recoverySession.principal.sessionId]))
+    expect(audits.rows.filter((row) => row.result === 'failure')).toHaveLength(2)
   })
 
   it('enforces tenant isolation and database identity constraints', async () => {

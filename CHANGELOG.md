@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.3 - 2026-09-02
+
+### Correções
+
+- O atalho **Acessar como usuário** permanece visível para usuários internos elegíveis mesmo quando a confirmação recente de MFA expira.
+- O Portal Empresa Lab passa a exibir o atalho de acesso assistido no próprio cabeçalho imersivo.
+- O modal solicita uma nova confirmação de MFA, por autenticador ou código de recuperação, sem encerrar a sessão; o servidor continua exigindo MFA confirmado nos últimos 15 minutos antes de listar alvos ou iniciar a representação.
+- A confirmação adicional atualiza somente a sessão autenticada, com proteção contra repetição, limite de tentativas e auditoria.
+
+### Implantação
+
+- Versão do pacote: `1.3.3`.
+- Release somente de aplicação; não adiciona migration e mantém o schema em `0087_employee_portal_memberships.sql`.
+
 ## 1.3.2 - 2026-09-02
 
 ### Correções

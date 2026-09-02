@@ -2,7 +2,7 @@
 
 > Arquivo gerado por `npm run inventory:features`. Nao editar manualmente.
 
-Paginas encontradas: **65**. Rotas de API encontradas: **244**.
+Paginas encontradas: **65**. Rotas de API encontradas: **245**.
 
 ## Paginas
 
@@ -127,6 +127,7 @@ Paginas encontradas: **65**. Rotas de API encontradas: **244**.
 | `/api/auth/mfa/enroll` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/auth/mfa/recovery-codes` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/auth/mfa/status` | `GET` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
+| `/api/auth/mfa/step-up` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/auth/mfa/verify` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/auth/password-reset/confirm` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |
 | `/api/auth/password-reset/request` | `POST` | `Guard do servidor` | `Build e inventario; fluxo individual pendente` |

@@ -270,7 +270,7 @@ Essas são ações operacionais diretas. Duas ações pertencem formalmente ao c
 
 ## 14. Usar o acesso assistido
 
-O consultor com a permissão **Acessar como usuario corporativo** e MFA recente encontra **Acessar como usuário** no menu do cabeçalho ou na lista de usuários.
+O consultor com a permissão **Acessar como usuario corporativo** encontra **Acessar como usuário** no menu do cabeçalho, na lista de usuários e no cabeçalho do **Portal Empresa Lab**. Se a última confirmação de MFA tiver mais de 15 minutos, o atalho continua visível e o próprio modal solicita o código do autenticador ou um código de recuperação antes de liberar a busca.
 
 No modal **Acessar como usuário**:
 
@@ -307,6 +307,7 @@ Na operação assistida:
 | autorizador não aparece na regra | aguarde **Ativo** e **Disponível**; convite pendente não entra na regra |
 | remoção retorna conflito | reatribua ou delegue as aprovações pendentes antes de remover |
 | consultor não vê uma empresa | ajuste **Escopo de acesso** do usuário interno |
+| **Acessar como usuário** não aparece | confirme o papel interno elegível e a permissão `gerenciar_personificacoes`; MFA vencido não oculta o atalho e será solicitado no modal |
 | **Operação assistida** está indisponível | selecione a empresa e confirme que consultor e pessoa representada possuem as permissões exigidas nela |
 
 ## Plano de atualização dos prints

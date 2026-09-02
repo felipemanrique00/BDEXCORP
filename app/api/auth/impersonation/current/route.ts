@@ -21,10 +21,20 @@ export async function GET(request: Request) {
     platformAdmin: principal.platformAdmin,
     user: principal.user,
   }
-  return NextResponse.json({
-    ok: true,
-    actor,
-    representation: currentRepresentation(principal),
-    canStartRepresentation: !principal.representation && canManageImpersonations(principal) && hasRecentActorMfa(principal),
-  })
+  const canStartRepresentation = !principal.representation && canManageImpersonations(principal)
+  return NextResponse.json(
+    {
+      ok: true,
+      actor,
+      representation: currentRepresentation(principal),
+      canStartRepresentation,
+      impersonationMfaRequired: canStartRepresentation && !hasRecentActorMfa(principal),
+    },
+    {
+      headers: {
+        'X-Request-Id': guard.requestId,
+        'Cache-Control': 'no-store, private',
+      },
+    },
+  )
 }

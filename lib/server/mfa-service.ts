@@ -13,9 +13,10 @@ import {
   loadPrincipalForAuthenticatedUser,
   type RequestSecurityMetadata,
 } from '@/lib/server/auth-service'
-import { writeAuditEvent } from '@/lib/server/audit-log'
+import { writeAuditEvent, writeAuditEventInTransaction } from '@/lib/server/audit-log'
 import { withTenantTransaction } from '@/lib/server/database'
 import { getServerEnvironment, isLocalMfaBypassEnabled } from '@/lib/server/environment'
+import { canManageImpersonations } from '@/lib/server/impersonation-service'
 import type { RequestPrincipal } from '@/lib/server/request-context'
 import {
   buildTotpUri,
@@ -81,6 +82,11 @@ export interface MfaVerificationResult {
   recoveryCodes?: string[]
 }
 
+export interface MfaStepUpResult {
+  method: MfaMethodUsed
+  verifiedAt: Date
+}
+
 export interface MfaStatus {
   required: boolean
   enabled: boolean
@@ -98,7 +104,9 @@ export class MfaError extends Error {
       | 'MFA_ENROLLMENT_NOT_STARTED'
       | 'MFA_CODE_INVALID'
       | 'MFA_NOT_ENABLED'
-      | 'MFA_ACCOUNT_INACTIVE',
+      | 'MFA_ACCOUNT_INACTIVE'
+      | 'MFA_STEP_UP_DENIED'
+      | 'MFA_SESSION_INVALID',
     readonly status = 400,
   ) {
     super(message)
@@ -405,6 +413,122 @@ export async function verifyMfaChallenge(
     method: transactionResult.method,
     verifiedAt,
     recoveryCodes: transactionResult.recoveryCodes,
+  }
+}
+
+export async function stepUpMfaSession(
+  principal: RequestPrincipal,
+  codeInput: string,
+  metadata: RequestSecurityMetadata = {},
+): Promise<MfaStepUpResult> {
+  try {
+    if (principal.representation || !canManageImpersonations(principal)) {
+      throw new MfaError(
+        'Esta conta nao pode confirmar MFA para personificacao.',
+        'MFA_STEP_UP_DENIED',
+        403,
+      )
+    }
+    if (!UUID_PATTERN.test(principal.sessionId)) {
+      throw new MfaError('A sessao atual nao e valida.', 'MFA_SESSION_INVALID', 401)
+    }
+
+    const verifiedAt = new Date()
+    return await withTenantTransaction(principal.tenantId, async (client) => {
+      const methodResult = await client.query<MfaMethodRow>(
+        `select *
+         from user_mfa_methods
+         where tenant_id = $1
+           and membership_id = $2
+           and user_id = $3
+           and method = 'totp'
+         for update`,
+        [principal.tenantId, principal.membershipId, principal.user.id],
+      )
+      const method = methodResult.rows[0]
+      if (!method || method.status !== 'enabled') {
+        throw new MfaError('O autenticador ainda nao esta ativo.', 'MFA_NOT_ENABLED', 409)
+      }
+
+      const verification = await verifyCode(client, method, codeInput, 'login')
+      if (!verification.ok) {
+        throw new MfaError('Codigo de verificacao invalido.', 'MFA_CODE_INVALID', 401)
+      }
+
+      if (verification.method === 'totp') {
+        const consumed = await client.query(
+          `update user_mfa_methods
+           set last_used_step = $3
+           where tenant_id = $1
+             and id = $2
+             and (last_used_step is null or last_used_step < $3)`,
+          [principal.tenantId, method.id, verification.step],
+        )
+        if (consumed.rowCount !== 1) {
+          throw new MfaError('Codigo de verificacao invalido.', 'MFA_CODE_INVALID', 401)
+        }
+      } else {
+        const consumed = await client.query(
+          `update user_mfa_recovery_codes
+           set used_at = $3
+           where tenant_id = $1 and id = $2 and used_at is null`,
+          [principal.tenantId, verification.recoveryCodeId, verifiedAt],
+        )
+        if (consumed.rowCount !== 1) {
+          throw new MfaError('Codigo de verificacao invalido.', 'MFA_CODE_INVALID', 401)
+        }
+      }
+
+      const session = await client.query(
+        `update user_sessions
+         set authentication_level = 'mfa',
+             mfa_verified_at = $5,
+             mfa_method = $6
+         where id = $1
+           and tenant_id = $2
+           and membership_id = $3
+           and user_id = $4
+           and status = 'active'
+           and expires_at > now()
+           and active_impersonation_id is null`,
+        [
+          principal.sessionId,
+          principal.tenantId,
+          principal.membershipId,
+          principal.user.id,
+          verifiedAt,
+          verification.method,
+        ],
+      )
+      if (session.rowCount !== 1) {
+        throw new MfaError('A sessao atual nao e valida.', 'MFA_SESSION_INVALID', 401)
+      }
+
+      await writeAuditEventInTransaction(client, {
+        action: 'auth.mfa.step_up',
+        result: 'success',
+        tenantId: principal.tenantId,
+        actorUserId: principal.user.id,
+        requestId: metadata.requestId,
+        entityType: 'user_session',
+        entityId: principal.sessionId,
+        ipAddress: metadata.ipAddress,
+        userAgent: metadata.userAgent,
+        metadata: { method: verification.method },
+      })
+      return { method: verification.method, verifiedAt }
+    })
+  } catch (error) {
+    if (error instanceof MfaError) {
+      await writeMfaFailure(
+        error,
+        principal.tenantId,
+        principal.user.id,
+        metadata,
+        'auth.mfa.step_up',
+      )
+    }
+    throw error
   }
 }
 

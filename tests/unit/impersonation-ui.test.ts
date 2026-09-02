@@ -6,6 +6,7 @@ import {
   listImpersonationTargets,
   parseImpersonationSessionPayload,
   startImpersonation,
+  stepUpImpersonationMfa,
 } from '@/lib/impersonation-client'
 
 const sourcePaths = [
@@ -22,6 +23,7 @@ describe('impersonation UI contract', () => {
   it('parses the actor and represented subject from the authenticated session', () => {
     const state = parseImpersonationSessionPayload({
       canStartRepresentation: false,
+      impersonationMfaRequired: true,
       actor: {
         membershipId: 'actor-membership',
         roleKey: 'agent',
@@ -51,6 +53,7 @@ describe('impersonation UI contract', () => {
     expect(state.actor?.user.id).toBe('actor-user')
     expect(state.representation?.subject.id).toBe('subject-user')
     expect(state.representation?.mode).toBe('test')
+    expect(state.impersonationMfaRequired).toBe(true)
   })
 
   it('keeps access temporary, explicit and accessible in source wiring', () => {
@@ -70,15 +73,38 @@ describe('impersonation UI contract', () => {
     expect(dialog).toContain('Empresa do atendimento *')
     expect(dialog).toContain('selectedCompanyScope.allowedActions')
     expect(dialog).toContain('companyId: selectedCompanyScope.companyId')
+    expect(dialog).toContain('Confirme o MFA para continuar')
+    expect(dialog).toContain('onSubmit={mfaRequired ? submitMfa : submit}')
+    expect(dialog).toContain('if (mfaRequired) mfaCodeRef.current?.focus()')
+    expect(dialog).toMatch(/IMPERSONATION_MFA_REQUIRED'[\s\S]*?setSubmitError\(''\)[\s\S]*?onMfaRequired\(\)/)
     expect(banner).toContain('Encerrar acesso')
     expect(provider).toMatch(/const stopRepresentation[\s\S]*?await stopImpersonation[\s\S]*?resetEffectiveSession/)
     expect(provider).toMatch(/const expireRepresentationLocally[\s\S]*?stopImpersonation[\s\S]*?resetEffectiveSession/)
     expect(provider.match(/await prepareIdentityTransition\(\)/g)).toHaveLength(1)
+    expect(provider).toContain('await stepUpImpersonationMfa(code)')
+    expect(provider).toContain("error.code === 'IMPERSONATION_MFA_REQUIRED'")
     expect(shell).toContain('persistContextSelection={!loadingRepresentation && !representation}')
     expect(context).toContain('if (!persistContextSelection)')
     expect(context).not.toContain('localStorage')
     expect(context).not.toContain('safeSet')
     expect(shellRefresh).toContain('decideSessionUserRefresh(sessionUserRef.current, session, representation)')
+  })
+
+  it('confirms recent MFA in the current session before loading representation targets', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      mfaVerifiedAt: '2026-09-02T13:00:00.000Z',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await stepUpImpersonationMfa('123456')
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/auth/mfa/step-up', expect.objectContaining({
+      cache: 'no-store',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: '123456' }),
+    }))
   })
 
   it('keeps each target action list isolated by company and accepts textual legacy company ids', async () => {

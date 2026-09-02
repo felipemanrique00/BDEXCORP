@@ -10,6 +10,7 @@ import {
   RefreshCw,
   ShieldCheck,
   TicketCheck,
+  UserRoundCog,
 } from 'lucide-react'
 import Link from 'next/link'
 import { useState, type CSSProperties, type ReactNode } from 'react'
@@ -20,6 +21,7 @@ import {
   useScopedEffectiveBranding,
 } from '@/components/branding/effective-branding-provider'
 import { useCorporateContext } from '@/components/corporate-context-provider'
+import { useImpersonation } from '@/components/impersonation/impersonation-provider'
 import { hasPermission, logout } from '@/lib/auth'
 import type {
   EffectiveBranding,
@@ -90,6 +92,7 @@ export function CompanyPortalLabShell({
   // board filter or an opened request must not change its colors or logo.
   const { branding, status: brandingStatus } = useEffectiveBranding()
   const { user } = useCorporateContext()
+  const { canStartRepresentation, openDialog: openImpersonationDialog } = useImpersonation()
   const primaryForeground = readableBrandTextColor(branding.primaryColor)
   const accentForeground = readableBrandTextColor(branding.accentColor)
 
@@ -139,6 +142,19 @@ export function CompanyPortalLabShell({
                 <div className="max-w-36 truncate text-sm font-semibold xl:max-w-48" title={user.name}>{user.name}</div>
                 <div className="hidden max-w-48 truncate text-[11px] xl:block" title={user.email}>{user.email}</div>
               </div>
+            )}
+            {canStartRepresentation && (
+              <button
+                type="button"
+                onClick={() => openImpersonationDialog()}
+                className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-white/40 bg-white/90 px-3 text-sm font-semibold text-slate-700 shadow-sm outline-none transition hover:bg-white focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-transparent"
+                aria-label="Acessar como usuário"
+                title="Acessar como usuário"
+                data-company-portal-impersonation-launcher
+              >
+                <UserRoundCog className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden xl:inline">Acessar como</span>
+              </button>
             )}
             <CompanyPortalLogoutButton user={user} />
             <div

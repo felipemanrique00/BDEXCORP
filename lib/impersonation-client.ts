@@ -60,6 +60,7 @@ export interface ImpersonationSessionState {
   actor: ImpersonationActorSession | null
   representation: ImpersonationRepresentation | null
   canStartRepresentation: boolean
+  impersonationMfaRequired: boolean
 }
 
 export interface ImpersonationTargetResult {
@@ -151,12 +152,21 @@ export async function stopImpersonation(reason?: string): Promise<void> {
   })
 }
 
+export async function stepUpImpersonationMfa(code: string): Promise<void> {
+  await impersonationRequest('/api/auth/mfa/step-up', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: code.trim() }),
+  })
+}
+
 export function parseImpersonationSessionPayload(payload: unknown): ImpersonationSessionState {
   const record = object(payload)
   return {
     actor: parseActorSession(record.actor),
     representation: parseRepresentation(record.representation),
     canStartRepresentation: record.canStartRepresentation === true,
+    impersonationMfaRequired: record.impersonationMfaRequired === true,
   }
 }
 

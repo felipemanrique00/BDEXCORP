@@ -128,7 +128,8 @@ As acoes permitidas sao a intersecao por empresa entre ator real e usuario repre
 - `GET/POST /api/users`: lista, convida ou associa uma identidade existente;
 - `PATCH/DELETE /api/users/:id`: atualiza ou desativa com protecao de escopo;
 - `GET/POST/DELETE /api/companies/:companyId/approvers`: lista o diretorio, atribui/reenvia e remove a funcao de autorizador;
-- `/api/auth/impersonation/**`: lista alvos, inicia, consulta e encerra representacao assistida.
+- `/api/auth/impersonation/**`: lista alvos, inicia, consulta e encerra representacao assistida;
+- `POST /api/auth/mfa/step-up`: renova a confirmacao de MFA somente na sessao atual antes do acesso assistido.
 
 Todas usam sessao opaca, tenant da sessao, Zod, rate limit, auditoria e transacoes. O seletor do header permite alternar entre empresa e grupo sem novo login. O `localStorage` guarda somente a ultima escolha visual.
 

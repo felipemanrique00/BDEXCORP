@@ -13,6 +13,7 @@ import {
   Check,
   Clock3,
   Eye,
+  KeyRound,
   Loader2,
   Search,
   ShieldAlert,
@@ -21,6 +22,7 @@ import {
 } from 'lucide-react'
 
 import {
+  ImpersonationClientError,
   listImpersonationTargets,
   type ImpersonationMode,
   type ImpersonationTarget,
@@ -30,8 +32,11 @@ import {
 interface ImpersonationDialogProps {
   open: boolean
   presetTarget: ImpersonationTarget | null
+  mfaRequired: boolean
   onClose: () => void
   onStart: (input: StartImpersonationInput) => Promise<void>
+  onConfirmMfa: (code: string) => Promise<void>
+  onMfaRequired: () => void
 }
 
 const FOCUSABLE = [
@@ -43,12 +48,21 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
-export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: ImpersonationDialogProps) {
+export function ImpersonationDialog({
+  open,
+  presetTarget,
+  mfaRequired,
+  onClose,
+  onStart,
+  onConfirmMfa,
+  onMfaRequired,
+}: ImpersonationDialogProps) {
   const titleId = useId()
   const descriptionId = useId()
   const listboxId = useId()
   const dialogRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const mfaCodeRef = useRef<HTMLInputElement>(null)
   const reasonRef = useRef<HTMLTextAreaElement>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
   const [mounted, setMounted] = useState(false)
@@ -65,6 +79,9 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
   const [confirmed, setConfirmed] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
+  const [mfaCode, setMfaCode] = useState('')
+  const [confirmingMfa, setConfirmingMfa] = useState(false)
+  const [mfaError, setMfaError] = useState('')
   const selectedCompanyScope = selectedTarget?.companyScopes.find((scope) => scope.companyId === selectedCompanyId) || null
   const operateAvailable = Boolean(selectedCompanyScope?.allowedActions.length)
 
@@ -80,6 +97,9 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
     setActiveIndex(0)
     setSearchError('')
     setSubmitError('')
+    setMfaCode('')
+    setMfaError('')
+    setConfirmingMfa(false)
     setMode('test')
     setReason('')
     setReference('')
@@ -89,7 +109,8 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     const focusTimer = window.setTimeout(() => {
-      searchRef.current?.focus()
+      const initialFocus = mfaCodeRef.current || searchRef.current
+      initialFocus?.focus()
     }, 0)
     return () => {
       window.clearTimeout(focusTimer)
@@ -99,7 +120,11 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
   }, [open, presetTarget])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || mfaRequired) {
+      setTargets([])
+      setSearching(false)
+      return
+    }
     const cleanQuery = query.trim()
     if (!cleanQuery) {
       setTargets([])
@@ -132,6 +157,11 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
         .catch((error) => {
           if (error instanceof DOMException && error.name === 'AbortError') return
           setTargets([])
+          if (error instanceof ImpersonationClientError && error.code === 'IMPERSONATION_MFA_REQUIRED') {
+            setSearchError('')
+            onMfaRequired()
+            return
+          }
           setSearchError(error instanceof Error ? error.message : 'Falha ao buscar usuários.')
         })
         .finally(() => {
@@ -142,10 +172,19 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [open, presetTarget, query])
+  }, [mfaRequired, onMfaRequired, open, presetTarget, query])
+
+  useEffect(() => {
+    if (!open) return
+    const focusTimer = window.setTimeout(() => {
+      if (mfaRequired) mfaCodeRef.current?.focus()
+      else searchRef.current?.focus()
+    }, 0)
+    return () => window.clearTimeout(focusTimer)
+  }, [mfaRequired, open])
 
   function handleDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === 'Escape' && !submitting) {
+    if (event.key === 'Escape' && !submitting && !confirmingMfa) {
       event.preventDefault()
       onClose()
       return
@@ -228,8 +267,37 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
         ...(cleanReference ? { reference: cleanReference } : {}),
       })
     } catch (error) {
+      if (error instanceof ImpersonationClientError && error.code === 'IMPERSONATION_MFA_REQUIRED') {
+        setSubmitError('')
+        onMfaRequired()
+        setSubmitting(false)
+        return
+      }
       setSubmitError(error instanceof Error ? error.message : 'Não foi possível iniciar o acesso assistido.')
       setSubmitting(false)
+    }
+  }
+
+  async function submitMfa(event: FormEvent) {
+    event.preventDefault()
+    const code = mfaCode.trim()
+    setMfaError('')
+    if (code.length < 6) {
+      setMfaError('Informe o código do autenticador ou um código de recuperação.')
+      mfaCodeRef.current?.focus()
+      return
+    }
+    setConfirmingMfa(true)
+    try {
+      await onConfirmMfa(code)
+      setMfaCode('')
+      setMfaError('')
+      setSubmitError('')
+      setConfirmingMfa(false)
+    } catch (error) {
+      setMfaError(error instanceof Error ? error.message : 'Não foi possível confirmar o MFA.')
+      setConfirmingMfa(false)
+      mfaCodeRef.current?.focus()
     }
   }
 
@@ -239,7 +307,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
     <div
       className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:items-center sm:p-4"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !submitting) onClose()
+        if (event.target === event.currentTarget && !submitting && !confirmingMfa) onClose()
       }}
     >
       <div
@@ -264,7 +332,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
           <button
             type="button"
             onClick={onClose}
-            disabled={submitting}
+            disabled={submitting || confirmingMfa}
             className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-bbt-accent dark:hover:bg-slate-800"
             aria-label="Fechar acesso assistido"
           >
@@ -272,7 +340,57 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
           </button>
         </div>
 
-        <form onSubmit={submit} className="space-y-5 px-5 py-5 sm:px-6">
+        <form onSubmit={mfaRequired ? submitMfa : submit} className="space-y-5 px-5 py-5 sm:px-6">
+          {mfaRequired && (
+            <section className="space-y-4" aria-labelledby={`${titleId}-mfa`}>
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+                <div className="flex items-start gap-3">
+                  <KeyRound className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+                  <div>
+                    <h3 id={`${titleId}-mfa`} className="font-bold">Confirme o MFA para continuar</h3>
+                    <p className="mt-1 text-xs leading-relaxed">
+                      Por segurança, a personificação exige uma confirmação feita nos últimos 15 minutos. O acesso continuará visível quando esse prazo terminar.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label htmlFor={`${titleId}-mfa-code`} className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-300">
+                  Código do autenticador ou de recuperação
+                </label>
+                <input
+                  ref={mfaCodeRef}
+                  id={`${titleId}-mfa-code`}
+                  value={mfaCode}
+                  onChange={(event) => {
+                    setMfaCode(event.target.value.slice(0, 32))
+                    setMfaError('')
+                  }}
+                  autoComplete="one-time-code"
+                  minLength={6}
+                  maxLength={32}
+                  required
+                  disabled={confirmingMfa}
+                  className="bbt-input mt-2 h-11"
+                  placeholder="000000"
+                />
+              </div>
+              {mfaError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300" role="alert">
+                  {mfaError}
+                </div>
+              )}
+              <div className="flex flex-col-reverse gap-2 border-t border-slate-200 pt-4 dark:border-slate-700 sm:flex-row sm:justify-end">
+                <button type="button" onClick={onClose} disabled={confirmingMfa} className="bbt-button-ghost min-h-11">Cancelar</button>
+                <button type="submit" disabled={confirmingMfa || mfaCode.trim().length < 6} className="bbt-button-primary min-h-11">
+                  {confirmingMfa ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
+                  {confirmingMfa ? 'Confirmando...' : 'Confirmar MFA'}
+                </button>
+              </div>
+            </section>
+          )}
+
+          <fieldset disabled={mfaRequired} className={mfaRequired ? 'hidden' : 'contents'}>
           <section aria-labelledby={`${titleId}-target`}>
             <label id={`${titleId}-target`} htmlFor={`${titleId}-search`} className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-300">
               Usuário da empresa
@@ -457,6 +575,7 @@ export function ImpersonationDialog({ open, presetTarget, onClose, onStart }: Im
               {submitting ? 'Iniciando...' : mode === 'test' ? 'Iniciar teste' : 'Iniciar operação'}
             </button>
           </div>
+          </fieldset>
         </form>
       </div>
     </div>,

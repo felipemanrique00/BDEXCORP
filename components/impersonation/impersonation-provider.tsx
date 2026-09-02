@@ -17,6 +17,7 @@ import {
   fetchImpersonationSessionState,
   ImpersonationClientError,
   startImpersonation,
+  stepUpImpersonationMfa,
   stopImpersonation,
   type ImpersonationRepresentation,
   type ImpersonationTarget,
@@ -31,10 +32,13 @@ import { clearCachedUserDirectory } from '@/lib/user-directory-client'
 interface ImpersonationContextValue {
   representation: ImpersonationRepresentation | null
   canStartRepresentation: boolean
+  impersonationMfaRequired: boolean
   loading: boolean
   stopping: boolean
   openDialog: (target?: ImpersonationTarget | null) => void
   closeDialog: () => void
+  confirmMfa: (code: string) => Promise<void>
+  requireMfa: () => void
   stopRepresentation: () => Promise<void>
 }
 
@@ -43,6 +47,7 @@ const ImpersonationContext = createContext<ImpersonationContextValue | null>(nul
 export function ImpersonationProvider({ children }: { children: React.ReactNode }) {
   const [representation, setRepresentation] = useState<ImpersonationRepresentation | null>(null)
   const [canStartRepresentation, setCanStartRepresentation] = useState(false)
+  const [impersonationMfaRequired, setImpersonationMfaRequired] = useState(false)
   const [loading, setLoading] = useState(true)
   const [stopping, setStopping] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -55,10 +60,12 @@ export function ImpersonationProvider({ children }: { children: React.ReactNode 
       .then((state) => {
         setRepresentation(state.representation)
         setCanStartRepresentation(state.canStartRepresentation)
+        setImpersonationMfaRequired(state.impersonationMfaRequired)
       })
       .catch((error) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
         setCanStartRepresentation(false)
+        setImpersonationMfaRequired(false)
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
@@ -83,9 +90,25 @@ export function ImpersonationProvider({ children }: { children: React.ReactNode 
     if (!await prepareIdentityTransition()) {
       throw new Error('A sincronização local precisa terminar antes de alterar a identidade da sessão.')
     }
-    await startImpersonation(input)
-    resetEffectiveSession()
+    try {
+      await startImpersonation(input)
+      resetEffectiveSession()
+    } catch (error) {
+      if (error instanceof ImpersonationClientError && error.code === 'IMPERSONATION_MFA_REQUIRED') {
+        setImpersonationMfaRequired(true)
+      }
+      throw error
+    }
   }, [prepareIdentityTransition, resetEffectiveSession])
+
+  const confirmMfa = useCallback(async (code: string) => {
+    await stepUpImpersonationMfa(code)
+    setImpersonationMfaRequired(false)
+  }, [])
+
+  const requireMfa = useCallback(() => {
+    setImpersonationMfaRequired(true)
+  }, [])
 
   const stopRepresentation = useCallback(async () => {
     if (stoppingRef.current) return
@@ -131,6 +154,7 @@ export function ImpersonationProvider({ children }: { children: React.ReactNode 
   const value = useMemo<ImpersonationContextValue>(() => ({
     representation,
     canStartRepresentation: canStartRepresentation && !representation,
+    impersonationMfaRequired: impersonationMfaRequired && !representation,
     loading,
     stopping,
     openDialog: (target = null) => {
@@ -141,8 +165,10 @@ export function ImpersonationProvider({ children }: { children: React.ReactNode 
       setDialogOpen(false)
       setPresetTarget(null)
     },
+    confirmMfa,
+    requireMfa,
     stopRepresentation,
-  }), [canStartRepresentation, loading, representation, stopRepresentation, stopping])
+  }), [canStartRepresentation, confirmMfa, impersonationMfaRequired, loading, representation, requireMfa, stopRepresentation, stopping])
 
   return (
     <ImpersonationContext.Provider value={value}>
@@ -150,11 +176,14 @@ export function ImpersonationProvider({ children }: { children: React.ReactNode 
       <ImpersonationDialog
         open={dialogOpen}
         presetTarget={presetTarget}
+        mfaRequired={impersonationMfaRequired}
         onClose={() => {
           setDialogOpen(false)
           setPresetTarget(null)
         }}
         onStart={startRepresentation}
+        onConfirmMfa={confirmMfa}
+        onMfaRequired={requireMfa}
       />
     </ImpersonationContext.Provider>
   )

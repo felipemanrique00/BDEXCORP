@@ -10,6 +10,7 @@ export interface ServerSessionState {
   actor: ImpersonationActorSession | null
   representation: ImpersonationRepresentation | null
   canStartRepresentation: boolean
+  impersonationMfaRequired: boolean
 }
 
 export interface ServerLoginResult {
@@ -41,6 +42,7 @@ const UNAVAILABLE_SESSION: ServerSessionState = {
   actor: null,
   representation: null,
   canStartRepresentation: false,
+  impersonationMfaRequired: false,
 }
 
 export async function fetchServerSession(): Promise<ServerSessionState> {
@@ -58,6 +60,7 @@ export async function fetchServerSession(): Promise<ServerSessionState> {
       actor: payload.actor || null,
       representation: payload.representation || null,
       canStartRepresentation: payload.canStartRepresentation === true,
+      impersonationMfaRequired: payload.impersonationMfaRequired === true,
     }
   } catch {
     return UNAVAILABLE_SESSION

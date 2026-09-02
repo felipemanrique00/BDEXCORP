@@ -10,6 +10,12 @@ export const dynamic = 'force-dynamic'
 export async function GET(request: Request) {
   try {
     const principal = await getSessionPrincipalFromRequest(request)
+    const canStartRepresentation = Boolean(
+      principal && !principal.representation && canManageImpersonations(principal),
+    )
+    const impersonationMfaRequired = Boolean(
+      canStartRepresentation && principal && !hasRecentActorMfa(principal),
+    )
     const actor = principal ? (principal.actor || {
       sessionId: principal.sessionId,
       membershipId: principal.membershipId,
@@ -24,9 +30,8 @@ export async function GET(request: Request) {
         user: principal?.user || null,
         actor,
         representation: principal?.representation || null,
-        canStartRepresentation: Boolean(
-          principal && !principal.representation && canManageImpersonations(principal) && hasRecentActorMfa(principal),
-        ),
+        canStartRepresentation,
+        impersonationMfaRequired,
         tenant: principal ? {
           id: principal.tenantId,
           slug: principal.tenantSlug,
@@ -39,7 +44,16 @@ export async function GET(request: Request) {
   } catch (error) {
     logError('auth_session_lookup_failed', error, { errorCode: 'AUTH_SESSION_LOOKUP_FAILED' })
     return NextResponse.json(
-      { ok: false, requireSession: true, user: null, actor: null, representation: null, canStartRepresentation: false, error: 'Servico de autenticacao indisponivel.' },
+      {
+        ok: false,
+        requireSession: true,
+        user: null,
+        actor: null,
+        representation: null,
+        canStartRepresentation: false,
+        impersonationMfaRequired: false,
+        error: 'Servico de autenticacao indisponivel.',
+      },
       { status: 503, headers: { 'Cache-Control': 'no-store, private' } },
     )
   }

@@ -49,19 +49,30 @@ describe('camada visual do Portal Empresa Lab', () => {
     expect(brandingProviderSource).toContain('resolveEffectiveBrandingScope({ context, selectedCompanyIds })')
   })
 
-  it('ordena os controles como usuário, saída e marca no extremo direito', () => {
+  it('ordena os controles como usuário, acesso assistido, saída e marca no extremo direito', () => {
     const controlsStart = chromeSource.indexOf('data-company-portal-account-controls')
     const controlsEnd = chromeSource.indexOf('</header>', controlsStart)
     const controls = chromeSource.slice(controlsStart, controlsEnd)
     const identityStart = controls.indexOf('data-company-portal-session-identity')
+    const impersonationStart = controls.indexOf('data-company-portal-impersonation-launcher')
     const logoutStart = controls.indexOf('<CompanyPortalLogoutButton')
     const brandStart = controls.indexOf('data-company-portal-customer-brand')
 
     expect(controlsStart).toBeGreaterThan(-1)
     expect(identityStart).toBeGreaterThan(-1)
-    expect(identityStart).toBeLessThan(logoutStart)
+    expect(identityStart).toBeLessThan(impersonationStart)
+    expect(impersonationStart).toBeLessThan(logoutStart)
     expect(logoutStart).toBeLessThan(brandStart)
     expect(controls.slice(identityStart, logoutStart)).not.toContain('opacity-')
+  })
+
+  it('expõe o acesso assistido no chrome imersivo somente quando o provider permite iniciar', () => {
+    expect(chromeSource).toContain("import { useImpersonation } from '@/components/impersonation/impersonation-provider'")
+    expect(chromeSource).toContain('const { canStartRepresentation, openDialog: openImpersonationDialog } = useImpersonation()')
+    expect(chromeSource).toContain('{canStartRepresentation && (')
+    expect(chromeSource).toContain('onClick={() => openImpersonationDialog()}')
+    expect(chromeSource).toContain('data-company-portal-impersonation-launcher')
+    expect(chromeSource).toContain('aria-label="Acessar como usuário"')
   })
 
   it.each([

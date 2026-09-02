@@ -244,12 +244,20 @@ Os endpoints `/api/auth/impersonation/**` aceitam como ator somente papeis
 internos elegiveis (`tenant_admin`, `supervisor`, `agent` ou `operator`) com
 `gerenciar_personificacoes` e MFA confirmado nos ultimos 15 minutos.
 
+Na sessao, `canStartRepresentation` informa a elegibilidade do ator e permanece
+verdadeiro mesmo quando a confirmacao recente expirou.
+`impersonationMfaRequired` informa que uma nova confirmacao deve ser feita antes
+de listar alvos ou iniciar o acesso assistido.
+
 - `GET /api/auth/impersonation/targets?q=...&limit=20`: lista usuarios
   corporativos compartilhados. Cada item contem `companyScopes` com
   `companyId`, rotulo e `allowedActions` calculadas para aquela empresa.
+- `POST /api/auth/mfa/step-up`: confirma TOTP ou codigo de recuperacao e eleva
+  somente a sessao autenticada para o acesso assistido. Exige CSRF, permissao,
+  papel interno elegivel e limita as tentativas.
 - `POST /api/auth/impersonation/start`: inicia uma representacao.
 - `GET /api/auth/impersonation/current`: retorna ator, representacao atual e
-  `canStartRepresentation`.
+  os indicadores `canStartRepresentation` e `impersonationMfaRequired`.
 - `POST /api/auth/impersonation/stop`: encerra a representacao; e permitido
   mesmo durante o contexto representado.
 

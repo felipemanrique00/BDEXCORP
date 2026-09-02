@@ -719,6 +719,7 @@ const ROUTE_ACTION_OVERRIDES: Readonly<Record<string, AuthorizationAction>> = {
   'POST /api/auth/change-password': 'update',
   'POST /api/auth/logout': 'delete',
   'POST /api/auth/mfa/recovery-codes': 'update',
+  'POST /api/auth/mfa/step-up': 'update',
 }
 
 function resolveCompanyScope(
