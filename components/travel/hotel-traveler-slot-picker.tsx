@@ -16,7 +16,7 @@ import {
   type TravelerProfileDialogSubmission,
 } from '@/components/travel/traveler-profile-dialog'
 import {
-  airPassengerProfileIssueLabel,
+  airPassengerProfileIssueMessage,
   normalizeAirPassengerProfileIssues,
   type AirPassengerProfileIssue,
 } from '@/lib/air-demand/passenger-selection'
@@ -457,7 +457,7 @@ export function HotelTravelerSlotPicker(props: HotelTravelerSlotPickerProps) {
         <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-live="polite">
           {selectedIssues.map((issue) => (
             <span key={issue} className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
-              <AlertTriangle className="h-3 w-3" aria-hidden="true" /> Falta {airPassengerProfileIssueLabel(issue)}
+              <AlertTriangle className="h-3 w-3" aria-hidden="true" /> {airPassengerProfileIssueMessage(issue)}
             </span>
           ))}
           {editableIssues.length > 0 && props.capabilities.canComplete ? (

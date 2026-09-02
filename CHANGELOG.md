@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.2 - 2026-09-02
+
+### Correções
+
+- A pendência de CPF do viajante passa a informar `CPF ausente ou inválido`, evitando classificar um documento preenchido com dígitos verificadores inválidos como ausente.
+- O formulário de complementação esclarece que pode corrigir informações ausentes ou inválidas, mantendo a validação estrita do CPF no backend.
+- A mesma orientação é exibida nos seletores de viajantes dos fluxos aéreo e hoteleiro.
+
+### Implantação
+
+- Versão do pacote: `1.3.2`.
+- Release somente de aplicação; não adiciona migration e mantém o schema em `0087_employee_portal_memberships.sql`.
+
 ## 1.3.1 - 2026-08-28
 
 ### Correções

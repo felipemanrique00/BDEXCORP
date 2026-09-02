@@ -135,7 +135,7 @@ export function TravelerProfileDialog({
             <p className="mt-1 text-xs leading-5 opacity-80">
               {mode === 'create'
                 ? 'A empresa fica travada no contexto da solicitação. CPF e nascimento não aparecem na lista de busca.'
-                : 'Somente as informações ausentes podem ser incluídas por este formulário.'}
+                : 'Somente as informações ausentes ou inválidas podem ser corrigidas por este formulário.'}
             </p>
           </div>
         </div>

@@ -62,8 +62,8 @@ describe('offline ground quote endpoint policy wiring', () => {
           service_type: 'rodoviario',
           lifecycle_status: 'submitted',
           lifecycle_version: 1,
-          travel_start_date: '2026-09-01',
-          travel_end_date: '2026-09-01',
+          travel_start_date: '2099-09-01',
+          travel_end_date: '2099-09-01',
           destination: 'Rio de Janeiro',
         }] }
       }
@@ -79,7 +79,7 @@ describe('offline ground quote endpoint policy wiring', () => {
           destination_terminal_id: null,
           valid_from: null,
           valid_until: null,
-          departure_date: '2026-09-01',
+          departure_date: '2099-09-01',
           earliest_departure: null,
           latest_departure: null,
         }] }
@@ -215,8 +215,8 @@ function busQuoteInput() {
           routeId: UUID.route,
           originCityId: UUID.origin,
           destinationCityId: UUID.destination,
-          departsAt: '2026-09-01T08:00:00-03:00',
-          arrivesAt: '2026-09-01T16:00:00-03:00',
+          departsAt: '2099-09-01T08:00:00-03:00',
+          arrivesAt: '2099-09-01T16:00:00-03:00',
           className: 'Executivo',
           metadata: {},
         }],

@@ -91,6 +91,12 @@ export function airPassengerProfileIssueLabel(issue: AirPassengerProfileIssue): 
   return 'último nome'
 }
 
+export function airPassengerProfileIssueMessage(issue: AirPassengerProfileIssue): string {
+  return issue === 'cpf'
+    ? 'CPF ausente ou inválido'
+    : `Falta ${airPassengerProfileIssueLabel(issue)}`
+}
+
 function normalizeProfileIssue(value: string): AirPassengerProfileIssue | null {
   const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_')
   if (['cpf', 'document', 'document_number', 'tax_document'].includes(normalized)) return 'cpf'
